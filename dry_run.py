@@ -101,8 +101,9 @@ async def run(token: str, cfg: dict, no_count: bool) -> None:
             lines.append("=" * 50)
 
         output = "\n".join(lines) + "\n"
+        print(output)
         OUTPUT_FILE.write_text(output, encoding="utf-8")
-        print(f"\n結果を {OUTPUT_FILE} に出力しました")
+        print(f"結果を {OUTPUT_FILE} に出力しました")
         await client.close()
 
     try:
