@@ -65,14 +65,24 @@ CREATE TABLE crawl_state (
 
 ```sql
 CREATE TABLE chunk_index (
-    chunk_id         TEXT PRIMARY KEY, -- MD5(anchor_msg_id + window_before + window_after)
-    anchor_msg_id    TEXT NOT NULL,
-    dify_doc_id      TEXT,             -- Dify側のドキュメントID（upload後に設定）
-    status           TEXT DEFAULT 'pending', -- 'pending' | 'indexed' | 'error'
-    indexed_at       TEXT,
-    error_message    TEXT
+    chunk_id      TEXT PRIMARY KEY, -- MD5(anchor_msg_id:window_before:window_after)
+    anchor_msg_id TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,    -- uploader.py がウィンドウ参照に使用
+    chunk_text    TEXT NOT NULL,    -- タイムスタンプ付き JST テキスト（uploader.py がそのまま POST）
+    dify_doc_id   TEXT,             -- Dify側のドキュメントID（upload後に設定）
+    status        TEXT DEFAULT 'pending', -- 'pending' | 'indexed' | 'error'
+    indexed_at    TEXT,
+    error_message TEXT
 );
 ```
+
+> **chunk_text のフォーマット：**
+> ```
+> [2024-05-03 21:13] UserA: 明日の飲み会どこ？
+> [2024-05-03 21:14] UserB: 渋谷の居酒屋だよ！
+> [2024-05-03 21:15] UserA: わかった、じゃあ参加する [添付ファイルあり]
+> ```
+> タイムスタンプは `config.yml` の `timezone_offset`（デフォルト 9 = JST）で UTC から変換。
 
 ### run_log（実行ログ）
 
