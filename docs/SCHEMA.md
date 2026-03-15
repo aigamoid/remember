@@ -6,20 +6,50 @@
 
 ```sql
 CREATE TABLE messages (
-    id            TEXT PRIMARY KEY,   -- Discord message ID
+    id            TEXT PRIMARY KEY,        -- Discord message ID
     channel_id    TEXT NOT NULL,
     channel_name  TEXT NOT NULL,
     author_id     TEXT NOT NULL,
     author_name   TEXT NOT NULL,
-    content       TEXT NOT NULL,
-    timestamp     TEXT NOT NULL,      -- ISO8601
-    has_attachment INTEGER DEFAULT 0, -- 0 or 1
+    content       TEXT NOT NULL DEFAULT '', -- 添付のみメッセージは空文字
+    timestamp     TEXT NOT NULL,            -- ISO8601
+    has_attachment INTEGER DEFAULT 0,       -- 0 or 1（attachmentsテーブルと対応）
     is_pinned      INTEGER DEFAULT 0,
     reaction_count INTEGER DEFAULT 0,
-    thread_id     TEXT,               -- スレッド起点でなければNULL
+    thread_id     TEXT,                     -- スレッド起点でなければNULL
     thread_name   TEXT
 );
+
+-- chunkerが頻繁に発行するクエリ用インデックス
+CREATE INDEX IF NOT EXISTS idx_messages_channel_timestamp
+    ON messages (channel_id, timestamp);
 ```
+
+### attachments（添付ファイル）
+
+```sql
+CREATE TABLE attachments (
+    id           TEXT PRIMARY KEY,   -- Discord attachment ID
+    message_id   TEXT NOT NULL,      -- messages.id への参照
+    url          TEXT NOT NULL,      -- Discord CDN URL（期限切れになっても保持）
+    filename     TEXT NOT NULL,
+    content_type TEXT,               -- 'image/png', 'video/mp4' など
+    local_path   TEXT,               -- ローカルDL時のみ設定（download_attachments: true）
+    description  TEXT,               -- 将来: multimodalモデルによるAI生成説明文
+    described_at TEXT                -- description生成日時
+);
+```
+
+> **config.yml での制御：**
+> ```yaml
+> crawl:
+>   download_attachments: false        # true にするとクロール時にローカルDL
+>   attachment_dir: "data/attachments" # DL先（download_attachments: true 時のみ使用）
+> ```
+>
+> `local_path` が NULL の場合、将来の `describer.py` は `url` からのDLを試みる（期限切れ時は skip）。
+
+---
 
 ### crawl_state（クロール進捗）
 
@@ -80,7 +110,7 @@ metadata = {
     # 発言者
     "authors":           ["UserA", "UserB"],  # チャンク内の発言者リスト
 
-    # コンテンツ属性
+    # コンテンツ属性（添付ありの場合 attachments テーブルに詳細あり）
     "has_attachment":    False,
     "is_pinned":         False,
     "reaction_count":    3,          # チャンク内の最大リアクション数
