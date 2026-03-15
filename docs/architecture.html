@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>waiwai-oracle アーキテクチャ図</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      padding: 2rem;
+    }
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 0.4rem;
+      color: #7dd3fc;
+      letter-spacing: 0.05em;
+    }
+    .subtitle {
+      font-size: 0.9rem;
+      color: #64748b;
+      margin-bottom: 2rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: #1e2330;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+    .card h2 {
+      font-size: 1rem;
+      color: #a78bfa;
+      margin-bottom: 1rem;
+      border-bottom: 1px solid #2d3748;
+      padding-bottom: 0.5rem;
+    }
+    .card.full {
+      grid-column: 1 / -1;
+    }
+    .mermaid {
+      background: transparent;
+    }
+    .phase-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    .phase-table th {
+      background: #2d3748;
+      color: #94a3b8;
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+    }
+    .phase-table td {
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid #2d3748;
+      color: #cbd5e1;
+    }
+    .phase-table tr:last-child td { border-bottom: none; }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .badge-done  { background: #166534; color: #4ade80; }
+    .badge-wip   { background: #1e3a5f; color: #60a5fa; }
+    .badge-todo  { background: #3d2a00; color: #f59e0b; }
+    .file-list {
+      list-style: none;
+      font-size: 0.875rem;
+    }
+    .file-list li {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0;
+      border-bottom: 1px solid #2d3748;
+      color: #cbd5e1;
+    }
+    .file-list li:last-child { border-bottom: none; }
+    .file-list .icon { font-size: 1rem; }
+    .file-list code {
+      background: #2d3748;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      color: #7dd3fc;
+    }
+  </style>
+</head>
+<body>
+  <h1>waiwai-oracle アーキテクチャ</h1>
+  <p class="subtitle">Discord → SQLite → Chunker → Dify Knowledge API</p>
+
+  <div class="grid">
+
+    <!-- Phase 一覧 -->
+    <div class="card">
+      <h2>フェーズ構成</h2>
+      <table class="phase-table">
+        <thead>
+          <tr><th>Phase</th><th>スクリプト</th><th>概要</th><th>状態</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>0</td>
+            <td><code>dry_run.py</code></td>
+            <td>メッセージ数カウントのみ</td>
+            <td><span class="badge badge-done">完了</span></td>
+          </tr>
+          <tr>
+            <td>1</td>
+            <td><code>crawler.py</code></td>
+            <td>Discord全メッセージ → SQLite</td>
+            <td><span class="badge badge-wip">実装中</span></td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td><code>chunker.py</code></td>
+            <td>スライディングウィンドウでチャンク生成</td>
+            <td><span class="badge badge-todo">未着手</span></td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td><code>uploader.py</code></td>
+            <td>Dify Knowledge APIへアップロード</td>
+            <td><span class="badge badge-todo">未着手</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 作成ファイル一覧 -->
+    <div class="card">
+      <h2>Phase 1 作成ファイル</h2>
+      <ul class="file-list">
+        <li><span class="icon">📄</span><code>src/models.py</code> — RawMessage dataclass</li>
+        <li><span class="icon">🗄️</span><code>src/db.py</code> — SQLite操作（init/insert/state）</li>
+        <li><span class="icon">📦</span><code>src/collectors/__init__.py</code> — パッケージ</li>
+        <li><span class="icon">🔷</span><code>src/collectors/base.py</code> — MessageCollector ABC</li>
+        <li><span class="icon">💬</span><code>src/collectors/text_channel.py</code> — Discord取得ロジック</li>
+        <li><span class="icon">🚀</span><code>crawler.py</code> — エントリーポイント</li>
+      </ul>
+    </div>
+
+    <!-- ファイル依存グラフ -->
+    <div class="card full">
+      <h2>ファイル依存関係</h2>
+      <div class="mermaid">
+graph LR
+    A["🚀 crawler.py\nエントリーポイント"] --> B["⚙️ src/config.py\nload_config\n(既存)"]
+    A --> C["🗄️ src/db.py\ninit_db / log_run"]
+    A --> F["💬 text_channel.py\nTextChannelCollector"]
+    F --> G["🔷 base.py\nMessageCollector ABC"]
+    F --> H["🌐 Discord API\nchannel.history"]
+    H --> I["📄 src/models.py\nRawMessage"]
+    I --> J["🗄️ src/db.py\ninsert_message"]
+    J --> K[("💾 messages.db\nSQLite")]
+    F --> L["🗄️ src/db.py\nupsert_crawl_state"]
+    L --> K
+    F --> M["🗄️ src/db.py\nlog_run"]
+    M --> K
+
+    style A fill:#1e3a5f,stroke:#60a5fa,color:#e2e8f0
+    style K fill:#166534,stroke:#4ade80,color:#e2e8f0
+    style H fill:#3d2a00,stroke:#f59e0b,color:#e2e8f0
+      </div>
+    </div>
+
+    <!-- シーケンス図 -->
+    <div class="card full">
+      <h2>実行シーケンス</h2>
+      <div class="mermaid">
+sequenceDiagram
+    participant C as crawler.py
+    participant D as Discord API
+    participant DB as SQLite (messages.db)
+
+    C->>DB: init_db() — 4テーブル CREATE IF NOT EXISTS
+    C->>D: client.login(DISCORD_TOKEN)
+    D-->>C: on_ready
+    C->>D: guild.fetch_channels()
+    D-->>C: TextChannel[] (39チャンネル・除外フィルタ済)
+
+    loop 各チャンネル
+        C->>DB: get_crawl_state(channel_id)
+        DB-->>C: last_message_id (再開ポイント or None)
+        C->>D: channel.history(after=last_id, oldest_first=True)
+        loop 各メッセージ
+            D-->>C: discord.Message
+            C->>C: RawMessage に変換
+            C->>DB: INSERT OR IGNORE INTO messages
+        end
+        C->>DB: upsert_crawl_state(channel_id, last_msg_id)
+        C->>DB: log_run(run_id, "crawl", "success")
+    end
+    C->>C: client.close()
+      </div>
+    </div>
+
+    <!-- SQLite スキーマ -->
+    <div class="card full">
+      <h2>SQLite スキーマ</h2>
+      <div class="mermaid">
+erDiagram
+    messages {
+        TEXT id PK
+        TEXT channel_id
+        TEXT channel_name
+        TEXT author_id
+        TEXT author_name
+        TEXT content
+        TEXT timestamp
+        INTEGER has_attachment
+        INTEGER is_pinned
+        INTEGER reaction_count
+        TEXT thread_id
+        TEXT thread_name
+    }
+    crawl_state {
+        TEXT channel_id PK
+        TEXT last_message_id
+        TEXT crawled_at
+    }
+    chunk_index {
+        TEXT chunk_id PK
+        TEXT anchor_msg_id
+        TEXT dify_doc_id
+        TEXT status
+        TEXT indexed_at
+        TEXT error_message
+    }
+    run_log {
+        INTEGER id PK
+        TEXT run_id
+        TEXT phase
+        TEXT status
+        TEXT message
+        TEXT created_at
+    }
+    messages ||--o{ chunk_index : "anchor_msg_id"
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        primaryColor: '#1e3a5f',
+        primaryTextColor: '#e2e8f0',
+        primaryBorderColor: '#60a5fa',
+        lineColor: '#64748b',
+        secondaryColor: '#2d3748',
+        tertiaryColor: '#1e2330',
+        background: '#0f1117',
+        mainBkg: '#1e2330',
+        nodeBorder: '#475569',
+        clusterBkg: '#1a2332',
+        titleColor: '#7dd3fc',
+        edgeLabelBackground: '#1e2330',
+        attributeBackgroundColorEven: '#1e2330',
+        attributeBackgroundColorOdd: '#2d3748',
+      }
+    });
+  </script>
+</body>
+</html>
