@@ -75,9 +75,10 @@
       font-size: 0.75rem;
       font-weight: 600;
     }
-    .badge-done  { background: #166534; color: #4ade80; }
-    .badge-wip   { background: #1e3a5f; color: #60a5fa; }
-    .badge-todo  { background: #3d2a00; color: #f59e0b; }
+    .badge-done   { background: #166534; color: #4ade80; }
+    .badge-wip    { background: #1e3a5f; color: #60a5fa; }
+    .badge-todo   { background: #3d2a00; color: #f59e0b; }
+    .badge-future { background: #2d1b69; color: #c4b5fd; }
     .file-list {
       list-style: none;
       font-size: 0.875rem;
@@ -99,11 +100,20 @@
       font-size: 0.8rem;
       color: #7dd3fc;
     }
+    .note {
+      font-size: 0.8rem;
+      color: #64748b;
+      margin-top: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      background: #161b27;
+      border-left: 3px solid #475569;
+      border-radius: 4px;
+    }
   </style>
 </head>
 <body>
   <h1>waiwai-oracle アーキテクチャ</h1>
-  <p class="subtitle">Discord → SQLite → Chunker → Dify Knowledge API</p>
+  <p class="subtitle">Discord → SQLite → (describer) → Chunker → Dify Knowledge API</p>
 
   <div class="grid">
 
@@ -125,7 +135,13 @@
             <td>1</td>
             <td><code>crawler.py</code></td>
             <td>Discord全メッセージ → SQLite</td>
-            <td><span class="badge badge-wip">実装中</span></td>
+            <td><span class="badge badge-done">完了</span></td>
+          </tr>
+          <tr>
+            <td>1.5</td>
+            <td><code>describer.py</code></td>
+            <td>画像・動画の説明文をAI生成（multimodal）</td>
+            <td><span class="badge badge-future">将来実装</span></td>
           </tr>
           <tr>
             <td>2</td>
@@ -145,15 +161,19 @@
 
     <!-- 作成ファイル一覧 -->
     <div class="card">
-      <h2>Phase 1 作成ファイル</h2>
+      <h2>Phase 1 実装ファイル</h2>
       <ul class="file-list">
-        <li><span class="icon">📄</span><code>src/models.py</code> — RawMessage dataclass</li>
+        <li><span class="icon">📄</span><code>src/models.py</code> — RawMessage / RawAttachment</li>
         <li><span class="icon">🗄️</span><code>src/db.py</code> — SQLite操作（init/insert/state）</li>
         <li><span class="icon">📦</span><code>src/collectors/__init__.py</code> — パッケージ</li>
         <li><span class="icon">🔷</span><code>src/collectors/base.py</code> — MessageCollector ABC</li>
         <li><span class="icon">💬</span><code>src/collectors/text_channel.py</code> — Discord取得ロジック</li>
         <li><span class="icon">🚀</span><code>crawler.py</code> — エントリーポイント</li>
+        <li><span class="icon">🧪</span><code>tests/test_models.py</code> — モデルテスト (7件)</li>
+        <li><span class="icon">🧪</span><code>tests/test_db.py</code> — DBテスト (19件)</li>
+        <li><span class="icon">🧪</span><code>tests/test_text_channel.py</code> — Collectorテスト (12件)</li>
       </ul>
+      <div class="note">合計 38テスト・全パス確認済み</div>
     </div>
 
     <!-- ファイル依存グラフ -->
@@ -161,39 +181,47 @@
       <h2>ファイル依存関係</h2>
       <div class="mermaid">
 graph LR
-    A["🚀 crawler.py\nエントリーポイント"] --> B["⚙️ src/config.py\nload_config\n(既存)"]
+    A["🚀 crawler.py\nエントリーポイント"] --> B["⚙️ src/config.py\nload_config"]
     A --> C["🗄️ src/db.py\ninit_db / log_run"]
     A --> F["💬 text_channel.py\nTextChannelCollector"]
     F --> G["🔷 base.py\nMessageCollector ABC"]
     F --> H["🌐 Discord API\nchannel.history"]
     H --> I["📄 src/models.py\nRawMessage"]
+    H --> N["📎 src/models.py\nRawAttachment"]
     I --> J["🗄️ src/db.py\ninsert_message"]
-    J --> K[("💾 messages.db\nSQLite")]
+    N --> O["🗄️ src/db.py\ninsert_attachment"]
+    J --> K[("💾 messages.db")]
+    O --> K
     F --> L["🗄️ src/db.py\nupsert_crawl_state"]
     L --> K
     F --> M["🗄️ src/db.py\nlog_run"]
     M --> K
+    F -. "download_attachments: true" .-> P["📁 data/attachments/\nローカル保存"]
+    Q["🔮 describer.py\n将来実装"] -. "multimodal" .-> K
 
     style A fill:#1e3a5f,stroke:#60a5fa,color:#e2e8f0
     style K fill:#166534,stroke:#4ade80,color:#e2e8f0
     style H fill:#3d2a00,stroke:#f59e0b,color:#e2e8f0
+    style Q fill:#2d1b69,stroke:#c4b5fd,color:#e2e8f0
+    style P fill:#1a2e1a,stroke:#4ade80,color:#e2e8f0
       </div>
     </div>
 
     <!-- シーケンス図 -->
     <div class="card full">
-      <h2>実行シーケンス</h2>
+      <h2>実行シーケンス（Phase 1）</h2>
       <div class="mermaid">
 sequenceDiagram
     participant C as crawler.py
     participant D as Discord API
     participant DB as SQLite (messages.db)
+    participant FS as data/attachments/
 
-    C->>DB: init_db() — 4テーブル CREATE IF NOT EXISTS
+    C->>DB: init_db() — 5テーブル CREATE IF NOT EXISTS
     C->>D: client.login(DISCORD_TOKEN)
     D-->>C: on_ready
     C->>D: guild.fetch_channels()
-    D-->>C: TextChannel[] (39チャンネル・除外フィルタ済)
+    D-->>C: TextChannel[] (除外フィルタ済)
 
     loop 各チャンネル
         C->>DB: get_crawl_state(channel_id)
@@ -203,6 +231,13 @@ sequenceDiagram
             D-->>C: discord.Message
             C->>C: RawMessage に変換
             C->>DB: INSERT OR IGNORE INTO messages
+            opt 添付ファイルあり
+                C->>C: RawAttachment に変換
+                C->>DB: INSERT OR IGNORE INTO attachments
+                opt download_attachments: true
+                    C->>FS: 画像・動画をローカル保存
+                end
+            end
         end
         C->>DB: upsert_crawl_state(channel_id, last_msg_id)
         C->>DB: log_run(run_id, "crawl", "success")
@@ -222,13 +257,23 @@ erDiagram
         TEXT channel_name
         TEXT author_id
         TEXT author_name
-        TEXT content
-        TEXT timestamp
+        TEXT content "DEFAULT ''"
+        TEXT timestamp "ISO8601 UTC"
         INTEGER has_attachment
         INTEGER is_pinned
         INTEGER reaction_count
-        TEXT thread_id
-        TEXT thread_name
+        TEXT thread_id "NULL可"
+        TEXT thread_name "NULL可"
+    }
+    attachments {
+        TEXT id PK
+        TEXT message_id FK
+        TEXT url "Discord CDN URL"
+        TEXT filename
+        TEXT content_type "NULL可"
+        TEXT local_path "DL時のみ"
+        TEXT description "将来: AI生成"
+        TEXT described_at "将来: 生成日時"
     }
     crawl_state {
         TEXT channel_id PK
@@ -238,8 +283,8 @@ erDiagram
     chunk_index {
         TEXT chunk_id PK
         TEXT anchor_msg_id
-        TEXT dify_doc_id
-        TEXT status
+        TEXT dify_doc_id "upload後"
+        TEXT status "pending/indexed/error"
         TEXT indexed_at
         TEXT error_message
     }
@@ -251,8 +296,45 @@ erDiagram
         TEXT message
         TEXT created_at
     }
+    messages ||--o{ attachments : "message_id"
     messages ||--o{ chunk_index : "anchor_msg_id"
       </div>
+    </div>
+
+    <!-- config.yml 構造 -->
+    <div class="card full">
+      <h2>config.yml 設定項目</h2>
+      <div class="mermaid">
+graph TD
+    CFG["config.yml"] --> GID["guild_id\nDiscordサーバーID"]
+    CFG --> CR["crawl"]
+    CFG --> CH["chunk"]
+    CFG --> DI["dify"]
+    CFG --> OL["ollama"]
+
+    CR --> EC["exclude_channels\n除外チャンネル名"]
+    CR --> EI["exclude_channel_ids\n除外チャンネルID"]
+    CR --> DA["download_attachments\nfalse=URLのみ / true=ローカルDL"]
+    CR --> AD["attachment_dir\nDL先ディレクトリ"]
+
+    CH --> WB["window_before: 2"]
+    CH --> WA["window_after: 2"]
+    CH --> ML["min_content_length: 10"]
+
+    DI --> EP["api_endpoint"]
+    DI --> DS["dataset_id"]
+    DI --> BS["batch_size: 20"]
+
+    OL --> OE["endpoint\nOllama サーバー"]
+    OL --> EM["embed_model: bge-m3"]
+
+    style DA fill:#1e3a5f,stroke:#60a5fa,color:#e2e8f0
+    style AD fill:#1e3a5f,stroke:#60a5fa,color:#e2e8f0
+    style OL fill:#2d1b69,stroke:#c4b5fd,color:#e2e8f0
+    style OE fill:#2d1b69,stroke:#c4b5fd,color:#e2e8f0
+    style EM fill:#2d1b69,stroke:#c4b5fd,color:#e2e8f0
+      </div>
+      <div class="note">青: Phase 1 で新たに追加された設定 ／ 紫: describer.py (将来) で使用予定</div>
     </div>
 
   </div>
