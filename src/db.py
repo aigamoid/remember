@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS crawl_state (
 CREATE TABLE IF NOT EXISTS chunk_index (
     chunk_id      TEXT PRIMARY KEY,
     anchor_msg_id TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,
+    chunk_text    TEXT NOT NULL,
     dify_doc_id   TEXT,
     status        TEXT DEFAULT 'pending',
     indexed_at    TEXT,
@@ -122,6 +124,33 @@ def get_crawl_state(conn: sqlite3.Connection, channel_id: str) -> str | None:
         (channel_id,),
     ).fetchone()
     return row[0] if row else None
+
+
+def insert_chunk(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    anchor_msg_id: str,
+    channel_id: str,
+    chunk_text: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO chunk_index
+            (chunk_id, anchor_msg_id, channel_id, chunk_text)
+        VALUES (?,?,?,?)
+        """,
+        (chunk_id, anchor_msg_id, channel_id, chunk_text),
+    )
+
+
+def count_chunks(conn: sqlite3.Connection, status: str | None = None) -> int:
+    if status is None:
+        row = conn.execute("SELECT count(*) FROM chunk_index").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT count(*) FROM chunk_index WHERE status = ?", (status,)
+        ).fetchone()
+    return row[0]
 
 
 def log_run(
