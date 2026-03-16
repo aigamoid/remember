@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from datetime import datetime, timedelta, timezone
 
 from src.db import insert_chunk
+from src.formatter import format_message_line
 
 
 def generate_chunk_id(anchor_msg_id: str, window_before: int, window_after: int) -> str:
@@ -18,15 +18,10 @@ def _build_chunk_text(
     tz_offset: int = 9,
 ) -> str:
     """ウィンドウ内のメッセージをテキスト化する。タイムスタンプは UTC→指定オフセットに変換。"""
-    tz = timezone(timedelta(hours=tz_offset))
-    lines = []
-    for _, author, content, ts, has_att in rows:
-        dt = datetime.fromisoformat(ts).astimezone(tz)
-        ts_display = dt.strftime("%Y-%m-%d %H:%M")
-        line = f"[{ts_display}] {author}: {content}"
-        if has_att:
-            line += " [添付ファイルあり]"
-        lines.append(line)
+    lines = [
+        format_message_line(author, content, ts, bool(has_att), tz_offset)
+        for _, author, content, ts, has_att in rows
+    ]
     return "\n".join(lines)
 
 
