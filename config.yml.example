@@ -14,8 +14,6 @@ chunk:
 
 dify:
   api_endpoint: "http://<DifyホストIP>/v1"
-  dataset_id: "your-dataset-id"
-  batch_size: 20             # 一度にupsertする件数
 
 ollama:
   endpoint: "http://<TailscaleIP>:11434"
