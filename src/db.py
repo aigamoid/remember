@@ -53,6 +53,16 @@ CREATE TABLE IF NOT EXISTS chunk_index (
     error_message TEXT
 );
 
+CREATE TABLE IF NOT EXISTS upload_state (
+    channel_id    TEXT PRIMARY KEY,
+    channel_name  TEXT NOT NULL,
+    dataset_id    TEXT,
+    document_id   TEXT,
+    status        TEXT DEFAULT 'pending',
+    error_message TEXT,
+    indexed_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS run_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id     TEXT NOT NULL,
@@ -151,6 +161,59 @@ def count_chunks(conn: sqlite3.Connection, status: str | None = None) -> int:
             "SELECT count(*) FROM chunk_index WHERE status = ?", (status,)
         ).fetchone()
     return row[0]
+
+
+def init_upload_state(conn: sqlite3.Connection) -> int:
+    """messages テーブルのチャンネル一覧から未登録分を upload_state に追加する。"""
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO upload_state (channel_id, channel_name)
+        SELECT DISTINCT channel_id, channel_name FROM messages
+        """
+    )
+    return cur.rowcount
+
+
+def fetch_pending_channels(conn: sqlite3.Connection) -> list[tuple[str, str, str | None]]:
+    """pending チャンネルを返す。(channel_id, channel_name, dataset_id)"""
+    return conn.execute(
+        "SELECT channel_id, channel_name, dataset_id FROM upload_state WHERE status = 'pending'"
+    ).fetchall()
+
+
+def mark_channel_indexed(
+    conn: sqlite3.Connection, channel_id: str, dataset_id: str, document_id: str,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE upload_state SET status='indexed', dataset_id=?, document_id=?, indexed_at=? WHERE channel_id=?",
+        (dataset_id, document_id, now, channel_id),
+    )
+
+
+def mark_channel_error(
+    conn: sqlite3.Connection, channel_id: str, error_msg: str,
+    dataset_id: str | None = None,
+    document_id: str | None = None,
+) -> None:
+    if dataset_id:
+        conn.execute(
+            "UPDATE upload_state SET status='error', error_message=?, dataset_id=?, document_id=? WHERE channel_id=?",
+            (error_msg, dataset_id, document_id, channel_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE upload_state SET status='error', error_message=? WHERE channel_id=?",
+            (error_msg, channel_id),
+        )
+
+
+def reset_upload_errors(conn: sqlite3.Connection) -> int:
+    """error → pending に戻す。dataset_id は保持。"""
+    cur = conn.execute(
+        "UPDATE upload_state SET status='pending', error_message=NULL WHERE status='error'"
+    )
+    return cur.rowcount
 
 
 def log_run(
