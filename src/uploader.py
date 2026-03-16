@@ -9,13 +9,46 @@ import time
 import requests
 
 from src.db import (
+    fetch_datasets_to_clean,
     fetch_pending_channels,
     init_upload_state,
     mark_channel_error,
     mark_channel_indexed,
+    reset_all_upload_state,
     reset_upload_errors,
 )
 from src.formatter import format_message_line
+
+def clean_datasets(conn: sqlite3.Connection, cfg: dict) -> int:
+    """upload_state に記録されたデータセットを Dify から削除し、upload_state をリセットする。"""
+    dify_cfg = cfg.get("dify", {})
+    endpoint = dify_cfg["api_endpoint"]
+    api_key = os.environ["DIFY_API_KEY"]
+    api_timeout: int = dify_cfg.get("api_timeout", 30)
+
+    rows = fetch_datasets_to_clean(conn)
+    if not rows:
+        print("  削除対象のデータセットなし")
+        return 0
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    deleted = 0
+    for _channel_id, channel_name, dataset_id in rows:
+        try:
+            resp = requests.delete(
+                f"{endpoint}/datasets/{dataset_id}",
+                headers=headers, timeout=api_timeout,
+            )
+            print(f"  {channel_name}: {resp.status_code}")
+            deleted += 1
+        except Exception as e:
+            print(f"  {channel_name}: ERROR {e}")
+
+    reset_count = reset_all_upload_state(conn)
+    conn.commit()
+    print(f"  {deleted}/{len(rows)} データセット削除、{reset_count} チャンネルをリセット")
+    return deleted
+
 
 def _build_channel_text(
     conn: sqlite3.Connection, channel_id: str, channel_name: str, tz_offset: int,
