@@ -17,9 +17,6 @@ from src.db import (
 )
 from src.formatter import format_message_line
 
-_NAME_PREFIX = "waiwai-"
-
-
 def _build_channel_text(
     conn: sqlite3.Connection, channel_id: str, channel_name: str, tz_offset: int,
 ) -> tuple[str, str]:
@@ -36,32 +33,35 @@ def _build_channel_text(
     return (channel_name, "\n\n".join(lines))
 
 
-def _create_dataset(endpoint: str, api_key: str, name: str) -> str:
+def _create_dataset(endpoint: str, api_key: str, name: str, timeout: int) -> str:
     """Dify にナレッジベースを作成し dataset_id を返す。"""
     resp = requests.post(
         f"{endpoint}/datasets",
         headers={"Authorization": f"Bearer {api_key}"},
         json={"name": name, "indexing_technique": "high_quality", "permission": "only_me"},
-        timeout=30,
+        timeout=timeout,
     )
     resp.raise_for_status()
     return resp.json()["id"]
 
 
-_PROCESS_RULE = {
-    "mode": "custom",
-    "rules": {
-        "pre_processing_rules": [
-            {"id": "remove_extra_spaces", "enabled": False},
-            {"id": "remove_urls_emails", "enabled": False},
-        ],
-        "segmentation": {"separator": "\n\n", "max_tokens": 500},
-    },
-}
+def _make_process_rule(separator: str, max_tokens: int) -> dict:
+    """Dify 用の process_rule を組み立てる。"""
+    return {
+        "mode": "custom",
+        "rules": {
+            "pre_processing_rules": [
+                {"id": "remove_extra_spaces", "enabled": False},
+                {"id": "remove_urls_emails", "enabled": False},
+            ],
+            "segmentation": {"separator": separator, "max_tokens": max_tokens},
+        },
+    }
 
 
 def _upload_document(
     endpoint: str, api_key: str, dataset_id: str, name: str, text: str,
+    process_rule: dict, timeout: int,
 ) -> tuple[str, str]:
     """Dify にドキュメントを作成し (document_id, batch) を返す。"""
     resp = requests.post(
@@ -71,9 +71,9 @@ def _upload_document(
             "name": name,
             "text": text,
             "indexing_technique": "high_quality",
-            "process_rule": _PROCESS_RULE,
+            "process_rule": process_rule,
         },
-        timeout=120,
+        timeout=timeout,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -82,7 +82,7 @@ def _upload_document(
 
 def _wait_for_indexing(
     endpoint: str, api_key: str, dataset_id: str, batch: str,
-    poll_interval: int = 5, max_wait: int = 600,
+    poll_interval: int, max_wait: int, api_timeout: int,
 ) -> str:
     """ドキュメントのインデックス完了を待つ。最終ステータスを返す。"""
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -92,7 +92,7 @@ def _wait_for_indexing(
         elapsed += poll_interval
         resp = requests.get(
             f"{endpoint}/datasets/{dataset_id}/documents/{batch}/indexing-status",
-            headers=headers, timeout=30,
+            headers=headers, timeout=api_timeout,
         )
         resp.raise_for_status()
         data = resp.json()["data"]
@@ -115,7 +115,16 @@ def run_uploader(
     dify_cfg = cfg.get("dify", {})
     endpoint = dify_cfg["api_endpoint"]
     api_key = os.environ["DIFY_API_KEY"]
+    name_prefix: str = dify_cfg.get("dataset_name_prefix", "waiwai-")
+    separator: str = dify_cfg.get("segmentation_separator", "\n\n")
+    max_tokens: int = dify_cfg.get("segmentation_max_tokens", 1000)
+    api_timeout: int = dify_cfg.get("api_timeout", 30)
+    upload_timeout: int = dify_cfg.get("upload_timeout", 120)
+    poll_interval: int = dify_cfg.get("indexing_poll_interval", 5)
+    max_wait: int = dify_cfg.get("indexing_max_wait", 600)
     tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
+
+    process_rule = _make_process_rule(separator, max_tokens)
 
     init_upload_state(conn)
     conn.commit()
@@ -136,12 +145,16 @@ def run_uploader(
         dataset_id = existing_dataset_id
         try:
             dataset_id = existing_dataset_id or _create_dataset(
-                endpoint, api_key, f"{_NAME_PREFIX}{channel_name}",
+                endpoint, api_key, f"{name_prefix}{channel_name}", api_timeout,
             )
             doc_name, text = _build_channel_text(conn, channel_id, channel_name, tz_offset)
             print(f"    doc: {doc_name}", flush=True)
-            doc_id, batch = _upload_document(endpoint, api_key, dataset_id, doc_name, text)
-            _wait_for_indexing(endpoint, api_key, dataset_id, batch)
+            doc_id, batch = _upload_document(
+                endpoint, api_key, dataset_id, doc_name, text, process_rule, upload_timeout,
+            )
+            _wait_for_indexing(
+                endpoint, api_key, dataset_id, batch, poll_interval, max_wait, api_timeout,
+            )
             mark_channel_indexed(conn, channel_id, dataset_id, doc_id)
         except Exception as e:
             mark_channel_error(
