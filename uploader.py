@@ -17,12 +17,13 @@ from dotenv import load_dotenv
 
 from src.config import load_config
 from src.db import init_db, log_run
-from src.uploader import run_uploader
+from src.uploader import clean_datasets, run_uploader
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dify Knowledge API へアップロード")
     parser.add_argument("--retry-errors", action="store_true", help="エラーチャンネルを再試行")
+    parser.add_argument("--clean", action="store_true", help="既存データセットを削除してから再アップロード")
     args = parser.parse_args()
 
     load_dotenv()
@@ -35,6 +36,10 @@ def main() -> None:
     run_id = str(uuid.uuid4())
 
     try:
+        if args.clean:
+            print("既存データセットを削除中...")
+            clean_datasets(conn, cfg)
+
         done = run_uploader(conn, cfg, run_id, retry_errors=args.retry_errors)
         log_run(conn, run_id, "upload", "success", f"完了: {done:,} チャンネル")
         conn.commit()
