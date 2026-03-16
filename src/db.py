@@ -216,6 +216,22 @@ def reset_upload_errors(conn: sqlite3.Connection) -> int:
     return cur.rowcount
 
 
+def fetch_datasets_to_clean(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
+    """dataset_id が記録されている全チャンネルを返す。(channel_id, channel_name, dataset_id)"""
+    return conn.execute(
+        "SELECT channel_id, channel_name, dataset_id FROM upload_state WHERE dataset_id IS NOT NULL"
+    ).fetchall()
+
+
+def reset_all_upload_state(conn: sqlite3.Connection) -> int:
+    """全チャンネルを pending に戻し、dataset_id/document_id をクリアする。"""
+    cur = conn.execute(
+        "UPDATE upload_state SET status='pending', dataset_id=NULL, document_id=NULL, "
+        "error_message=NULL, indexed_at=NULL"
+    )
+    return cur.rowcount
+
+
 def log_run(
     conn: sqlite3.Connection,
     run_id: str,
