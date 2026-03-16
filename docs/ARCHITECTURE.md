@@ -11,16 +11,18 @@ waiwai-oracle/
 │   ├── CONFIG.md
 │   └── OPEN_ISSUES.md
 ├── src/
-│   ├── main.py            # CLIエントリポイント（引数解析のみ）
 │   ├── config.py          # config.yml / .env ロード
 │   ├── models.py          # dataclass定義（RawMessage, Chunk等）
 │   ├── db.py              # SQLite操作
+│   ├── formatter.py       # メッセージ→テキスト変換（共通）
 │   ├── collectors/
 │   │   ├── base.py        # MessageCollector ABC
 │   │   └── text_channel.py # TextChannelCollector実装
 │   ├── chunker.py         # チャンク生成ロジック
 │   └── uploader.py        # Dify Knowledge API呼び出し
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
+├── chunker.py             # Phase 2 エントリポイント
+├── uploader.py            # Phase 3 エントリポイント
 ├── config.yml.example
 ├── .env.example
 ├── Dockerfile
@@ -38,14 +40,15 @@ collectors/text_channel.py   # TextChannelCollector
     ↓
 db.py                        # messages テーブルに保存
     ↓
-chunker.py                   # スライディングウィンドウ（前後2件）
+uploader.py                  # チャンネルごとに messages を連結
     ↓
-db.py                        # chunk_index テーブルに保存
+Dify Knowledge API           # ナレッジベース作成 → ドキュメントアップロード
     ↓
-uploader.py                  # Dify Knowledge API にPOST
-    ↓
-db.py                        # chunk_index.dify_doc_id, status 更新
+db.py                        # upload_state に dataset_id/document_id 保存
 ```
+
+> **Note:** Phase 2 の chunker.py（スライディングウィンドウ）は chunk_index テーブルに保存するが、
+> Phase 3 ではチャンキングを Dify に委ねるため、uploader は messages テーブルから直接読む。
 
 ## 設計方針
 
@@ -61,8 +64,8 @@ class MessageCollector(ABC):
 ```
 
 ### 冪等性
-chunk_idはanchor_msg_idとウィンドウサイズからMD5で生成する。
-再実行時はchunk_index.statusが'indexed'のものをスキップする。
+- chunker: chunk_id は anchor_msg_id + ウィンドウサイズから MD5 生成。再実行時は既存をスキップ。
+- uploader: upload_state.status が 'indexed' のチャンネルをスキップ。dataset_id が既存ならナレッジベース作成もスキップ。
 
 ### 各ファイルの責務上限
 1ファイル100行以内を目安とする。超える場合は分割を検討すること。
