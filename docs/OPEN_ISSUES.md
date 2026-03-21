@@ -16,6 +16,31 @@ Windows 5090機（100.88.176.117）にDifyをインストール・起動済み�
 - DIFY_API_KEY → .env反映済み
 - curl接続テスト成功
 
+## OI-7: チャンク品質問題（未解決）
+
+### 現状の問題
+
+- セパレータ `\n\n` ＝ メッセージ結合文字 `\n\n` のため **1メッセージ = 1チャンク** になっている
+- Dify は「セパレータで先に分割 → max_tokens で切り詰め」の順で処理するため、max_tokens による結合は起きない
+- 雑談チャンネル単体で 11,305 チャンク（平均 27〜61 文字）→ RAG 精度が低い
+
+### 方針（検討中）
+
+**セマンティックチャンキング**（Python 側で事前分割）を採用予定。
+- Dify 側には非対応なため、uploader 側で embedding しコサイン類似度で境界を検出する
+- embedding モデル: OpenAI `text-embedding-3-small`（既存流用）
+- 実装後は `--clean` で全チャンネル再アップロード
+
+代替案: 時間ギャップ方式（N時間以上の間隔でチャンク境界を挿入、API不要・実装簡単）
+
+## OI-8: 👋_ようこそ の 409 CONFLICT（未解決）
+
+- 前回テスト時の残存データセットと名前衝突
+- upload_state に記録がないため `--clean` で削除できない
+- **対処**: Dify UI から手動で `waiwai-👋_ようこそ` を削除 → `python uploader.py --retry-errors`
+
+---
+
 ## OI-3: ThreadCollector 未実装
 現在はTextChannelのみ取得。スレッド対応は将来実装。
 `collectors/base.py` のABCは拡張を前提に設計済み。
