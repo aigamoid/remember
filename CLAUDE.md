@@ -38,4 +38,13 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
 - Python 3.11+
 - discord.py / SQLite / Docker
 - Dify Knowledge API（アップロード先）
-- Ollama `bge-m3`（Embedding、Windows機 via Tailscale）
+- OpenAI `text-embedding-3-small`（Embedding ※旧: Ollama bge-m3、Difyプラグインバグで変更）
+
+## チャンキング設計メモ（Claude Codeへ）
+
+- **現状**: uploader.py は messages テーブルを直接連結して Dify に送信（chunk_index 不使用）
+- **問題**: セパレータ `\n\n` = メッセージ結合文字のため 1メッセージ = 1チャンク
+- **検討中**: セマンティックチャンキング（Python 側で事前分割）
+  - Dify にはセマンティック分割機能なし → uploader 側で embedding して境界検出
+  - 実装したら `--clean` で全チャンネル再アップロードが必要
+- **作業ログ** → `docs/DEVLOG.md` 参照
