@@ -13,20 +13,10 @@ crawl:
     - 987654321
 
 chunk:
-  window_before: 2           # アンカーの前N件
-  window_after: 2            # アンカーの後N件
+  time_gap_minutes: 60       # N分以上の間隔があればチャンク境界（会話スレッド単位）
+  max_chunk_messages: 30     # 1チャンクに含める最大メッセージ数
   min_content_length: 10     # これ未満の文字数メッセージはスキップ
   timezone_offset: 9         # タイムスタンプ表示のUTCオフセット（JST=9）
-
-dify:
-  api_endpoint: "http://<DifyホストIP>/v1"
-  dataset_name_prefix: "waiwai-"       # ナレッジベース名のプレフィックス
-  segmentation_separator: "\n\n"       # チャンク分割セパレータ
-  segmentation_max_tokens: 1000        # 1チャンクあたりの最大トークン数
-  api_timeout: 30                      # 一般APIタイムアウト（秒）
-  upload_timeout: 120                  # ドキュメントアップロードタイムアウト（秒）
-  indexing_poll_interval: 5            # インデックス状態ポーリング間隔（秒）
-  indexing_max_wait: 600               # インデックス最大待機時間（秒）
 
 ollama:
   endpoint: "http://<TailscaleIP>:11434"
@@ -37,7 +27,6 @@ ollama:
 
 ```env
 DISCORD_TOKEN=your-discord-bot-token
-DIFY_API_KEY=your-dify-api-key
 ```
 
 ## 分離ルール
