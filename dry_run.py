@@ -37,8 +37,7 @@ async def run(token: str, cfg: dict, no_count: bool) -> None:
     crawl = cfg.get("crawl", {})
     exclude_names: set[str] = set(crawl.get("exclude_channels", []))
     exclude_ids: set[str] = {str(i) for i in crawl.get("exclude_channel_ids", [])}
-    window_before: int = cfg.get("chunk", {}).get("window_before", 2)
-    window_after: int = cfg.get("chunk", {}).get("window_after", 2)
+    time_gap_minutes: int = cfg.get("chunk", {}).get("time_gap_minutes", 60)
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -90,14 +89,11 @@ async def run(token: str, cfg: dict, no_count: bool) -> None:
                 lines.append(f"#{name:<29} {ch_id:<22} {n:>10,}")
 
             total = sum(n for _, _, n in channel_counts)
-            estimated_chunks = sum(
-                max(0, n - window_before - window_after) for _, _, n in channel_counts
-            )
             lines.append("")
             lines.append("=" * 50)
             lines.append(f"総メッセージ数    : {total:,}")
-            lines.append(f"推定チャンク数    : {estimated_chunks:,}  (ウィンドウ: -{window_before}/+{window_after})")
-            lines.append(f"推定アップロード数: {estimated_chunks:,}  (Dify Knowledge API)")
+            lines.append(f"チャンキング方式  : 時間ギャップ（{time_gap_minutes}分）")
+            lines.append("  ※ 実チャンク数は chunker.py 実行後に確定します")
             lines.append("=" * 50)
 
         output = "\n".join(lines) + "\n"
