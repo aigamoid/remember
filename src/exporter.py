@@ -15,6 +15,13 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^\w\-]", "_", name, flags=re.UNICODE)
 
 
+def _combine(chunk_text: str, context_text: str | None) -> str:
+    """context_text があれば先頭に付加して返す（なければ chunk_text のみ）。"""
+    if context_text:
+        return f"[CONTEXT]\n{context_text}\n[CHUNK]\n{chunk_text}"
+    return chunk_text
+
+
 def run_exporter(conn: sqlite3.Connection, cfg: dict, run_id: str) -> int:
     """chunk_index からチャンネルごとにテキストファイルを output/ に出力する。"""
     output_dir = Path("output")
@@ -37,7 +44,8 @@ def run_exporter(conn: sqlite3.Connection, cfg: dict, run_id: str) -> int:
         # channel_id の先頭8文字でファイル名衝突を防ぐ
         safe_name = _safe_filename(channel_name)
         filename = output_dir / f"{safe_name}_{channel_id[:8]}_{today}.txt"
-        filename.write_text(separator.join(chunks), encoding="utf-8")
+        texts = [_combine(ct, ctx) for ct, ctx in chunks]
+        filename.write_text(separator.join(texts), encoding="utf-8")
         done += 1
         print(f"  {channel_name}: {len(chunks):,} チャンク → {filename}")
 
