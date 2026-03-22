@@ -18,11 +18,11 @@ waiwai-oracle/
 │   ├── collectors/
 │   │   ├── base.py        # MessageCollector ABC
 │   │   └── text_channel.py # TextChannelCollector実装
-│   ├── chunker.py         # チャンク生成ロジック
-│   └── uploader.py        # Dify Knowledge API呼び出し
+│   ├── chunker.py         # チャンク生成ロジック（時間ギャップ方式）
+│   └── exporter.py        # chunk_index → output/*.txt 出力
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
 ├── chunker.py             # Phase 2 エントリポイント
-├── uploader.py            # Phase 3 エントリポイント
+├── exporter.py            # Phase 3 エントリポイント
 ├── config.yml.example
 ├── .env.example
 ├── Dockerfile
@@ -40,15 +40,14 @@ collectors/text_channel.py   # TextChannelCollector
     ↓
 db.py                        # messages テーブルに保存
     ↓
-uploader.py                  # チャンネルごとに messages を連結
+chunker.py                   # 時間ギャップ方式でチャンク生成
     ↓
-Dify Knowledge API           # ナレッジベース作成 → ドキュメントアップロード
+db.py                        # chunk_index テーブルに保存
     ↓
-db.py                        # upload_state に dataset_id/document_id 保存
+exporter.py                  # chunk_index を読んで output/*.txt に出力
+    ↓
+output/{channel}_{date}.txt  # Dify へブラウザから手動アップロード
 ```
-
-> **Note:** Phase 2 の chunker.py（スライディングウィンドウ）は chunk_index テーブルに保存するが、
-> Phase 3 ではチャンキングを Dify に委ねるため、uploader は messages テーブルから直接読む。
 
 ## 設計方針
 
@@ -64,8 +63,8 @@ class MessageCollector(ABC):
 ```
 
 ### 冪等性
-- chunker: chunk_id は anchor_msg_id + ウィンドウサイズから MD5 生成。再実行時は既存をスキップ。
-- uploader: upload_state.status が 'indexed' のチャンネルをスキップ。dataset_id が既存ならナレッジベース作成もスキップ。
+- chunker: chunk_id は anchor_msg_id（チャンク先頭メッセージID）の MD5。INSERT OR REPLACE により再実行で chunk_text が更新される。チャンキング方式変更時は `python chunker.py --clean` で全削除してから再生成する。
+- exporter: 実行のたびに output/ を上書き生成する。状態管理なし。
 
 ### 各ファイルの責務上限
 1ファイル100行以内を目安とする。超える場合は分割を検討すること。
