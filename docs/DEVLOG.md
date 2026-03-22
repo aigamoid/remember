@@ -4,6 +4,32 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-03-23 — Dify フロー：現在日時注入
+
+### 変更内容
+
+- `dify/waiwai-oracle.yml` 追加（フローのバージョン管理開始）
+- Dify ワークフローに Code ノードを追加（Start → Code → Query Rewriter → Knowledge Retrieval → LLM → Answer）
+
+### Code ノード実装
+
+```python
+def main():
+    from datetime import datetime, timezone, timedelta
+    JST = timezone(timedelta(hours=9))
+    now = datetime.now(JST)
+    return {"current_datetime": now.strftime("%Y-%m-%d %H:%M JST")}
+```
+
+**ハマりポイント**: Dify の Code ノードは `def main():` 内に書く必要がある（`return` をトップレベルに書くと `SyntaxError: 'return' outside function`）
+
+### 目的
+
+チャンクテキストに埋め込まれたタイムスタンプを活用し、「最近の話題」「一年前」などの相対時間クエリに対応する。
+Query Rewriter と LLM の両プロンプトに `{{#code_node_id.current_datetime#}}` を埋め込んで使用。
+
+---
+
 ## 2026-03-22 — Phase 3 再設計完了・RAGチャットボット動作確認
 
 ### 主な変更（uploader廃止 → exporter + チャンキング改善）
