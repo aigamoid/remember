@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS chunk_index (
     anchor_msg_id TEXT NOT NULL,
     channel_id    TEXT NOT NULL,
     chunk_text    TEXT NOT NULL,
+    context_text  TEXT,
     dify_doc_id   TEXT,
     status        TEXT DEFAULT 'pending',
     indexed_at    TEXT,
@@ -80,8 +81,25 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(_DDL)
+    add_context_text_column(conn)
     conn.commit()
     return conn
+
+
+def add_context_text_column(conn: sqlite3.Connection) -> None:
+    """context_text カラムが無い場合のみ ALTER TABLE で追加し、部分インデックスを作成する（冪等）。"""
+    existing = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(chunk_index)").fetchall()
+    }
+    if "context_text" not in existing:
+        conn.execute("ALTER TABLE chunk_index ADD COLUMN context_text TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chunk_no_context
+            ON chunk_index(channel_id, chunk_id) WHERE context_text IS NULL
+        """
+    )
 
 
 def insert_message(conn: sqlite3.Connection, msg: RawMessage) -> None:
@@ -145,28 +163,67 @@ def insert_chunk(
 ) -> None:
     conn.execute(
         """
-        INSERT OR REPLACE INTO chunk_index
-            (chunk_id, anchor_msg_id, channel_id, chunk_text)
+        INSERT INTO chunk_index (chunk_id, anchor_msg_id, channel_id, chunk_text)
         VALUES (?,?,?,?)
+        ON CONFLICT(chunk_id) DO UPDATE SET
+            anchor_msg_id = excluded.anchor_msg_id,
+            channel_id    = excluded.channel_id,
+            chunk_text    = excluded.chunk_text,
+            context_text  = CASE
+                WHEN chunk_index.chunk_text    IS NOT excluded.chunk_text
+                  OR chunk_index.anchor_msg_id IS NOT excluded.anchor_msg_id
+                  OR chunk_index.channel_id    IS NOT excluded.channel_id
+                THEN NULL
+                ELSE chunk_index.context_text
+            END
         """,
         (chunk_id, anchor_msg_id, channel_id, chunk_text),
     )
 
 
-def fetch_chunks_by_channel(conn: sqlite3.Connection, channel_id: str) -> list[str]:
+def fetch_chunks_by_channel(
+    conn: sqlite3.Connection, channel_id: str
+) -> list[tuple[str, str | None]]:
     """指定 channel_id のチャンクを anchor メッセージの timestamp 昇順で返す。
+    戻り値: (chunk_text, context_text) のタプルリスト。
     同時刻メッセージは m.id で安定ソート。
     """
     rows = conn.execute(
         """
-        SELECT ci.chunk_text FROM chunk_index ci
+        SELECT ci.chunk_text, ci.context_text FROM chunk_index ci
         JOIN messages m ON ci.anchor_msg_id = m.id
         WHERE ci.channel_id = ?
         ORDER BY m.timestamp ASC, m.id ASC
         """,
         (channel_id,),
     ).fetchall()
-    return [row[0] for row in rows]
+    return [(row[0], row[1]) for row in rows]
+
+
+def update_chunk_context(
+    conn: sqlite3.Connection, chunk_id: str, context_text: str
+) -> None:
+    """context_text を chunk_id で更新する。"""
+    conn.execute(
+        "UPDATE chunk_index SET context_text = ? WHERE chunk_id = ?",
+        (context_text, chunk_id),
+    )
+
+
+def fetch_chunks_for_context(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, str, str, str]]:
+    """context_text が NULL のチャンクを全件取得する。
+    戻り値: (chunk_id, anchor_msg_id, channel_id, chunk_text) のリスト。
+    """
+    return conn.execute(
+        """
+        SELECT chunk_id, anchor_msg_id, channel_id, chunk_text
+        FROM chunk_index
+        WHERE context_text IS NULL
+        ORDER BY channel_id, chunk_id
+        """
+    ).fetchall()
 
 
 def count_chunks(conn: sqlite3.Connection, status: str | None = None) -> int:
