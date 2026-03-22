@@ -4,6 +4,49 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-03-22 — Phase 3 再設計完了・RAGチャットボット動作確認
+
+### 主な変更（uploader廃止 → exporter + チャンキング改善）
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/uploader.py` / `uploader.py` / `tests/test_uploader.py` | 削除（Dify API廃止） |
+| 2 | `src/exporter.py` / `exporter.py` / `tests/test_exporter.py` | 新規追加（output/*.txt出力） |
+| 3 | `src/chunker.py` | 時間ギャップ方式に全面書き換え（スライディングウィンドウ廃止） |
+| 4 | `src/chunker.py` | `_is_noise` 追加・短文吸収ロジック実装 |
+| 5 | `chunker.py` | `--clean` オプション追加 |
+| 6 | `src/db.py` | `fetch_chunks_by_channel` 追加・INSERT OR REPLACE に変更 |
+
+### チャンキング設計の変更
+
+- **廃止**: スライディングウィンドウ（前後2件）
+- **採用**: 時間ギャップ方式（`time_gap_minutes: 60`）
+- **追加フィルター**:
+  - `_is_noise`: URLのみ・@here/@everyone・空白のみを除去
+  - 短文吸収: 10文字以下 + ギャップ60分未満 → 直前チャンクに吸収（疑似reply_to）
+  - `@here/@everyone` は短文でも除去
+- **結果**: 9,301チャンク → 8,364チャンク（1行チャンク 39% → 37.4%）
+
+### Difyアップロード方式の変更
+
+- **廃止**: Dify Knowledge API 経由の自動アップロード
+- **採用**: `exporter.py` で output/*.txt を出力 → ブラウザから手動アップロード
+- **理由**: API経由より直感的でエラー内容がわかりやすい
+- **Dify設定**: セグメント識別子 `\n\n---\n\n`
+
+### 実行結果
+
+- output/ に 30ファイル / 3.1MB 出力
+- Dify にアップロード完了
+- **チャットボット動作確認 ✅**
+
+### 3エージェントレビュー記録
+
+- Codex・Aider による複数回レビュー → 短文吸収ロジックの `prev_ts` 更新問題・max_chunk_messages超過問題・空白のみ除去漏れ を指摘・修正済み
+- 全テスト 93/93 PASS
+
+---
+
 ## 2026-03-21 — チャンキング戦略の調査・方針検討
 
 ### 背景
