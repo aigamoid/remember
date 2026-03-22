@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -39,14 +40,20 @@ def _insert_msg(
     )
 
 
-def _make_cfg(model: str = "gpt-4.1-nano", preceding_messages: int = 10) -> dict:
+def _make_cfg(
+    model: str = "gpt-4.1-nano",
+    preceding_messages: int = 10,
+    max_retries: int = 1,
+    concurrency: int = 1,
+) -> dict:
     return {
-        "openai": {"api_key": "sk-test"},
+        "openai": {"api_key": "sk-test", "base_url": ""},
         "contextualizer": {
             "model": model,
             "preceding_messages": preceding_messages,
-            "max_retries": 1,
+            "max_retries": max_retries,
             "retry_delay": 0.0,
+            "concurrency": concurrency,
         },
         "chunk": {"timezone_offset": 9},
     }
@@ -94,6 +101,7 @@ class TestGetPrecedingMessages:
         conn.commit()
         text, ts = _get_preceding_messages(conn, "nonexistent", "ch1", n=10)
         assert ts == "不明"
+        assert text == "（直前の会話なし）"
 
     def test_same_timestamp_tiebreak(self, conn):
         """同一timestamp のメッセージを ID で tie-break する。"""
@@ -123,37 +131,37 @@ class TestGetPrecedingMessages:
 
 class TestGenerateContext:
     def test_calls_openai_and_returns_content(self):
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = "テスト用コンテキスト説明"
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value.choices[0].message.content = (
-            "テスト用コンテキスト説明"
-        )
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
 
-        result = generate_context(
+        result = asyncio.run(generate_context(
             channel_name="general",
             anchor_timestamp="2024-01-01 09:00",
             preceding_text="直前の会話",
             chunk_text="対象チャンク",
             client=mock_client,
             model="gpt-4.1-nano",
-        )
+        ))
 
         assert result == "テスト用コンテキスト説明"
         mock_client.chat.completions.create.assert_called_once()
 
     def test_strips_whitespace_from_response(self):
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = "  前後スペース付き  \n"
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value.choices[0].message.content = (
-            "  前後スペース付き  \n"
-        )
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
 
-        result = generate_context(
+        result = asyncio.run(generate_context(
             channel_name="general",
             anchor_timestamp="2024-01-01 09:00",
             preceding_text="",
             chunk_text="チャンク",
             client=mock_client,
             model="gpt-4.1-nano",
-        )
+        ))
 
         assert result == "前後スペース付き"
 
@@ -170,9 +178,9 @@ class TestRunContextualizer:
         mock_response = MagicMock()
         mock_response.choices[0].message.content = "これはテスト会話のコンテキストです"
 
-        with patch("openai.OpenAI") as mock_openai_cls:
+        with patch("openai.AsyncOpenAI") as mock_openai_cls:
             mock_client = MagicMock()
-            mock_client.chat.completions.create.return_value = mock_response
+            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
             mock_openai_cls.return_value = mock_client
 
             done = run_contextualizer(conn, cfg)
@@ -190,8 +198,9 @@ class TestRunContextualizer:
         conn.commit()
 
         cfg = _make_cfg()
-        with patch("openai.OpenAI") as mock_openai_cls:
+        with patch("openai.AsyncOpenAI") as mock_openai_cls:
             mock_client = MagicMock()
+            mock_client.chat.completions.create = AsyncMock()
             mock_openai_cls.return_value = mock_client
 
             done = run_contextualizer(conn, cfg)
@@ -205,9 +214,11 @@ class TestRunContextualizer:
         conn.commit()
 
         cfg = _make_cfg()
-        with patch("openai.OpenAI") as mock_openai_cls:
+        with patch("openai.AsyncOpenAI") as mock_openai_cls:
             mock_client = MagicMock()
-            mock_client.chat.completions.create.side_effect = RuntimeError("接続失敗")
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=RuntimeError("接続失敗")
+            )
             mock_openai_cls.return_value = mock_client
 
             done = run_contextualizer(conn, cfg)
@@ -220,7 +231,7 @@ class TestRunContextualizer:
         assert "接続失敗" in row[0]
 
     def test_authentication_error_raises_immediately(self, conn):
-        """AuthenticationError は全件処理を中断して RuntimeError を raise する。"""
+        """AuthenticationError は全件処理を abort して RuntimeError を raise する。"""
         import openai as _openai
 
         _insert_msg(conn, "m1", "ch1", "hello world", "2024-01-01T00:00:00+00:00")
@@ -228,10 +239,12 @@ class TestRunContextualizer:
         conn.commit()
 
         cfg = _make_cfg()
-        with patch("openai.OpenAI") as mock_openai_cls:
+        with patch("openai.AsyncOpenAI") as mock_openai_cls:
             mock_client = MagicMock()
-            mock_client.chat.completions.create.side_effect = _openai.AuthenticationError(
-                message="invalid key", response=MagicMock(), body={}
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=_openai.AuthenticationError(
+                    message="invalid key", response=MagicMock(), body={}
+                )
             )
             mock_openai_cls.return_value = mock_client
 
@@ -244,18 +257,16 @@ class TestRunContextualizer:
         insert_chunk(conn, "chunk1", "m1", "ch1", "hello world")
         conn.commit()
 
-        cfg = _make_cfg()
-        cfg["contextualizer"]["max_retries"] = 2
+        cfg = _make_cfg(max_retries=2)
 
         success_resp = MagicMock()
         success_resp.choices[0].message.content = "リトライ成功コンテキスト"
 
-        with patch("openai.OpenAI") as mock_openai_cls:
+        with patch("openai.AsyncOpenAI") as mock_openai_cls:
             mock_client = MagicMock()
-            mock_client.chat.completions.create.side_effect = [
-                RuntimeError("一時エラー"),
-                success_resp,
-            ]
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=[RuntimeError("一時エラー"), success_resp]
+            )
             mock_openai_cls.return_value = mock_client
 
             done = run_contextualizer(conn, cfg)
@@ -266,6 +277,31 @@ class TestRunContextualizer:
         ).fetchone()
         assert row[0] == "リトライ成功コンテキスト"
 
+    def test_authentication_error_aborts_remaining_chunks(self, conn):
+        """認証エラー発生後、未処理チャンクへの API 呼び出しが止まることを確認する。"""
+        import openai as _openai
+
+        for i in range(3):
+            _insert_msg(conn, f"m{i}", "ch1", f"msg{i}", f"2024-01-01T00:0{i}:00+00:00")
+            insert_chunk(conn, f"chunk{i}", f"m{i}", "ch1", f"msg{i}")
+        conn.commit()
+
+        cfg = _make_cfg(concurrency=1)  # 逐次実行でabortの効果を確認
+        with patch("openai.AsyncOpenAI") as mock_openai_cls:
+            mock_client = MagicMock()
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=_openai.AuthenticationError(
+                    message="invalid key", response=MagicMock(), body={}
+                )
+            )
+            mock_openai_cls.return_value = mock_client
+
+            with pytest.raises(RuntimeError, match="認証エラー"):
+                run_contextualizer(conn, cfg)
+
+        # concurrency=1 なので最大1回の API 呼び出しで止まるはず
+        assert mock_client.chat.completions.create.call_count <= 1
+
     def test_processes_multiple_chunks(self, conn):
         for i in range(3):
             _insert_msg(conn, f"m{i}", "ch1", f"メッセージ{i}", f"2024-01-01T00:0{i}:00+00:00")
@@ -275,16 +311,16 @@ class TestRunContextualizer:
         cfg = _make_cfg()
         call_count = 0
 
-        def fake_create(**kwargs):
+        async def fake_create(**kwargs):
             nonlocal call_count
             call_count += 1
             resp = MagicMock()
             resp.choices[0].message.content = f"コンテキスト{call_count}"
             return resp
 
-        with patch("openai.OpenAI") as mock_openai_cls:
+        with patch("openai.AsyncOpenAI") as mock_openai_cls:
             mock_client = MagicMock()
-            mock_client.chat.completions.create.side_effect = fake_create
+            mock_client.chat.completions.create = AsyncMock(side_effect=fake_create)
             mock_openai_cls.return_value = mock_client
 
             done = run_contextualizer(conn, cfg)
