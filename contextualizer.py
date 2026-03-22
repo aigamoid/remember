@@ -3,9 +3,10 @@
 contextualizer.py - 各チャンクに LLM 生成の文脈説明を付与する（Phase 2.5）
 
 実行方法:
-    python contextualizer.py              # context_text が NULL のチャンクのみ処理
-    python contextualizer.py --clean      # context_text + error_message を NULL 化して全件再処理
-    python contextualizer.py --dry-run    # API コールなし・処理対象件数と推定コストを表示
+    python contextualizer.py                        # context_text が NULL のチャンクのみ処理
+    python contextualizer.py --clean                # context_text + error_message を NULL 化して全件再処理
+    python contextualizer.py --dry-run              # API コールなし・処理対象件数と推定コストを表示
+    python contextualizer.py --concurrency 20       # 同時実行数を指定（デフォルト: config の値 or 10）
 """
 
 import argparse
@@ -63,10 +64,17 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--clean", action="store_true", help="context_text を全リセットして再処理")
     mode.add_argument("--dry-run", action="store_true", help="処理対象件数と推定コストを表示して終了")
+    parser.add_argument(
+        "--concurrency", type=int, default=None,
+        help="同時実行数（デフォルト: config の値 or 10）",
+    )
     args = parser.parse_args()
 
     load_dotenv()
     cfg = load_config()
+
+    if args.concurrency is not None:
+        cfg.setdefault("contextualizer", {})["concurrency"] = args.concurrency
 
     db_path = Path("data/messages.db")
     conn = init_db(db_path)
