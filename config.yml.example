@@ -30,9 +30,11 @@ ollama:
 
 openai:
   api_key: ""              # 空なら環境変数 OPENAI_API_KEY を使用
+  base_url: ""             # 空=OpenAIデフォルト / OpenRouter: https://openrouter.ai/api/v1
 
 contextualizer:
   model: "gpt-4.1-nano"   # コンテキスト生成モデル
   preceding_messages: 10  # 直前のメッセージ参照数
   max_retries: 3          # API エラー時のリトライ回数
   retry_delay: 1.0        # リトライ間隔（秒）
+  concurrency: 10         # 同時実行数（--concurrency 引数で上書き可）
