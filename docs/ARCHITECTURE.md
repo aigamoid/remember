@@ -11,7 +11,7 @@ waiwai-oracle/
 │   ├── CONFIG.md
 │   └── OPEN_ISSUES.md
 ├── src/
-│   ├── config.py          # config.yml / .env ロード
+│   ├── config.py          # config.yml ロード
 │   ├── models.py          # dataclass定義（RawMessage, Chunk等）
 │   ├── db.py              # SQLite操作
 │   ├── formatter.py       # メッセージ→テキスト変換（共通）
@@ -19,9 +19,12 @@ waiwai-oracle/
 │   │   ├── base.py        # MessageCollector ABC
 │   │   └── text_channel.py # TextChannelCollector実装
 │   ├── chunker.py         # チャンク生成ロジック（時間ギャップ方式）
+│   ├── contextualizer.py  # LLMによる context_text 付与ロジック（Phase 2.5）
 │   └── exporter.py        # chunk_index → output/*.txt 出力
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
+├── crawler.py             # Phase 1 エントリポイント
 ├── chunker.py             # Phase 2 エントリポイント
+├── contextualizer.py      # Phase 2.5 エントリポイント
 ├── exporter.py            # Phase 3 エントリポイント
 ├── config.yml.example
 ├── .env.example
@@ -36,17 +39,21 @@ waiwai-oracle/
 ```
 Discord API
     ↓
-collectors/text_channel.py   # TextChannelCollector
+crawler.py → collectors/text_channel.py   # TextChannelCollector
     ↓
 db.py                        # messages テーブルに保存
     ↓
 chunker.py                   # 時間ギャップ方式でチャンク生成
     ↓
-db.py                        # chunk_index テーブルに保存
+db.py                        # chunk_index テーブルに保存（context_text=NULL）
+    ↓
+contextualizer.py            # LLMで context_text を生成・付与（Phase 2.5）
+    ↓
+db.py                        # chunk_index.context_text を更新
     ↓
 exporter.py                  # chunk_index を読んで output/*.txt に出力
     ↓
-output/{channel}_{date}.txt  # Dify へブラウザから手動アップロード
+output/{safe_name}_{channel_id[:8]}_{YYYYMMDD}.txt  # Dify へブラウザから手動アップロード
 ```
 
 ## 設計方針
@@ -58,8 +65,9 @@ output/{channel}_{date}.txt  # Dify へブラウザから手動アップロー�
 ```python
 class MessageCollector(ABC):
     @abstractmethod
-    async def collect(self) -> AsyncIterator[RawMessage]:
-        pass
+    async def collect(self, conn: sqlite3.Connection, run_id: str) -> int:
+        """メッセージを収集して DB に保存し、収集件数を返す。"""
+        ...
 ```
 
 ### 冪等性
