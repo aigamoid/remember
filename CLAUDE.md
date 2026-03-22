@@ -8,10 +8,11 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
 |---|---|---|
 | 0 | `dry_run.py` | メッセージ数カウントのみ（本取得なし） |
 | 1 | `crawler.py` | Discord全メッセージ → SQLite |
-| 2 | `chunker.py` | スライディングウィンドウでチャンク生成 |
-| 3 | `uploader.py` | Dify Knowledge APIへアップロード |
+| 2 | `chunker.py` | 時間ギャップ方式でチャンク生成 |
+| 2.5 | `contextualizer.py` | LLMで各チャンクに context_text を付与 |
+| 3 | `exporter.py` | chunk_index → output/*.txt へファイル出力 |
 
-実行順: `dry_run.py` → `crawler.py` → `chunker.py` → `uploader.py`
+実行順: `dry_run.py` → `crawler.py` → `chunker.py` → `contextualizer.py` → `exporter.py`
 
 ## 詳細ドキュメント
 
@@ -26,6 +27,25 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
   過去フェーズで確定した設計決定（例: Difyメタデータフィルタ不使用）がここに記録されている。
   読まずにプランを立てると、決定済み事項を「抜け」として誤指摘するリスクがある。
 
+### ファイルを追加・削除・改名したときのドキュメント更新ルール
+
+以下のドキュメントに古い名前が残っていないか確認し、必要なら更新すること。
+
+| 確認対象 | チェック内容 |
+|---|---|
+| `CLAUDE.md`（このファイル） | フェーズ構成表のスクリプト名、技術スタック |
+| `docs/ARCHITECTURE.md` | ディレクトリ構成ツリー、データフロー図 |
+| `docs/SCHEMA.md` | カラム説明コメント（`xxx.py が〜` 形式） |
+| `docs/CONFIG.md` | 設定項目の説明 |
+| 変更ファイルの docstring | 「〇〇から使用」形式の呼び出し元ファイル名 |
+
+**自動チェック（pre-commit hook）**:
+`scripts/check_docs.py` が CLAUDE.md と docs/ARCHITECTURE.md 内の `.py` 参照を検証する。
+初回セットアップ時に以下を実行すること:
+```sh
+sh scripts/install_hooks.sh
+```
+
 ## Git運用ルール
 
 - ブランチ戦略: GitFlow
@@ -37,14 +57,9 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
 
 - Python 3.11+
 - discord.py / SQLite / Docker
-- Dify Knowledge API（アップロード先）
-- OpenAI `text-embedding-3-small`（Embedding ※旧: Ollama bge-m3、Difyプラグインバグで変更）
+- Dify（RAGチャットボット基盤 ※ブラウザから手動アップロード）
+- OpenAI API（`contextualizer.py` の context_text 生成に使用）
 
-## チャンキング設計メモ（Claude Codeへ）
+## 作業ログ
 
-- **現状**: uploader.py は messages テーブルを直接連結して Dify に送信（chunk_index 不使用）
-- **問題**: セパレータ `\n\n` = メッセージ結合文字のため 1メッセージ = 1チャンク
-- **検討中**: セマンティックチャンキング（Python 側で事前分割）
-  - Dify にはセマンティック分割機能なし → uploader 側で embedding して境界検出
-  - 実装したら `--clean` で全チャンネル再アップロードが必要
-- **作業ログ** → `docs/DEVLOG.md` 参照
+`docs/DEVLOG.md` 参照
