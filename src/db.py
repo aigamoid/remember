@@ -145,12 +145,28 @@ def insert_chunk(
 ) -> None:
     conn.execute(
         """
-        INSERT OR IGNORE INTO chunk_index
+        INSERT OR REPLACE INTO chunk_index
             (chunk_id, anchor_msg_id, channel_id, chunk_text)
         VALUES (?,?,?,?)
         """,
         (chunk_id, anchor_msg_id, channel_id, chunk_text),
     )
+
+
+def fetch_chunks_by_channel(conn: sqlite3.Connection, channel_id: str) -> list[str]:
+    """指定 channel_id のチャンクを anchor メッセージの timestamp 昇順で返す。
+    同時刻メッセージは m.id で安定ソート。
+    """
+    rows = conn.execute(
+        """
+        SELECT ci.chunk_text FROM chunk_index ci
+        JOIN messages m ON ci.anchor_msg_id = m.id
+        WHERE ci.channel_id = ?
+        ORDER BY m.timestamp ASC, m.id ASC
+        """,
+        (channel_id,),
+    ).fetchall()
+    return [row[0] for row in rows]
 
 
 def count_chunks(conn: sqlite3.Connection, status: str | None = None) -> int:
