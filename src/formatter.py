@@ -1,4 +1,4 @@
-"""メッセージ→テキスト変換の共通関数。chunker / uploader から使用。"""
+"""メッセージ→テキスト変換の共通関数。chunker / contextualizer / exporter から使用。"""
 
 from __future__ import annotations
 
