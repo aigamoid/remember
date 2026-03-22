@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from src.chunker import _build_chunk_text, generate_chunk_id, run_chunker
+from src.chunker import _build_chunk_text, _is_noise, generate_chunk_id, run_chunker
 from src.db import _DDL, count_chunks, insert_chunk
 
 
@@ -36,11 +36,17 @@ def _insert_msg(
     )
 
 
-def _make_cfg(window_before: int = 2, window_after: int = 2, min_content_length: int = 4) -> dict:
+def _make_cfg(
+    time_gap_minutes: int = 60,
+    max_chunk_messages: int = 30,
+    min_content_length: int = 10,
+    short_reply_max_chars: int = 10,
+) -> dict:
     return {"chunk": {
-        "window_before": window_before,
-        "window_after": window_after,
+        "time_gap_minutes": time_gap_minutes,
+        "max_chunk_messages": max_chunk_messages,
         "min_content_length": min_content_length,
+        "short_reply_max_chars": short_reply_max_chars,
         "timezone_offset": 9,
     }}
 
@@ -49,21 +55,15 @@ def _make_cfg(window_before: int = 2, window_after: int = 2, min_content_length:
 
 class TestGenerateChunkId:
     def test_returns_32_char_hex(self):
-        result = generate_chunk_id("msg-1", 2, 2)
+        result = generate_chunk_id("msg-1")
         assert isinstance(result, str)
         assert len(result) == 32
 
     def test_is_deterministic(self):
-        assert generate_chunk_id("msg-1", 2, 2) == generate_chunk_id("msg-1", 2, 2)
+        assert generate_chunk_id("msg-1") == generate_chunk_id("msg-1")
 
     def test_differs_by_anchor(self):
-        assert generate_chunk_id("msg-1", 2, 2) != generate_chunk_id("msg-2", 2, 2)
-
-    def test_differs_by_window_before(self):
-        assert generate_chunk_id("msg-1", 2, 2) != generate_chunk_id("msg-1", 3, 2)
-
-    def test_differs_by_window_after(self):
-        assert generate_chunk_id("msg-1", 2, 2) != generate_chunk_id("msg-1", 2, 3)
+        assert generate_chunk_id("msg-1") != generate_chunk_id("msg-2")
 
 
 # ── _build_chunk_text ──────────────────────────────────────────────────────
@@ -134,20 +134,59 @@ class TestInsertChunk:
         assert count_chunks(conn, status="no_such_status") == 0
 
 
-# ── run_chunker ────────────────────────────────────────────────────────────
+# ── run_chunker（時間ギャップ方式） ─────────────────────────────────────────
 
 class TestRunChunker:
-    def test_generates_chunks_for_valid_messages(self, conn):
-        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ", timestamp="2024-01-01T00:01:00+00:00")
-        _insert_msg(conn, "m2", "ch1", "これも十分な長さです", timestamp="2024-01-01T00:02:00+00:00")
+    def test_messages_within_gap_form_single_chunk(self, conn):
+        """1分間隔（< 60分）のメッセージは同一チャンクにまとめられる。"""
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ", timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "これも十分な長さです", timestamp="2024-01-01T00:01:00+00:00")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(), "run-1")
+        assert total == 1
+        assert count_chunks(conn) == 1
+
+    def test_messages_exceeding_gap_split_into_chunks(self, conn):
+        """61分間隔（>= 60分）のメッセージは別チャンクになる。"""
+        _insert_msg(conn, "m1", "ch1", "最初のメッセージ内容です", timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "61分後のメッセージ内容です", timestamp="2024-01-01T01:01:00+00:00")
         conn.commit()
 
         total = run_chunker(conn, _make_cfg(), "run-1")
         assert total == 2
         assert count_chunks(conn) == 2
 
+    def test_boundary_59min_same_chunk(self, conn):
+        """59分間隔は同一チャンク（< 60分）。"""
+        _insert_msg(conn, "m1", "ch1", "最初のメッセージ", timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "59分後のメッセージ", timestamp="2024-01-01T00:59:00+00:00")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(time_gap_minutes=60), "run-1")
+        assert total == 1
+
+    def test_boundary_60min_split(self, conn):
+        """60分間隔は別チャンク（>= 60分）。"""
+        _insert_msg(conn, "m1", "ch1", "最初のメッセージ内容です", timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "60分後のメッセージ内容です", timestamp="2024-01-01T01:00:00+00:00")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(time_gap_minutes=60), "run-1")
+        assert total == 2
+
+    def test_max_chunk_messages_triggers_split(self, conn):
+        """max_chunk_messages 超過でチャンクが分割される。"""
+        for i in range(6):
+            ts = f"2024-01-01T00:0{i}:00+00:00"
+            _insert_msg(conn, f"m{i}", "ch1", f"メッセージ{i}番目の内容", timestamp=ts)
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(time_gap_minutes=60, max_chunk_messages=3), "run-1")
+        assert total == 2
+
     def test_short_content_without_attachment_skipped(self, conn):
-        _insert_msg(conn, "m1", "ch1", "ab", has_attachment=0)  # 2文字 < min_len=4
+        _insert_msg(conn, "m1", "ch1", "ab", has_attachment=0)  # 2文字 < min_len=10
         conn.commit()
         assert run_chunker(conn, _make_cfg(), "run-1") == 0
 
@@ -178,22 +217,162 @@ class TestRunChunker:
         run_chunker(conn, _make_cfg(), "run-2")
         assert count_chunks(conn) == first_count
 
-    def test_rerun_returns_same_candidate_count(self, conn):
-        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ")
-        conn.commit()
-
-        first = run_chunker(conn, _make_cfg(), "run-1")
-        second = run_chunker(conn, _make_cfg(), "run-2")
-        assert first == second == 1
-
-    def test_chunk_text_saved_in_db(self, conn):
-        _insert_msg(conn, "m1", "ch1", "テスト内容", author="UserA",
+    def test_chunk_text_contains_all_messages_in_group(self, conn):
+        """同一チャンク内に全メッセージが含まれていること。"""
+        _insert_msg(conn, "m1", "ch1", "最初のテストメッセージです", author="UserA",
                     timestamp="2024-01-01T12:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "次のテストメッセージです", author="UserB",
+                    timestamp="2024-01-01T12:01:00+00:00")
         conn.commit()
 
         run_chunker(conn, _make_cfg(), "run-1")
         row = conn.execute("SELECT chunk_text FROM chunk_index").fetchone()
         assert row is not None
         assert "UserA" in row[0]
-        assert "テスト内容" in row[0]
+        assert "UserB" in row[0]
+        assert "最初のテストメッセージです" in row[0]
+        assert "次のテストメッセージです" in row[0]
         assert "[2024-01-01 21:00]" in row[0]  # UTC→JST(+9)
+
+
+# ── _is_noise ───────────────────────────────────────────────────────────────
+
+class TestIsNoise:
+    def test_has_attachment_always_false(self):
+        assert _is_noise("ab", True, 10) is False
+
+    def test_short_content_without_attachment(self):
+        assert _is_noise("abc", False, 10) is True
+
+    def test_long_enough_content_not_noise(self):
+        assert _is_noise("十分な長さのメッセージ", False, 10) is False
+
+    def test_url_only_is_noise(self):
+        assert _is_noise("https://example.com/foo", False, 5) is True
+
+    def test_url_with_leading_space_is_noise(self):
+        assert _is_noise("  https://example.com/foo  ", False, 5) is True
+
+    def test_url_with_text_is_not_noise(self):
+        assert _is_noise("見て https://example.com", False, 5) is False
+
+    def test_at_here_is_noise(self):
+        assert _is_noise("@here", False, 5) is True
+
+    def test_at_everyone_is_noise(self):
+        assert _is_noise("@everyone", False, 5) is True
+
+    def test_at_here_with_spaces_is_noise(self):
+        assert _is_noise("@here  ", False, 5) is True
+
+    def test_at_mention_user_is_not_noise(self):
+        assert _is_noise("@username みてみて", False, 5) is False
+
+    def test_whitespace_only_is_noise(self):
+        assert _is_noise("   ", False, 10) is True
+
+
+# ── ノイズフィルター統合テスト ───────────────────────────────────────────────
+
+class TestRunChunkerNoiseFilter:
+    def test_url_only_message_skipped(self, conn):
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ",
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "https://example.com/very/long/url/here",
+                    timestamp="2024-01-01T00:01:00+00:00")
+        conn.commit()
+
+        run_chunker(conn, _make_cfg(), "run-1")
+        row = conn.execute("SELECT chunk_text FROM chunk_index").fetchone()
+        assert "example.com" not in row[0]
+
+    def test_at_here_skipped(self, conn):
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ",
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "@here",
+                    timestamp="2024-01-01T00:01:00+00:00")
+        conn.commit()
+
+        run_chunker(conn, _make_cfg(), "run-1")
+        row = conn.execute("SELECT chunk_text FROM chunk_index").fetchone()
+        assert "@here" not in row[0]
+
+    def test_whitespace_only_skipped(self, conn):
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ",
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "   ",
+                    timestamp="2024-01-01T00:01:00+00:00")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(), "run-1")
+        assert total == 1
+        row = conn.execute("SELECT chunk_text FROM chunk_index").fetchone()
+        assert row[0].count("\n") == 0  # 1行のみ
+
+
+# ── 短文吸収テスト ──────────────────────────────────────────────────────────
+
+class TestRunChunkerShortReply:
+    def test_short_reply_absorbed_into_previous_chunk(self, conn):
+        """短文（≤10文字）はギャップ内なら直前チャンクに吸収される。"""
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ",
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "はい",  # 2文字 <= 10
+                    timestamp="2024-01-01T00:05:00+00:00")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(), "run-1")
+        assert total == 1
+        row = conn.execute("SELECT chunk_text FROM chunk_index").fetchone()
+        assert "はい" in row[0]
+
+    def test_short_reply_after_large_gap_starts_new_chunk(self, conn):
+        """長時間ギャップ後の短文は吸収されず通常フロー（ノイズフィルターを通る）。"""
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ",
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "十分な長さの別メッセージ",  # 通常メッセージ（新チャンク）
+                    timestamp="2024-01-01T02:00:00+00:00")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(), "run-1")
+        assert total == 2
+
+    def test_short_reply_after_large_gap_alone_is_filtered(self, conn):
+        """長時間ギャップ後の短文は通常フロー → min_content_length で除去。"""
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ",
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "はい",  # 2文字 < min_len=10、ギャップ後
+                    timestamp="2024-01-01T02:00:00+00:00")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(), "run-1")
+        assert total == 1  # 「はい」は除去されて m1 のチャンクのみ
+
+    def test_at_here_not_absorbed_even_within_gap(self, conn):
+        """@here は短文でもギャップ内でも吸収しない。"""
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ",
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "@here",
+                    timestamp="2024-01-01T00:05:00+00:00")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(), "run-1")
+        assert total == 1
+        row = conn.execute("SELECT chunk_text FROM chunk_index").fetchone()
+        assert "@here" not in row[0]
+
+    def test_max_chunk_messages_respected_with_short_replies(self, conn):
+        """短文吸収時も max_chunk_messages を超えたらフラッシュし、次の通常メッセージで新チャンク。"""
+        _insert_msg(conn, "m1", "ch1", "通常メッセージその一つ目",   # 12文字（通常）
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "は",                          # 1文字（短文）
+                    timestamp="2024-01-01T00:01:00+00:00")
+        _insert_msg(conn, "m3", "ch1", "うん",                        # 2文字（短文）→ len=3 >= max=3 でフラッシュ
+                    timestamp="2024-01-01T00:02:00+00:00")
+        _insert_msg(conn, "m4", "ch1", "通常メッセージその二つ目",   # 12文字（通常）→ 新チャンク
+                    timestamp="2024-01-01T00:03:00+00:00")
+        conn.commit()
+
+        # max=3: [m1,m2,m3] でフラッシュ → [m4] でフラッシュ = 2チャンク
+        total = run_chunker(conn, _make_cfg(max_chunk_messages=3), "run-1")
+        assert total == 2
