@@ -27,3 +27,12 @@ dify:
 ollama:
   endpoint: "http://<TailscaleIP>:11434"
   embed_model: "bge-m3"
+
+openai:
+  api_key: ""              # 空なら環境変数 OPENAI_API_KEY を使用
+
+contextualizer:
+  model: "gpt-4.1-nano"   # コンテキスト生成モデル
+  preceding_messages: 10  # 直前のメッセージ参照数
+  max_retries: 3          # API エラー時のリトライ回数
+  retry_delay: 1.0        # リトライ間隔（秒）
