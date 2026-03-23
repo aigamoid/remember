@@ -4,6 +4,33 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-03-23 — GitHubプッシュ前 安全性チェック & .gitignore修正
+
+### 変更内容
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `.gitignore` | output/, dry_run_result*.txt, .aider.*, dify/, slides/ を追加 |
+
+### 実施内容
+
+- GitHubプッシュ前に機密情報・個人情報のリスクチェックを実施（Codexと協力）
+- `.env` / `config.yml` / `data/` はすでに除外済みで安全と確認
+- `output/`（Discordメッセージ全文・ユーザー名含む）が未除外だったため追加（高リスク）
+- `dry_run_result*.txt`（サーバーID・チャンネルID）、`.aider.*`、`dify/`、`slides/` も追加
+
+### 決定事項
+
+- `dify/` と `slides/` はユーザー判断で非公開（.gitignore追加）
+- コミット済みPythonスクリプトはすべて `load_dotenv()` で環境変数読み込み済み → 安全
+
+### ハマりポイント
+
+- 誤って `feature/moimoichan-discord-bot` でコミットしてしまった
+  → `git cherry-pick` で `feature/waiwai-oracle` に移植後、`git branch -f` で元ブランチを修正
+
+---
+
 ## 2026-03-23 — Dify exportファイル削除・断念確定
 
 ### 変更内容
