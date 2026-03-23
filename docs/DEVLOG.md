@@ -31,6 +31,29 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-03-23 — Dify SaaS移行調査・断念
+
+### 実施内容
+
+- セルフホスト版 Dify → SaaS版への移行手順を検討
+- Dify ナレッジベースには UI エクスポート機能がないことを確認
+- セルフホスト版 API（`GET /datasets/{id}/documents`・`GET /datasets/{id}/documents/{id}/segments`）でチャンクを全取得 → JSON保存するエクスポートスクリプト案を設計
+- SaaS版で「Failed to invoke text embedding」エラー発生 → 原因：SaaS版は embedding モデルの API キー（OpenAI等）をユーザーが持ち込む必要がある（Model Provider 設定が未設定）
+- 今セッションは解決に至らず、SaaS移行を一旦保留
+
+### 決定事項
+
+- **Dify SaaS移行は保留**（embedding 設定問題が解消できず）
+- セルフホスト版 Dify を引き続き使用する
+- ナレッジベースのエクスポートには API を使う方針（`dify_export.py` は未実装のまま）
+
+### 次のステップ
+
+- SaaS移行を再開する場合: Dify SaaS の Model Provider に OpenAI API キーを登録してから再試行
+- またはセルフホスト版のまま運用継続
+
+---
+
 ## 2026-03-23 — Dify フロー：現在日時注入
 
 ### 変更内容
