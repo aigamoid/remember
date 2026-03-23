@@ -27,3 +27,17 @@ venv/
 
 # macOS
 .DS_Store
+
+# 出力データ（Discordメッセージ含む）
+output/
+
+# 実行結果ファイル（チャンネルID・統計含む）
+dry_run_result*.txt
+
+# Aiderツール履歴
+.aider.chat.history.md
+.aider.input.history
+
+# Difyワークフロー・発表資料（非公開）
+dify/
+slides/
