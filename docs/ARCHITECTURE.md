@@ -4,6 +4,7 @@
 
 ```
 waiwai-oracle/
+├── README.md
 ├── CLAUDE.md
 ├── docs/
 │   ├── ARCHITECTURE.md   (このファイル)
