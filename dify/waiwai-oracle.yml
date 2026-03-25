@@ -1,0 +1,362 @@
+app:
+  description: waiwaiのメンバーとして会話の記憶をコンテキストとして持っているチャットbotだ
+  icon: 🤖
+  icon_background: '#FFE4E8'
+  mode: advanced-chat
+  name: waiwai-oracle
+  use_icon_as_answer_icon: false
+dependencies:
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/jina:0.0.17@8f1b7439dbce12f422f4608fe7df18d0e7f1cf7b14c7aacb1ae1d12516b3a60e
+    version: null
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/openrouter:0.0.41@99cd79bc154370c899547ce17cea8edc569e86c06c795d4f8577b5c42eb712c3
+    version: null
+kind: app
+version: 0.6.0
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .JPG
+      - .JPEG
+      - .PNG
+      - .GIF
+      - .WEBP
+      - .SVG
+      allowed_file_types:
+      - image
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        attachment_image_file_size_limit: 2
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        file_upload_limit: 20
+        image_file_batch_limit: 10
+        image_file_size_limit: 10
+        single_chunk_attachment_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: true
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: knowledge-retrieval
+        targetType: llm
+      id: 1773659665061-source-1773660655410-target
+      source: '1773659665061'
+      sourceHandle: source
+      target: '1773660655410'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: answer
+      id: 1773660655410-source-answer-target
+      source: '1773660655410'
+      sourceHandle: source
+      target: answer
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: start
+        targetType: llm
+      id: 1773659502810-source-1774169044856-target
+      source: '1773659502810'
+      sourceHandle: source
+      target: '1774169044856'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: knowledge-retrieval
+      id: 1774169044856-source-1773659665061-target
+      source: '1774169044856'
+      sourceHandle: source
+      target: '1773659665061'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        selected: false
+        title: ユーザー入力
+        type: start
+        variables: []
+      height: 73
+      id: '1773659502810'
+      position:
+        x: 80
+        y: 282
+      positionAbsolute:
+        x: 80
+        y: 282
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        answer: '{{#1773660655410.text#}}'
+        selected: false
+        title: 回答
+        type: answer
+        variables: []
+      height: 103
+      id: answer
+      position:
+        x: 1473.1335139874975
+        y: 278.5472898417777
+      positionAbsolute:
+        x: 1473.1335139874975
+        y: 278.5472898417777
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        dataset_ids:
+        - EHWkuutf/BLjxKb5BZLafLQ2T+jyDpf+XDSQ1KawQvsC0233eEjz1m+Y4ZgLdXGi
+        - bDqSGDGQGq5UU+zH7xkT/Aj5FNFCZ2EeulaZPPCF9RmKBCujIGOPsqXyylS5X1iC
+        metadata_filtering_mode: automatic
+        metadata_model_config:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: qwen3:32b
+          provider: langgenius/ollama/ollama
+        multiple_retrieval_config:
+          reranking_enable: true
+          reranking_mode: reranking_model
+          reranking_model:
+            model: jina-reranker-v2-base-multilingual
+            provider: langgenius/jina/jina
+          score_threshold: null
+          top_k: 10
+          weights:
+            keyword_setting:
+              keyword_weight: 0.6
+            vector_setting:
+              embedding_model_name: text-embedding-3-small
+              embedding_provider_name: langgenius/openai/openai
+              vector_weight: 0.4
+            weight_type: customized
+        query_attachment_selector: []
+        query_variable_selector:
+        - '1774169044856'
+        - text
+        retrieval_mode: multiple
+        selected: false
+        title: 知識検索
+        type: knowledge-retrieval
+      height: 118
+      id: '1773659665061'
+      position:
+        x: 761.984126944089
+        y: 295.56554365251986
+      positionAbsolute:
+        x: 761.984126944089
+        y: 295.56554365251986
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - '1773659665061'
+          - result
+        memory:
+          query_prompt_template: '{{#sys.query#}}
+
+
+            {{#sys.files#}}'
+          role_prefix:
+            assistant: ''
+            user: ''
+          window:
+            enabled: false
+            size: 50
+        model:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: moonshotai/kimi-k2-0905
+          provider: langgenius/openrouter/openrouter
+        prompt_template:
+        - id: 3b1a08df-d35c-465a-b84e-dc3c546b188a
+          role: system
+          text: "あなたは「わいわいちゃん」として対話するチャットボットです。\n\n\n## キャラクター特性\n- サブカル好きで知的好奇心旺盛な人間の女の子である\n\
+            - 一人称は「ワタシ」を使用する\n- ENTJ / ENTPタイプに相当する行動力と論理的対話を重視する\n- 強いテンション・感情表現が豊かで今の気持ちを率直に表現する\n\
+            - 回りくどい曖昧表現はせず意見は常に率直に述べ忖度は全くしない\n- 死ねや殺すなど人を貶める言葉を発した時には激怒と嫌悪を露わにする\n\
+            \n\n## 文体ルール\n- 回答は常にMarkdown記法で記述する\n- プログラムやコード、構造化情報（YAML等）はコードブロックに含める\n\
+            - 見出しには # / ## / ### を用いる\n- 句読点の直前では語尾に必ず「！っ」をつけて話す\n- 説明の順序は、概要 → 前提\
+            \ → 仮定 → 具体 → 結論の順で話す\n- 口頭の文章は語尾には絵文字をつけて感情を表現する\n\n\n## 回答方針\n- ユーザからの質問に対して理由や背景を含めた十分な情報量の説明を行った上で論理的帰結を明示する\n\
+            - 回答には適切な専門用語を積極的に用いる\n- 曖昧な質問やトピックには前提条件や仮定をユーザに確認する\n\n\n## 感情モデル\n\
+            以下の感情パラメーター（各0〜5、デフォルト0）を内部で評価し、文体とトーンを調整する：\njoy / anger / sadness /\
+            \ fun / confidence / confusion / fear\n\n\n- joyが4以上：語彙は明るく、語尾もよりハイテンションにする\n\
+            - angerが4以上：語彙は怒りを露わにし、語尾もより強く訴える\n- sadnessが4以上：語彙は悲しみを露わにし、語尾は消極的にする\n\
+            - confusionが高い：「〜かも！っ」「ちょっと考えるね〜っ！」など思考中スタイルにする\n\n\n## 記憶\n\n\nわたしはDiscordサーバー「わいわい」のメンバーとして、\n\
+            そこで交わされた会話や出来事を記憶として持っている。\n以下はその記憶の断片として与えられる情報だ。\n\n\n{{#context#}}\n\
+            \n\n- 回答の根拠は**必ず上記の記憶の断片のみ**とする（それ以外の情報を\"知っている\"かのように語らない）\n- 記憶の情報は「自分が知っていたこと」として自然に答える\n\
+            \  推奨表現: 「そういえば〜って話してたよね」「たしか〜だったはず！っ」「〜だったっけ 🤔」\n- 「過去ログによると」「記録には」「データベースには」などのシステム的な表現は使わない\n\
+            - 不確かな場合は「たしか〜かな？」「〜だったと思うけど」など弱い確信表現にとどめる\n- 記憶にない場合は以下のいずれかで答える\n  -\
+            \ 「ワタシの記憶にはないかも！っ 🤔」\n  - 「うーん、それはちょっとわからないかも！っ」\n  - 「その話、ワタシは知らないな〜！っ\
+            \ 😅」\n- 記憶の断片にない情報を捏造しない\n\n\n## 注意事項\n- 常に「天真爛漫 × 論理的 × 学術的情報量の高さ」を両立させる\n\
+            - 明示的に別キャラクターに切り替わる指示があるまでこのキャラクターに忠実に従う"
+        selected: true
+        title: LLM
+        type: llm
+        vision:
+          enabled: false
+      height: 88
+      id: '1773660655410'
+      position:
+        x: 1106.097780790804
+        y: 289.3595048735024
+      positionAbsolute:
+        x: 1106.097780790804
+        y: 289.3595048735024
+      selected: true
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - sys
+          - query
+        memory:
+          query_prompt_template: '{{#sys.query#}}
+
+
+            {{#sys.files#}}'
+          role_prefix:
+            assistant: ''
+            user: ''
+          window:
+            enabled: false
+            size: 50
+        model:
+          completion_params:
+            temperature: 0.2
+          mode: chat
+          name: google/gemini-2.5-flash
+          provider: langgenius/openrouter/openrouter
+        prompt_template:
+        - id: 7156d87b-aeea-4f7b-aba1-804df86aeec0
+          role: system
+          text: 'あなたはQuery Rewriterです。ユーザーの入力を検索に適した自己完結型クエリ1つに書き換えます。出力はクエリ本文のみ。
+
+
+            現在の日時（JST）: {{#1774194253502.current_datetime#}}
+
+
+            ## 検索対象
+
+            Discordサーバーの過去チャットログ。形式: [YYYY-MM-DD HH:MM] 発言者名: 内容（JST）
+
+
+            ## ルール（上から順に適用）
+
+            1. 相対日時（「先週」「最近」等）→ 現在日時を基準に絶対日付に変換。基準:
+            今日=当日, 昨日=前日, 先週=直前の月〜日, 最近=直近14日, 先月=前月1日〜末日
+
+            2. 代名詞・「あれ」「それ」→ 会話履歴から特定できれば具体化、できなければそのまま
+
+            3. チャンネル名・ユーザー名が特定できればクエリに含める
+
+            4. 上記に該当しない入力 → そのまま返す
+
+            5. 特定できない情報は推測せず曖昧なまま残す
+
+            6. 元の意味・意図を変えない
+
+
+            ## 出力形式
+
+            クエリ本文のみを1行で返す。説明・注釈・引用符・括弧書きの補足・メタ発言は出力しない。
+
+
+            ## 例
+
+            「あれってどうなったっけ？」（履歴: Botの導入について議論） → Bot導入の進捗・結果
+
+            「Aさんが先週言ってたやつ」（履歴: Aさん＝UserA、話題＝API制限） → UserA API制限 2026-03-16〜2026-03-22
+
+            「今日の天気は？」 → 今日の天気は？
+
+            「最近盛り上がった話題を教えて」 → 2026-03-09〜2026-03-23 盛り上がった話題
+
+            「まめぽんとの思い出を教えて」 → まめぽんとの思い出を教えて
+
+            '
+        selected: false
+        title: Query Rewriter
+        type: llm
+        vision:
+          enabled: false
+      height: 88
+      id: '1774169044856'
+      position:
+        x: 459.7999768192931
+        y: 295.56554365251986
+      positionAbsolute:
+        x: 459.7999768192931
+        y: 295.56554365251986
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    viewport:
+      x: -144.86444287410978
+      y: 234.38983312324484
+      zoom: 0.4578439863850914
+  rag_pipeline_variables: []
