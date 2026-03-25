@@ -4,6 +4,29 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-03-25 — GitHub運用整備（PR・ブランチマージ・README）
+
+### 変更内容
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `README.md` | 新規作成（プロジェクト概要・セットアップ手順・技術スタック） |
+
+### 実施内容
+
+- GitFlow運用の整備: `develop` ブランチを `main` から新規作成
+- `feature/waiwai-oracle` → `develop` をマージ（Fast-forward）
+- `feature/moimoichan-discord-bot` → `develop` を初めてのPRで作成・マージ（PR #4）
+- `.gitignore` のコンフリクト解消（Accept both changes）
+- `README.md` を `develop` に直接コミット
+
+### 決定事項
+
+- `develop` への小さな変更（README等）は直接コミット、機能追加は feature ブランチ + PR
+- PR は変更履歴の記録として活用する
+
+---
+
 ## 2026-03-25 — Query Rewriter プロンプト最適化・モデル変更
 
 ### 変更内容
