@@ -4,6 +4,72 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-03-25 — Query Rewriter プロンプト最適化・モデル変更
+
+### 変更内容
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `dify/waiwai-oracle.yml` | Query Rewriter のモデルを Kimi K2 → Gemini 2.0 Flash に変更、プロンプト全面書き換え |
+
+### 実施内容
+
+- Query Rewriter のボトルネック分析（19.3秒 / 11Kトークン）
+- Kimi K2 の問題を特定: 「（会話履歴がありません）」等の不要なメタ発言を出力、thinking モードによるトークン膨張
+- モデル候補比較 → Gemini 2.0 Flash を採用（指示遵守・速度・コスト）
+- プロンプトを Gemini Flash 向けに最適化（3者レビュー実施）
+
+### ハマりポイント
+
+1. **Kimi K2 の「親切」癖**: 会話履歴が空の場合に「（会話履歴がありません）」と状況報告してしまう。禁止事項を明記しても無視する傾向
+2. **few-shot 例の `入力:/出力:` ラベル**: Gemini Flash が `入力: ... 出力: ...` をフォーマットの一部と解釈し、回答にラベルを含めてしまう → `→` 形式に変更で解決
+3. **Dify ノードの変数注入**: ユーザークエリが LLM に正しく渡されない問題 → Dify の Memory/Context 設定の確認が必要だった
+
+### 決定事項
+
+- Query Rewriter は **Gemini 2.0 Flash**（`google/gemini-2.0-flash-001`）を使用
+- Thinking mode OFF、temperature 0.2
+- 曖昧時間語を定義済み（最近=14日、先週=直前の月〜日、先月=前月1日〜末日）
+- few-shot 例は `→` 形式で記述（ラベル形式は避ける）
+
+### 実行結果
+
+- 処理時間: 19.3秒 → **0.5秒**（約97%短縮）
+- トークン数: 11Kトークン → **465トークン**
+
+### 次のステップ
+
+- メイン LLM ノードの応答速度改善（35秒の短縮）
+- conversation_id 無効化プランの実装検討
+
+---
+
+## 2026-03-23 — Discord Bot SSE streaming 対応・Dify Chatflow 連携修正
+
+### 変更内容
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `moimoichan_Discordbot/dify_client.py` | blocking → streaming (SSE) モードに全面書き換え |
+| 2 | `.gitignore` | `.aider*` を除外対象に追加 |
+
+### ハマりポイント
+
+1. **blocking モードのタイムアウト**: Dify advanced-chat (Chatflow) で `response_mode: "blocking"` を使うと 120秒でタイムアウトする。原因は Squid SSRF プロキシの `request_timeout 2 minutes` がハードコードされているため（Dify Issue #33149）。Web UI は streaming を使うため問題なし
+2. **SSE イベント構造の違い**: Chatflow の `message` イベントの `answer` フィールドは累積テキストではなくトークン単位のデルタ。また `message_end` イベントは送信されず、代わりに `workflow_finished` に完全な回答テキストが入る
+3. **LLM の `<think>` タグ**: Kimi K2 が chain-of-thought を `<think>...</think>` で返すため、除去が必要
+4. **Windows SSH デプロイ**: PowerShell の `Set-Content -Encoding UTF8` は BOM 付きで書き込むため、`.env` / `config.yml` が壊れる → Python スクリプトで書き込みに変更
+
+### 決定事項
+
+- Dify Chat API は streaming (SSE) モードを使用する（blocking は Chatflow と非互換）
+- `workflow_finished` イベントの `data.outputs.answer` を正とし、フォールバックでデルタ結合
+- Windows 機へのデプロイは scp + Scheduled Task 再起動で運用
+
+### 次のステップ
+
+- 応答速度改善（conversation_id 無効化 or Dify Memory ウィンドウ制限）
+- ボットの動作確認（streaming 対応後のエンドツーエンドテスト）
 ## 2026-03-23 — GitHubプッシュ前 安全性チェック & .gitignore修正
 
 ### 変更内容

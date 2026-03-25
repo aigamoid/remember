@@ -27,6 +27,7 @@ venv/
 
 # macOS
 .DS_Store
+.aider*
 
 # 出力データ（Discordメッセージ含む）
 output/

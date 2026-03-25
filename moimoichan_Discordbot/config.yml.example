@@ -1,0 +1,8 @@
+dify:
+  api_endpoint: "http://100.88.176.117/v1"  # セルフホスト Dify の /v1 エンドポイント
+  chat_timeout: 90                           # Chat API タイムアウト（秒）※blocking最大100s
+
+discord:
+  mention_only: true   # true = @メンション時のみ応答 / false = 全メッセージに応答
+  # trigger_channel_ids: []  # 空=全チャンネル / 数値IDのリストで絞り込み可
+  #   例: [123456789, 987654321]
