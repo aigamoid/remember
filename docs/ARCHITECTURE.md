@@ -21,21 +21,37 @@ waiwai-oracle/
 │   │   └── text_channel.py # TextChannelCollector実装
 │   ├── chunker.py         # チャンク生成ロジック（時間ギャップ方式）
 │   ├── contextualizer.py  # LLMによる context_text 付与ロジック（Phase 2.5）
-│   └── exporter.py        # chunk_index → output/*.txt 出力
+│   ├── exporter.py        # chunk_index → output/*.txt 出力（旧Dify用・任意）
+│   ├── embedder.py        # OpenAI Embedding APIラッパー
+│   ├── vectorstore.py     # Qdrant操作（guild_idマルチテナント前提）
+│   ├── indexer.py         # チャンク → embedding → Qdrant 登録（Phase 4）
+│   ├── rag/
+│   │   ├── prompts.py     # Query Rewriter・わいわいちゃんプロンプト（Difyから移植）
+│   │   ├── llm.py         # OpenRouterチャットLLMラッパー
+│   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成）
+│   └── api.py             # FastAPI APIサーバ（POST /chat, GET /health）
+├── moimoichan_Discordbot/
+│   ├── bot.py             # Discord Bot エントリポイント
+│   ├── oracle_client.py   # RAG APIクライアント
+│   └── Dockerfile
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
 ├── crawler.py             # Phase 1 エントリポイント
 ├── chunker.py             # Phase 2 エントリポイント
 ├── contextualizer.py      # Phase 2.5 エントリポイント
-├── exporter.py            # Phase 3 エントリポイント
+├── exporter.py            # Phase 3 エントリポイント（旧Dify用・任意）
+├── indexer.py             # Phase 4 エントリポイント
 ├── config.yml.example
 ├── .env.example
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml     # oracle / qdrant / api / bot の4サービス
 └── data/                  # Dockerボリュームマウント先（.gitignore）
-    └── messages.db
+    ├── messages.db
+    └── qdrant/            # Qdrant永続化データ
 ```
 
 ## データフロー
+
+### 取り込みパイプライン（バッチ）
 
 ```
 Discord API
@@ -50,11 +66,26 @@ db.py                        # chunk_index テーブルに保存（context_text=
     ↓
 contextualizer.py            # LLMで context_text を生成・付与（Phase 2.5）
     ↓
-db.py                        # chunk_index.context_text を更新
+indexer.py                   # context_text + chunk_text を embedding して Qdrant に登録
     ↓
-exporter.py                  # chunk_index を読んで output/*.txt に出力
+Qdrant（payload に guild_id / channel_name / chunk_text / context_text 等）
+```
+
+### 回答フロー（オンライン）
+
+```
+Discord ユーザー（@メンション）
     ↓
-output/{safe_name}_{channel_id[:8]}_{YYYYMMDD}.txt  # Dify へブラウザから手動アップロード
+moimoichan_Discordbot/bot.py → oracle_client.py
+    ↓ POST /chat {guild_id, query}
+src/api.py（FastAPI）
+    ↓
+src/rag/engine.py
+    1. Query Rewriter（Gemini 2.5 Flash・現在日時注入）
+    2. embedding → Qdrant 検索（guild_id フィルタ必須・top_k=10）
+    3. 回答生成（Kimi K2・わいわいちゃんプロンプト）
+    ↓
+回答 JSON → Bot が Discord に返信
 ```
 
 ## 設計方針
@@ -71,8 +102,14 @@ class MessageCollector(ABC):
         ...
 ```
 
+### マルチテナント前提（SaaS化に向けて）
+- Qdrant の全ポイントは payload に `guild_id` を持ち、検索時は必ず guild_id でフィルタする
+- これにより他の Discord サーバーのデータが回答に混ざることを構造的に防ぐ
+- 現状は単一テナント（config.yml の guild_id）。複数サーバー対応は次フェーズ
+
 ### 冪等性
 - chunker: chunk_id は anchor_msg_id（チャンク先頭メッセージID）の MD5。INSERT OR REPLACE により再実行で chunk_text が更新される。チャンキング方式変更時は `python chunker.py --clean` で全削除してから再生成する。
+- indexer: chunk_id から決定的に UUID を生成して Qdrant の点IDにするため、再実行は上書きになる。`--clean` でコレクション削除 + status リセット、`--all` で全件再登録。
 - exporter: 実行のたびに output/ を上書き生成する。状態管理なし。
 
 ### 各ファイルの責務上限
