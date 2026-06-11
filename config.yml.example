@@ -1,7 +1,7 @@
-guild_id: 123456789          # 対象DiscordサーバーのID
+guild_id: 123456789          # 手動スクリプト実行時の対象DiscordサーバーID（通常運用はワーカーが自動判別）
 
 crawl:
-  exclude_channels:          # 除外チャンネル名リスト
+  exclude_channels:          # 除外チャンネル名リスト（手動クロール時のみ。ワーカーは許可リスト方式）
     - bot-log
     - spam
   exclude_channel_ids:       # IDでの除外（名前変更に強い）
@@ -13,20 +13,6 @@ chunk:
   min_content_length: 10     # これ未満の文字数メッセージはスキップ
   short_reply_max_chars: 10  # これ以下の短文は直前チャンクに吸収（疑似reply_to）
   timezone_offset: 9         # タイムスタンプ表示のUTCオフセット（JST=9）
-
-dify:
-  api_endpoint: "http://<DifyホストIP>/v1"
-  dataset_name_prefix: "waiwai-"       # ナレッジベース名のプレフィックス
-  segmentation_separator: "\n\n"       # チャンク分割セパレータ
-  segmentation_max_tokens: 1000        # 1チャンクあたりの最大トークン数
-  api_timeout: 30                      # 一般APIタイムアウト（秒）
-  upload_timeout: 120                  # ドキュメントアップロードタイムアウト（秒）
-  indexing_poll_interval: 5            # インデックス状態ポーリング間隔（秒）
-  indexing_max_wait: 600               # インデックス最大待機時間（秒）
-
-ollama:
-  endpoint: "http://<TailscaleIP>:11434"
-  embed_model: "bge-m3"
 
 openai:
   api_key: ""              # 空なら環境変数 OPENAI_API_KEY を使用
@@ -45,7 +31,7 @@ rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
   answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
   top_k: 10                                   # 検索で取得するチャンク数
-  guild_name: "わいわい"                       # プロンプトに埋め込むサーバー名
+  guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト（Bot経由なら実サーバー名が優先）
 
 contextualizer:
   model: "gpt-4.1-nano"   # コンテキスト生成モデル
@@ -53,3 +39,7 @@ contextualizer:
   max_retries: 3          # API エラー時のリトライ回数
   retry_delay: 1.0        # リトライ間隔（秒）
   concurrency: 10         # 同時実行数（--concurrency 引数で上書き可）
+
+worker:
+  poll_interval_seconds: 10  # ジョブキューの確認間隔（秒）
+  sync_interval_hours: 24    # 定期syncの間隔（最後の取り込み完了からの経過時間）
