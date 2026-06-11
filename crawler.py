@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-crawler.py - Discord全チャンネルのメッセージを SQLite に収集する（Phase 1）
+crawler.py - Discord全チャンネルのメッセージを Postgres に収集する（Phase 1）
+
+config.yml の guild_id を対象にした手動実行用（通常運用はワーカーが自動で行う）。
 
 実行方法:
     python crawler.py
@@ -11,23 +13,20 @@ import asyncio
 import os
 import sys
 import uuid
-from pathlib import Path
 
 import discord
 from dotenv import load_dotenv
 
 from src.collectors.text_channel import TextChannelCollector
 from src.config import load_config
-from src.db import init_db, log_run
+from src.db import get_connection, log_run
 
 
 async def run(token: str, cfg: dict) -> None:
     guild_id: int = int(cfg["guild_id"])
     run_id = str(uuid.uuid4())
 
-    db_path = Path("data/messages.db")
-    conn = init_db(db_path)
-    print(f"DB: {db_path}")
+    conn = get_connection()
 
     intents = discord.Intents.default()
     intents.message_content = True
