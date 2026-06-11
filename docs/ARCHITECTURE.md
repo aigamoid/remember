@@ -29,7 +29,8 @@ waiwai-oracle/
 │   │   ├── prompts.py     # Query Rewriter・わいわいちゃんプロンプト（Difyから移植）
 │   │   ├── llm.py         # OpenRouterチャットLLMラッパー
 │   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成）
-│   └── api.py             # FastAPI APIサーバ（POST /chat, GET /health）
+│   ├── api.py             # FastAPI APIサーバ（POST /chat, GET /health）
+│   └── cli.py             # CLIチャットロジック（/chat クライアント）
 ├── moimoichan_Discordbot/
 │   ├── bot.py             # Discord Bot エントリポイント
 │   ├── oracle_client.py   # RAG APIクライアント
@@ -40,6 +41,7 @@ waiwai-oracle/
 ├── contextualizer.py      # Phase 2.5 エントリポイント
 ├── exporter.py            # Phase 3 エントリポイント（旧Dify用・任意）
 ├── indexer.py             # Phase 4 エントリポイント
+├── chat_cli.py            # CLIフロントエンド（動作確認用）
 ├── config.yml.example
 ├── .env.example
 ├── Dockerfile
@@ -73,10 +75,12 @@ Qdrant（payload に guild_id / channel_name / chunk_text / context_text 等）
 
 ### 回答フロー（オンライン）
 
+フロントエンドは2モード（どちらも同じAPIを呼ぶ薄いクライアント）:
+- Discord Bot: `moimoichan_Discordbot/bot.py` → `oracle_client.py`
+- CLI（動作確認用）: `chat_cli.py` → `src/cli.py`
+
 ```
-Discord ユーザー（@メンション）
-    ↓
-moimoichan_Discordbot/bot.py → oracle_client.py
+Discord ユーザー（@メンション） or CLI入力
     ↓ POST /chat {guild_id, query}
 src/api.py（FastAPI）
     ↓
