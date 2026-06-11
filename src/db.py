@@ -226,6 +226,43 @@ def fetch_chunks_for_context(
     ).fetchall()
 
 
+def fetch_chunks_for_indexing(
+    conn: sqlite3.Connection, include_indexed: bool = False
+) -> list[tuple[str, str, str, str, str | None, str]]:
+    """Qdrant 登録対象のチャンクを返す（indexer.py が使用）。
+    戻り値: (chunk_id, channel_id, channel_name, chunk_text, context_text, anchor_timestamp)
+    """
+    where = "" if include_indexed else "WHERE ci.status != 'indexed'"
+    return conn.execute(
+        f"""
+        SELECT ci.chunk_id, ci.channel_id, m.channel_name,
+               ci.chunk_text, ci.context_text, m.timestamp
+        FROM chunk_index ci
+        JOIN messages m ON ci.anchor_msg_id = m.id
+        {where}
+        ORDER BY ci.channel_id, m.timestamp, m.id
+        """
+    ).fetchall()
+
+
+def mark_chunks_indexed(conn: sqlite3.Connection, chunk_ids: list[str]) -> None:
+    """Qdrant 登録済みチャンクの status を 'indexed' に更新する（indexer.py が使用）。"""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        "UPDATE chunk_index SET status='indexed', indexed_at=?, error_message=NULL "
+        "WHERE chunk_id=?",
+        [(now, cid) for cid in chunk_ids],
+    )
+
+
+def reset_chunk_index_status(conn: sqlite3.Connection) -> int:
+    """全チャンクの status を 'pending' に戻す（indexer.py --clean が使用）。"""
+    cur = conn.execute(
+        "UPDATE chunk_index SET status='pending', indexed_at=NULL"
+    )
+    return cur.rowcount
+
+
 def count_chunks(conn: sqlite3.Connection, status: str | None = None) -> int:
     if status is None:
         row = conn.execute("SELECT count(*) FROM chunk_index").fetchone()

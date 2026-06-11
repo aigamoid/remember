@@ -4,6 +4,122 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-11 — contextualizer の要否検証（A/Bテスト）
+
+### 背景
+
+contextualizer（Phase 2.5）は処理が重くAPI料金もかかるため削除を検討した。
+判断材料として、context_text あり/なしの embedding で検索品質を比較した。
+
+### 方法
+
+- 比較用コレクション `waiwai_chunks_nocontext`（chunk_text のみを embedding）を一時作成
+- 同一クエリ5問を両コレクションで検索し top10 を比較（使い捨てスクリプト、本番無変更）
+- 終了後に比較用コレクションは削除（費用: 再embedding 約$0.03）
+
+### 結果
+
+| 質問 | top10一致 | 判定 |
+|---|---|---|
+| 飲み会いつだっけ？ | 4/10 | 引き分け |
+| まめぽんの放送機材の話 | 5/10 | contextあり勝ち（なし側は無関係な機材話が混入） |
+| マリオカートのレートの話 | 6/10 | contextありやや優勢 |
+| Minecraftサーバーが落ちたときの話 | 2/10 | contextあり圧勝 |
+| Mac miniをサーバーにする話 | 7/10 | 引き分け（本文にキーワードがある質問は差が出ない） |
+
+決定打: 本文が `<@メンションID>` だけの障害対応チャンクを、context
+「Minecraftサーバーのハング対応として再起動と性能増強を行った際の会話」が救った。
+1行チャンクが37.4%を占める本データでは context の寄与が大きい。
+
+### 決定事項
+
+- **contextualizer は維持する**（削除しない）
+- コストは1サーバーあたり一回 $1〜3 程度で許容範囲
+- 実行自体は任意（indexer は context_text=NULL でも動作する設計のため、
+  スキップ運用も可能。ただし検索品質は上記の通り低下する）
+
+### 参考: 現在のチャンク粒度（実測）
+
+- 総数 8,364 / 平均 4.9行・203文字 / 1行チャンク 37.4% / 30メッセージ上限到達 2.6%
+
+---
+
+## 2026-06-11 — CLIフロントエンド追加（動作確認用）
+
+### 変更内容
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/cli.py` | 新規（/chat クライアント・表示整形） |
+| 2 | `chat_cli.py` | 新規（REPLエントリポイント） |
+| 3 | `tests/test_cli.py` | 新規（ユニットテスト9件） |
+
+### 決定事項
+
+- フロントエンドは **CLIモード / Discord Botモードの2本立てを維持**する
+- 両方とも同じ `POST /chat` を呼ぶ薄いクライアント（RAG本体は共有・変更なし）
+- CLIは書き換え後クエリ・参照ソース・応答秒数も表示（デバッグ向き）
+
+### 実行結果
+
+- テスト 167/167 PASS
+- 実機確認: マリカー大会の思い出を実ログから回答（動作OK）
+- Discordトークン再発行前でもバックエンドの動作確認が可能になった
+
+---
+
+## 2026-06-11 — Dify廃止・自前RAGスタック移行（SaaS化ステップ1）
+
+### 変更内容
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/embedder.py` | 新規（OpenAI embedding・8192トークン超過の切り詰め） |
+| 2 | `src/vectorstore.py` | 新規（Qdrant操作・guild_idマルチテナント前提） |
+| 3 | `src/indexer.py` / `indexer.py` | 新規（Phase 4: チャンク→Qdrant登録、--all/--clean） |
+| 4 | `src/rag/prompts.py` | 新規（Difyフローからプロンプト移植） |
+| 5 | `src/rag/llm.py` / `src/rag/engine.py` | 新規（OpenRouter LLM・RAG回答エンジン） |
+| 6 | `src/api.py` | 新規（FastAPI: POST /chat, GET /health） |
+| 7 | `src/db.py` | indexer用関数追加 |
+| 8 | `docker-compose.yml` | qdrant / api / bot サービス追加 |
+| 9 | `moimoichan_Discordbot/` | dify_client.py削除 → oracle_client.py、Dockerfile追加 |
+| 10 | `tests/` | test_vectorstore / test_indexer / test_embedder / test_rag / test_api 追加 |
+
+### 設計判断
+
+- **Dify廃止**: SaaS化（Botを入れたら自動RAG化）に向け、Difyが担っていた
+  ベクトルDB・チャットフロー・APIを Qdrant + 自前Python + FastAPI に置き換え
+- **フレームワーク不使用**: LangGraph等は直列3ステップ（書き換え→検索→生成）には過剰と判断。
+  検索品質が課題になったら LlamaIndex 導入を検討
+- **マルチテナント前提**: Qdrant payload に guild_id を持たせ検索時必須フィルタ
+  （テストで他guildデータが見えないことを検証済み）
+- **conversation_id 廃止**: APIはステートレス1問1答（応答速度改善の懸案も同時解消）
+- **モデル**: rewriter=Gemini 2.5 Flash / 回答=Kimi K2（Difyフローの設定を踏襲）
+
+### ハマりポイント
+
+1. **embedding入力上限**: 実データに8,192トークン超のチャンクが1件あり400エラー
+   → tiktoken（cl100k_base）で8,000トークンに切り詰め。`disallowed_special=()` を
+   指定しないとチャットログ中の特殊トークン文字列で例外になる
+2. **uvicorn直接起動で .env が読まれない**: `src/api.py` に `load_dotenv()` を追加
+3. **OrbStackが起動不可**（Migration Assistant起因の権限問題）→ colima で代替。
+   恒久対応は `sudo chown -R $USER ~/Library/Group\ Containers/HUAQ24HBR6.dev.orbstack/data`
+
+### 実行結果
+
+- ユニットテスト 158/158 PASS（新規49件）
+- 実データ 8,364 チャンクを Qdrant に登録（embedding費 約$0.03）
+- E2E確認: ローカルAPI 25.9秒 / コンテナAPI 37.0秒で「わいわいちゃん」回答
+  （ソース10件・guild_idフィルタ動作・キャラ口調・実記憶ベースの回答を確認）
+- Botコンテナはビルドのみ（起動は本物のDiscordサーバーに繋がるため人間の判断待ち）
+
+### 次のステップ
+
+- Botコンテナ起動 → Discord上での動作確認（人間）
+- OI-9（ハイブリッド検索）/ OI-10（会話履歴）/ OI-11（マルチテナント自動取り込み）
+
+---
+
 ## 2026-03-25 — GitHub運用整備（PR・ブランチマージ・README）
 
 ### 変更内容

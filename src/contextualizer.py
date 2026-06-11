@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -113,8 +114,13 @@ async def _run_async(conn: sqlite3.Connection, cfg: dict) -> int:
     tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
 
     openai_cfg = cfg.get("openai", {})
-    api_key: str | None = openai_cfg.get("api_key") or None
     base_url: str | None = openai_cfg.get("base_url") or None
+    # base_url がOpenRouter等の場合、OPENAI_API_KEY への暗黙フォールバックを防ぐ
+    api_key: str | None = (
+        openai_cfg.get("api_key")
+        or (os.environ.get("OPENROUTER_API_KEY") if base_url else None)
+        or None
+    )
     client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     chunks = fetch_chunks_for_context(conn)
