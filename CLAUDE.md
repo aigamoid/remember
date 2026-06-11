@@ -19,7 +19,9 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
 
 - `src/api.py`（FastAPI）が `POST /chat` で質問を受け、`src/rag/engine.py` が
   クエリ書き換え → Qdrant検索 → LLM回答を行う（旧Difyフローの自前実装）
-- Discord Bot（`moimoichan_Discordbot/`）はこのAPIを呼ぶ
+- フロントエンドは2モード（両方維持する）:
+  - Discord Bot（`moimoichan_Discordbot/`）
+  - CLI（`chat_cli.py` ※動作確認用、`python chat_cli.py` で対話）
 - 起動: `docker compose up -d qdrant api`（Botは `bot` サービス）
 
 ## 詳細ドキュメント
