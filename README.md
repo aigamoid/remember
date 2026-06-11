@@ -25,9 +25,12 @@ Discord Bot（@メンション） → FastAPI（/chat） → RAGエンジン（�
 | 3 | `exporter.py` | チャンク → テキストファイル出力（旧Dify用・任意） |
 | 4 | `indexer.py` | チャンク → embedding → Qdrant 登録 |
 
-### Discord Bot（わいわいちゃん）
+### フロントエンド（2モード）
 
-自前RAG API（FastAPI）と連携するDiscord Bot。@メンションで過去ログに基づいた回答を返します。
+- **Discord Bot（わいわいちゃん）**: @メンションで過去ログに基づいた回答を返します
+- **CLI（動作確認用）**: `python chat_cli.py` でターミナルから対話できます
+
+どちらも同じRAG API（FastAPI `/chat`）を呼ぶ薄いクライアントです。
 
 ## セットアップ
 
