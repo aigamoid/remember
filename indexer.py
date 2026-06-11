@@ -10,6 +10,7 @@ indexer.py - チャンクを embedding して Qdrant に登録する（Phase 4�
 """
 
 import argparse
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -38,8 +39,10 @@ def main() -> None:
 
     qdrant_cfg = cfg.get("qdrant", {})
     emb_cfg = cfg.get("embedding", {})
+    # QDRANT_URL はコンテナ内からの接続用オーバーライド（compose では http://qdrant:6333）
     store = VectorStore(
-        url=qdrant_cfg.get("url", "http://localhost:6333"),
+        url=os.environ.get("QDRANT_URL")
+        or qdrant_cfg.get("url", "http://localhost:6333"),
         collection=qdrant_cfg.get("collection", "waiwai_chunks"),
         vector_size=emb_cfg.get("dimensions", 1536),
     )
