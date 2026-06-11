@@ -79,6 +79,7 @@ docker compose up -d qdrant api bot
 | ドキュメント | 内容 |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | アーキテクチャ・ディレクトリ構成 |
+| [docs/DIAGRAMS.md](docs/DIAGRAMS.md) | 処理フロー・設計のMermaid図解 |
 | [docs/SCHEMA.md](docs/SCHEMA.md) | SQLiteスキーマ・メタデータ仕様 |
 | [docs/CONFIG.md](docs/CONFIG.md) | 設定ファイル項目説明 |
 | [docs/DEVLOG.md](docs/DEVLOG.md) | 開発ログ |
