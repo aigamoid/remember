@@ -4,6 +4,58 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-11 — Dify廃止・自前RAGスタック移行（SaaS化ステップ1）
+
+### 変更内容
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/embedder.py` | 新規（OpenAI embedding・8192トークン超過の切り詰め） |
+| 2 | `src/vectorstore.py` | 新規（Qdrant操作・guild_idマルチテナント前提） |
+| 3 | `src/indexer.py` / `indexer.py` | 新規（Phase 4: チャンク→Qdrant登録、--all/--clean） |
+| 4 | `src/rag/prompts.py` | 新規（Difyフローからプロンプト移植） |
+| 5 | `src/rag/llm.py` / `src/rag/engine.py` | 新規（OpenRouter LLM・RAG回答エンジン） |
+| 6 | `src/api.py` | 新規（FastAPI: POST /chat, GET /health） |
+| 7 | `src/db.py` | indexer用関数追加 |
+| 8 | `docker-compose.yml` | qdrant / api / bot サービス追加 |
+| 9 | `moimoichan_Discordbot/` | dify_client.py削除 → oracle_client.py、Dockerfile追加 |
+| 10 | `tests/` | test_vectorstore / test_indexer / test_embedder / test_rag / test_api 追加 |
+
+### 設計判断
+
+- **Dify廃止**: SaaS化（Botを入れたら自動RAG化）に向け、Difyが担っていた
+  ベクトルDB・チャットフロー・APIを Qdrant + 自前Python + FastAPI に置き換え
+- **フレームワーク不使用**: LangGraph等は直列3ステップ（書き換え→検索→生成）には過剰と判断。
+  検索品質が課題になったら LlamaIndex 導入を検討
+- **マルチテナント前提**: Qdrant payload に guild_id を持たせ検索時必須フィルタ
+  （テストで他guildデータが見えないことを検証済み）
+- **conversation_id 廃止**: APIはステートレス1問1答（応答速度改善の懸案も同時解消）
+- **モデル**: rewriter=Gemini 2.5 Flash / 回答=Kimi K2（Difyフローの設定を踏襲）
+
+### ハマりポイント
+
+1. **embedding入力上限**: 実データに8,192トークン超のチャンクが1件あり400エラー
+   → tiktoken（cl100k_base）で8,000トークンに切り詰め。`disallowed_special=()` を
+   指定しないとチャットログ中の特殊トークン文字列で例外になる
+2. **uvicorn直接起動で .env が読まれない**: `src/api.py` に `load_dotenv()` を追加
+3. **OrbStackが起動不可**（Migration Assistant起因の権限問題）→ colima で代替。
+   恒久対応は `sudo chown -R $USER ~/Library/Group\ Containers/HUAQ24HBR6.dev.orbstack/data`
+
+### 実行結果
+
+- ユニットテスト 158/158 PASS（新規49件）
+- 実データ 8,364 チャンクを Qdrant に登録（embedding費 約$0.03）
+- E2E確認: ローカルAPI 25.9秒 / コンテナAPI 37.0秒で「わいわいちゃん」回答
+  （ソース10件・guild_idフィルタ動作・キャラ口調・実記憶ベースの回答を確認）
+- Botコンテナはビルドのみ（起動は本物のDiscordサーバーに繋がるため人間の判断待ち）
+
+### 次のステップ
+
+- Botコンテナ起動 → Discord上での動作確認（人間）
+- OI-9（ハイブリッド検索）/ OI-10（会話履歴）/ OI-11（マルチテナント自動取り込み）
+
+---
+
 ## 2026-03-25 — GitHub運用整備（PR・ブランチマージ・README）
 
 ### 変更内容
