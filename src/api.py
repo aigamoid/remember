@@ -38,8 +38,10 @@ def build_engine(cfg: dict) -> RagEngine:
     emb_cfg = cfg.get("embedding", {})
     openai_cfg = cfg.get("openai", {})
 
+    # QDRANT_URL はコンテナ内からの接続用オーバーライド（compose では http://qdrant:6333）
     store = VectorStore(
-        url=qdrant_cfg.get("url", "http://localhost:6333"),
+        url=os.environ.get("QDRANT_URL")
+        or qdrant_cfg.get("url", "http://localhost:6333"),
         collection=qdrant_cfg.get("collection", "waiwai_chunks"),
         vector_size=emb_cfg.get("dimensions", 1536),
     )
