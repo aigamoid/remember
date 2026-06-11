@@ -27,6 +27,7 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
 ## 詳細ドキュメント
 
 - アーキテクチャ・ファイル構成 → `docs/ARCHITECTURE.md`
+- 処理フロー図解（Mermaid） → `docs/DIAGRAMS.md`
 - SQLiteスキーマ・メタデータ仕様 → `docs/SCHEMA.md`
 - 設定ファイル項目説明 → `docs/CONFIG.md`
 - 未解決事項・TODO → `docs/OPEN_ISSUES.md`
