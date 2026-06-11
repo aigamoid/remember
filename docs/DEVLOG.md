@@ -4,6 +4,56 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-11 — SaaS化ステップ2: マルチテナント自動取り込み（feature/multitenant-ingest）
+
+### 目的
+
+「Botをサーバーに導入したら勝手にRAG化して答えてくれる」の取り込み側を実現する。
+回答側のテナント分離（Qdrant guild_idフィルタ）はステップ1で実装済みだったため、
+今回は **取り込みの自動化・マルチテナント化・opt-in制御** が対象。
+
+### 実装内容
+
+1. **SQLite → Postgres 移行**（ユーザー判断でフルスコープ採用）
+   - `src/db.py` を psycopg で全面書き換え。全データ系テーブルに guild_id
+   - 新テーブル: `guilds` / `allowed_channels` / `ingest_jobs`（ジョブキュー）
+   - Dify遺産（upload_state テーブル・dify_doc_id 列）を廃止
+   - `scripts/migrate_sqlite_to_pg.py` で既存waiwaiデータを移行
+     （messages 27,769 / chunk_index 8,364 / status='indexed' 保持＝再embedding費用ゼロ）
+
+2. **常駐ワーカー**（`worker.py` → `src/worker.py`・composeの worker サービス）
+   - ingest_jobs を `FOR UPDATE SKIP LOCKED` で1件ずつ処理（単一ライター原則を維持）
+   - ingest: 許可チャンネルのみREST差分クロール → チャンク → 文脈付与 → Qdrant登録
+   - purge_channel / purge_guild: Qdrant + Postgres からデータ削除
+   - 定期sync: 最終取り込みから `worker.sync_interval_hours`（24h）経過したguildへ自動投入
+   - Discordへはgateway接続せず `client.login()` + REST のみ（Botとのセッション競合なし）
+
+3. **Botのスラッシュコマンド**（`/oracle` グループ・サーバー管理権限のみ）
+   - allow: 許可登録+取り込みジョブ投入 / deny: 許可取消+チャンネルデータ削除
+   - sync: 差分取り込み即時実行 / status: 件数・最新ジョブ表示
+   - on_guild_join: guilds登録+案内 / on_guild_remove: purge_guild（退出=全データ削除）
+   - DBアクセスは `store.py`（src/db.py の薄い非同期ラッパー・botビルドはルートコンテキストに変更）
+
+4. **差分sync対応のバグ修正**: `insert_chunk` が chunk_text 変更時に
+   context_text だけでなく **status も 'pending' に戻す**ようにした
+   （旧実装では伸びた末尾チャンクが再インデックスされない）
+
+5. **guild_name の伝搬**: Bot → /chat → RagEngine。どのサーバーでも
+   「そのサーバーの名前」でわいわいちゃんが答える（未指定時は config の値）
+
+### テスト
+
+- DB依存テストを実Postgres（oracle_test DB・conftest.py で TRUNCATE管理）に移行
+- 新規: test_worker.py（ジョブ処理・purge・定期sync）ほか
+- **211件 全PASS**（旧167件から拡充）
+
+### 残課題
+
+- 実機E2E未実施（OI-12: トークン再発行＋テスト用サーバーが必要）
+- 取り込み完了のDiscord通知なし（OI-13: 現状 /oracle status で確認）
+
+---
+
 ## 2026-06-11 — contextualizer の要否検証（A/Bテスト）
 
 ### 背景
