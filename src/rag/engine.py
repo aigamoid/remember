@@ -58,8 +58,14 @@ class RagEngine:
             return query
         return out.strip() or query
 
-    async def answer(self, guild_id: str, query: str) -> dict:
-        """質問に回答する。戻り値: {answer, rewritten_query, sources}"""
+    async def answer(
+        self, guild_id: str, query: str, guild_name: str | None = None
+    ) -> dict:
+        """質問に回答する。戻り値: {answer, rewritten_query, sources}
+
+        guild_name はプロンプトに埋め込むサーバー名。
+        未指定なら config の rag.guild_name を使う（単一サーバー時代の互換）。
+        """
         rewritten = await self.rewrite(query)
 
         vector = await asyncio.to_thread(self.embedder.embed_one, rewritten)
@@ -68,7 +74,7 @@ class RagEngine:
         )
 
         system = ANSWER_SYSTEM_PROMPT.replace(
-            "{guild_name}", self.guild_name
+            "{guild_name}", guild_name or self.guild_name
         ).replace("{context}", build_context(hits))
         answer_text = await self.llm.complete(
             self.answer_model, system, query, temperature=0.7
