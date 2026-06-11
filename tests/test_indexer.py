@@ -1,13 +1,11 @@
-"""src/indexer.py のテスト（インメモリ SQLite + インメモリ Qdrant + フェイク embedder）"""
+"""src/indexer.py のテスト（実Postgres + インメモリ Qdrant + フェイク embedder）"""
 
 from __future__ import annotations
-
-import sqlite3
 
 import pytest
 from qdrant_client import QdrantClient
 
-from src.db import _DDL, fetch_chunks_for_indexing, insert_chunk
+from src.db import fetch_chunks_for_indexing, insert_chunk
 from src.indexer import build_embed_text, run_indexer
 from src.vectorstore import VectorStore
 
@@ -25,40 +23,31 @@ class FakeEmbedder:
 
 
 @pytest.fixture
-def conn():
-    c = sqlite3.connect(":memory:")
-    c.executescript(_DDL)
-    c.commit()
-    yield c
-    c.close()
-
-
-@pytest.fixture
 def store():
     return VectorStore(
         client=QdrantClient(":memory:"), collection="test", vector_size=4
     )
 
 
-CFG = {"guild_id": 12345, "embedding": {"batch_size": 2}}
+CFG = {"embedding": {"batch_size": 2}}
 
 
-def _insert_msg(conn, msg_id, channel_id="ch1", channel_name="general"):
+def _insert_msg(conn, msg_id, channel_id="ch1", channel_name="general", guild_id="12345"):
     conn.execute(
         "INSERT INTO messages "
-        "(id, channel_id, channel_name, author_id, author_name, content, timestamp) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (msg_id, channel_id, channel_name, "u1", "user", "内容",
+        "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        (msg_id, guild_id, channel_id, channel_name, "u1", "user", "内容",
          "2024-01-01T00:00:00+00:00"),
     )
 
 
-def _insert_chunk_with_msg(conn, chunk_id, msg_id, context_text=None):
-    _insert_msg(conn, msg_id)
-    insert_chunk(conn, chunk_id, msg_id, "ch1", f"チャンク{chunk_id}")
+def _insert_chunk_with_msg(conn, chunk_id, msg_id, context_text=None, guild_id="12345"):
+    _insert_msg(conn, msg_id, guild_id=guild_id)
+    insert_chunk(conn, chunk_id, guild_id, msg_id, "ch1", f"チャンク{chunk_id}")
     if context_text:
         conn.execute(
-            "UPDATE chunk_index SET context_text=? WHERE chunk_id=?",
+            "UPDATE chunk_index SET context_text=%s WHERE chunk_id=%s",
             (context_text, chunk_id),
         )
 
@@ -140,9 +129,31 @@ class TestRunIndexer:
         assert run_indexer(conn, CFG, store, FakeEmbedder()) == 0
 
 
+class TestRunIndexerMultiTenant:
+    def test_guild_filter_indexes_only_target_guild(self, conn, store):
+        _insert_chunk_with_msg(conn, "c1", "m1", guild_id="g-A")
+        _insert_chunk_with_msg(conn, "c2", "m2", guild_id="g-B")
+        conn.commit()
+
+        done = run_indexer(conn, CFG, store, FakeEmbedder(), guild_id="g-A")
+        assert done == 1
+        assert store.count("g-A") == 1
+        assert store.count("g-B") == 0
+
+    def test_payload_guild_id_comes_from_row(self, conn, store):
+        """payload の guild_id は config でなく DB の行から取られる。"""
+        _insert_chunk_with_msg(conn, "c1", "m1", guild_id="g-A")
+        _insert_chunk_with_msg(conn, "c2", "m2", guild_id="g-B")
+        conn.commit()
+
+        run_indexer(conn, CFG, store, FakeEmbedder())  # guild指定なし=全件
+        assert store.count("g-A") == 1
+        assert store.count("g-B") == 1
+
+
 class TestFetchChunksForIndexing:
     def test_chunk_without_message_excluded(self, conn):
         # anchor メッセージが messages に無いチャンクは JOIN で除外される
-        insert_chunk(conn, "orphan", "no-such-msg", "ch1", "孤立チャンク")
+        insert_chunk(conn, "orphan", "g1", "no-such-msg", "ch1", "孤立チャンク")
         conn.commit()
         assert fetch_chunks_for_indexing(conn) == []
