@@ -70,9 +70,9 @@ CREATE TABLE chunk_index (
     channel_id    TEXT NOT NULL,    -- exporter.py がチャンネル別出力に使用
     chunk_text    TEXT NOT NULL,    -- タイムスタンプ付き JST テキスト（exporter.py がファイルに出力）
     context_text  TEXT,             -- LLMが生成した文脈説明（contextualizer.py が付与、NULL=未処理）
-    dify_doc_id   TEXT,             -- Dify側のドキュメントID（将来用）
-    status        TEXT DEFAULT 'pending', -- 'pending' | 'indexed' | 'error'
-    indexed_at    TEXT,
+    dify_doc_id   TEXT,             -- 旧Dify用（廃止済み・未使用）
+    status        TEXT DEFAULT 'pending', -- 'pending' | 'indexed'（indexer.py がQdrant登録済みを記録）
+    indexed_at    TEXT,             -- indexer.py がQdrant登録日時を記録
     error_message TEXT
 );
 ```
@@ -88,7 +88,25 @@ CREATE TABLE chunk_index (
 > **context_text のフォーマット：**
 > LLMが生成した1〜2文の文脈説明。exporter.py は chunk_text の前に `[CONTEXT]\n...\n[CHUNK]\n` 形式で付加して出力する。
 
-### upload_state（チャンネル別アップロード状態）
+## Qdrant ペイロード仕様
+
+コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`）
+点ID: chunk_id から `uuid5(NAMESPACE_URL, chunk_id)` で決定的に生成（再登録=上書き）
+ベクトル: text-embedding-3-small 1536次元（`context_text + "\n\n" + chunk_text` を埋め込み）
+
+```json
+{
+  "guild_id":         "1072305094718128209",  // 検索時必須フィルタ（マルチテナント分離）
+  "chunk_id":         "MD5ハッシュ",
+  "channel_id":       "チャンネルID",
+  "channel_name":     "チャンネル名",
+  "chunk_text":       "タイムスタンプ付き本文",
+  "context_text":     "LLM生成の文脈説明 or null",
+  "anchor_timestamp": "チャンク先頭メッセージのISO8601（UTC）"
+}
+```
+
+### upload_state（チャンネル別アップロード状態・旧Dify用）
 
 ```sql
 CREATE TABLE upload_state (
