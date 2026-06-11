@@ -10,10 +10,12 @@ from src.api import create_app
 
 class FakeEngine:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, str | None]] = []
 
-    async def answer(self, guild_id: str, query: str) -> dict:
-        self.calls.append((guild_id, query))
+    async def answer(
+        self, guild_id: str, query: str, guild_name: str | None = None
+    ) -> dict:
+        self.calls.append((guild_id, query, guild_name))
         return {
             "answer": "テスト回答！っ",
             "rewritten_query": "書き換え済み",
@@ -48,7 +50,16 @@ class TestChat:
         engine = FakeEngine()
         client = TestClient(create_app(engine=engine))
         client.post("/chat", json={"guild_id": "g99", "query": "質問"})
-        assert engine.calls == [("g99", "質問")]
+        assert engine.calls == [("g99", "質問", None)]
+
+    def test_chat_passes_guild_name(self):
+        engine = FakeEngine()
+        client = TestClient(create_app(engine=engine))
+        client.post(
+            "/chat",
+            json={"guild_id": "g99", "query": "質問", "guild_name": "テストサーバー"},
+        )
+        assert engine.calls == [("g99", "質問", "テストサーバー")]
 
     def test_empty_query_rejected(self, client):
         resp = client.post("/chat", json={"guild_id": "g1", "query": "   "})
