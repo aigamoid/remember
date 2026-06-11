@@ -52,6 +52,15 @@ Phase ごとの作業記録・設計判断ログ。
 - 実機E2E未実施（OI-12: トークン再発行＋テスト用サーバーが必要）
 - 取り込み完了のDiscord通知なし（OI-13: 現状 /oracle status で確認）
 
+### 運用メモ: waiwaiサーバーの扱い
+
+移行スクリプトは既存チャンネルを allowed_channels に登録するが、
+**waiwaiサーバーにはもうアクセスしない方針**のため、移行後に waiwai の
+allowed_channels 32件を手動削除した（messages / chunk_index / Qdrant のデータは
+テスト用に保持。検索・回答は引き続き動く）。
+これによりワーカーの定期syncや /oracle sync が waiwai をクロールすることはない。
+再度 migrate_sqlite_to_pg.py を実行すると allowed_channels が復活するので注意。
+
 ---
 
 ## 2026-06-11 — contextualizer の要否検証（A/Bテスト）
