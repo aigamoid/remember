@@ -19,10 +19,13 @@ from qdrant_client.models import (
 )
 
 
-def _guild_filter(guild_id: str) -> Filter:
-    return Filter(
-        must=[FieldCondition(key="guild_id", match=MatchValue(value=str(guild_id)))]
-    )
+def _guild_filter(guild_id: str, channel_id: str | None = None) -> Filter:
+    must = [FieldCondition(key="guild_id", match=MatchValue(value=str(guild_id)))]
+    if channel_id is not None:
+        must.append(
+            FieldCondition(key="channel_id", match=MatchValue(value=str(channel_id)))
+        )
+    return Filter(must=must)
 
 
 class VectorStore:
@@ -53,6 +56,24 @@ class VectorStore:
     def drop_collection(self) -> None:
         if self._client.collection_exists(self.collection):
             self._client.delete_collection(self.collection)
+
+    def delete_by_guild(self, guild_id: str) -> None:
+        """1サーバー分の点を全削除する（Bot退出・--clean 時）。"""
+        if not self._client.collection_exists(self.collection):
+            return
+        self._client.delete(
+            self.collection, points_selector=_guild_filter(guild_id), wait=True
+        )
+
+    def delete_by_channel(self, guild_id: str, channel_id: str) -> None:
+        """1チャンネル分の点を削除する（/oracle deny 時）。"""
+        if not self._client.collection_exists(self.collection):
+            return
+        self._client.delete(
+            self.collection,
+            points_selector=_guild_filter(guild_id, channel_id),
+            wait=True,
+        )
 
     def upsert(self, payloads: list[dict], vectors: list[list[float]]) -> None:
         """チャンクを登録する。chunk_id から決定的に UUID を生成して点IDにするため、
