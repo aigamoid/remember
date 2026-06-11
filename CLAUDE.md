@@ -1,19 +1,23 @@
 # waiwai-oracle
 
-Discordサーバーの全メッセージをRAG化し、チャットボットで回答するPOCプロジェクト。
+Discordサーバーの過去ログをRAG化し、チャットボットで回答するPOCプロジェクト。
+マルチテナント対応済み（サーバーごとに opt-in 取り込み・guild_id でデータ分離）。
 
-## フェーズ構成
+## 取り込みパイプライン
 
-| Phase | スクリプト | 概要 |
+| Phase | モジュール | 概要 |
 |---|---|---|
 | 0 | `dry_run.py` | メッセージ数カウントのみ（本取得なし） |
-| 1 | `crawler.py` | Discord全メッセージ → SQLite |
+| 1 | `crawler.py` | 許可チャンネルのメッセージ → Postgres（差分） |
 | 2 | `chunker.py` | 時間ギャップ方式でチャンク生成 |
 | 2.5 | `contextualizer.py` | LLMで各チャンクに context_text を付与 |
 | 3 | `exporter.py` | chunk_index → output/*.txt へファイル出力（旧Dify用・任意） |
 | 4 | `indexer.py` | chunk_index → embedding → Qdrant 登録 |
 
-実行順: `dry_run.py` → `crawler.py` → `chunker.py` → `contextualizer.py` → `indexer.py`
+**通常運用は自動**: Botのスラッシュコマンド（`/oracle allow|deny|sync|status`）が
+`ingest_jobs` キューにジョブを積み、常駐ワーカー（`worker.py` → `src/worker.py`）が
+Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎）もワーカーが行う。
+各ルートスクリプトは config.yml の guild_id に対する手動実行用（デバッグ・再構築）。
 
 ## 回答サーバ（RAG API）
 
@@ -22,13 +26,15 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
 - フロントエンドは2モード（両方維持する）:
   - Discord Bot（`moimoichan_Discordbot/`）
   - CLI（`chat_cli.py` ※動作確認用、`python chat_cli.py` で対話）
-- 起動: `docker compose up -d qdrant api`（Botは `bot` サービス）
+- 起動: `docker compose up -d postgres qdrant api worker`（Botは `bot` サービス）
+- テスト: `docker compose up -d postgres` してから `pytest tests/`
+  （DB系テストは実Postgresの oracle_test DBを使う。未起動ならskip）
 
 ## 詳細ドキュメント
 
 - アーキテクチャ・ファイル構成 → `docs/ARCHITECTURE.md`
 - 処理フロー図解（Mermaid） → `docs/DIAGRAMS.md`
-- SQLiteスキーマ・メタデータ仕様 → `docs/SCHEMA.md`
+- Postgresスキーマ・メタデータ仕様 → `docs/SCHEMA.md`
 - 設定ファイル項目説明 → `docs/CONFIG.md`
 - 未解決事項・TODO → `docs/OPEN_ISSUES.md`
 
@@ -67,11 +73,14 @@ sh scripts/install_hooks.sh
 ## 技術スタック
 
 - Python 3.11+
-- discord.py / SQLite / Docker
-- Qdrant（ベクトルDB・セルフホスト） + FastAPI（RAG回答API）
+- discord.py（Bot + スラッシュコマンド） / Docker
+- Postgres（メタデータ・ジョブキュー / psycopg） + Qdrant（ベクトルDB・セルフホスト）
+- FastAPI（RAG回答API）
 - OpenAI API（embedding: text-embedding-3-small / `contextualizer.py` の context_text 生成）
 - OpenRouter（Query Rewriter: Gemini 2.5 Flash / 回答LLM: Kimi K2）
 - ※Dify は廃止済み（`dify/waiwai-oracle.yml` は移行元プロンプトの記録として保持）
+- ※SQLite は廃止済み（`data/messages.db` は移行元データとして保持。
+  `scripts/migrate_sqlite_to_pg.py` で Postgres へ移行済み）
 
 ## 作業ログ
 
