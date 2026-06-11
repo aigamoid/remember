@@ -1,9 +1,44 @@
-version: "3.9"
-
 services:
+  # バッチパイプライン実行用（dry_run / crawler / chunker / contextualizer / exporter / indexer）
   oracle:
     build: .
     env_file: .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
+
+  # ベクトルDB
+  qdrant:
+    image: qdrant/qdrant:v1.16.1
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+
+  # RAG回答APIサーバ
+  api:
+    build: .
+    command: uvicorn src.api:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      - qdrant
+
+  # Discord Bot（わいわいちゃん）
+  bot:
+    build: ./moimoichan_Discordbot
+    env_file: .env
+    environment:
+      ORACLE_API_URL: http://api:8000
+    volumes:
+      - ./moimoichan_Discordbot/config.yml:/app/config.yml:ro
+    depends_on:
+      - api
