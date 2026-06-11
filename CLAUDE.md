@@ -10,9 +10,17 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
 | 1 | `crawler.py` | Discord全メッセージ → SQLite |
 | 2 | `chunker.py` | 時間ギャップ方式でチャンク生成 |
 | 2.5 | `contextualizer.py` | LLMで各チャンクに context_text を付与 |
-| 3 | `exporter.py` | chunk_index → output/*.txt へファイル出力 |
+| 3 | `exporter.py` | chunk_index → output/*.txt へファイル出力（旧Dify用・任意） |
+| 4 | `indexer.py` | chunk_index → embedding → Qdrant 登録 |
 
-実行順: `dry_run.py` → `crawler.py` → `chunker.py` → `contextualizer.py` → `exporter.py`
+実行順: `dry_run.py` → `crawler.py` → `chunker.py` → `contextualizer.py` → `indexer.py`
+
+## 回答サーバ（RAG API）
+
+- `src/api.py`（FastAPI）が `POST /chat` で質問を受け、`src/rag/engine.py` が
+  クエリ書き換え → Qdrant検索 → LLM回答を行う（旧Difyフローの自前実装）
+- Discord Bot（`moimoichan_Discordbot/`）はこのAPIを呼ぶ
+- 起動: `docker compose up -d qdrant api`（Botは `bot` サービス）
 
 ## 詳細ドキュメント
 
@@ -57,8 +65,10 @@ sh scripts/install_hooks.sh
 
 - Python 3.11+
 - discord.py / SQLite / Docker
-- Dify（RAGチャットボット基盤 ※ブラウザから手動アップロード）
-- OpenAI API（`contextualizer.py` の context_text 生成に使用）
+- Qdrant（ベクトルDB・セルフホスト） + FastAPI（RAG回答API）
+- OpenAI API（embedding: text-embedding-3-small / `contextualizer.py` の context_text 生成）
+- OpenRouter（Query Rewriter: Gemini 2.5 Flash / 回答LLM: Kimi K2）
+- ※Dify は廃止済み（`dify/waiwai-oracle.yml` は移行元プロンプトの記録として保持）
 
 ## 作業ログ
 
