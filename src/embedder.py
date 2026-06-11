@@ -8,6 +8,10 @@ from __future__ import annotations
 import os
 
 
+# text-embedding-3-small の入力上限は 8,192 トークン。マージンを取って切り詰める
+_MAX_INPUT_TOKENS = 8000
+
+
 class Embedder:
     """テキストをベクトルに変換する。"""
 
@@ -16,10 +20,12 @@ class Embedder:
         model: str = "text-embedding-3-small",
         dimensions: int = 1536,
         client=None,
+        encoder=None,
     ) -> None:
         self.model = model
         self.dimensions = dimensions
         self._client = client
+        self._encoder = encoder
 
     def _get_client(self):
         if self._client is None:
@@ -33,10 +39,25 @@ class Embedder:
             self._client = openai.OpenAI(api_key=api_key)
         return self._client
 
+    def _get_encoder(self):
+        if self._encoder is None:
+            import tiktoken
+
+            self._encoder = tiktoken.get_encoding("cl100k_base")
+        return self._encoder
+
+    def _truncate(self, text: str) -> str:
+        """埋め込みモデルの入力上限を超えるテキストを切り詰める。
+        disallowed_special=() はチャットログ中の特殊トークン文字列でのエラー防止。"""
+        tokens = self._get_encoder().encode(text, disallowed_special=())
+        if len(tokens) <= _MAX_INPUT_TOKENS:
+            return text
+        return self._get_encoder().decode(tokens[:_MAX_INPUT_TOKENS])
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         """テキストのリストをベクトルのリストに変換する（1回のAPI呼び出し）。"""
         # 空文字・空白のみは API エラーになるためプレースホルダに置換
-        safe = [t if t.strip() else " " for t in texts]
+        safe = [self._truncate(t) if t.strip() else " " for t in texts]
         resp = self._get_client().embeddings.create(
             model=self.model, input=safe, dimensions=self.dimensions
         )
