@@ -4,12 +4,14 @@ Discordサーバーの全メッセージをRAG化し、チャットボットで�
 
 ## 概要
 
-Discordサーバー「waiwai」の過去チャットログ（約27,000件）を取得・チャンク化し、[Dify](https://dify.ai/) のナレッジベースに投入。ユーザーの質問に対してRAG検索で回答するチャットボットを構築しています。
+Discordサーバー「waiwai」の過去チャットログ（約27,000件）を取得・チャンク化し、[Qdrant](https://qdrant.tech/) ベクトルDBに登録。ユーザーの質問に対してRAG検索で回答するチャットボットを構築しています。
 
 ## アーキテクチャ
 
 ```
-Discord API → crawler.py → SQLite → chunker.py → contextualizer.py → exporter.py → Dify
+Discord API → crawler.py → SQLite → chunker.py → contextualizer.py → indexer.py → Qdrant
+                                                                                      ↑
+Discord Bot（@メンション） → FastAPI（/chat） → RAGエンジン（書き換え→検索→回答生成）──┘
 ```
 
 ### パイプライン
@@ -20,11 +22,12 @@ Discord API → crawler.py → SQLite → chunker.py → contextualizer.py → e
 | 1 | `crawler.py` | Discord全メッセージ → SQLite |
 | 2 | `chunker.py` | 時間ギャップ方式でチャンク生成 |
 | 2.5 | `contextualizer.py` | LLMで各チャンクにコンテキスト付与 |
-| 3 | `exporter.py` | チャンク → テキストファイル出力 |
+| 3 | `exporter.py` | チャンク → テキストファイル出力（旧Dify用・任意） |
+| 4 | `indexer.py` | チャンク → embedding → Qdrant 登録 |
 
-### Discord Bot（くもちゃん）
+### Discord Bot（わいわいちゃん）
 
-Dify Chatflow APIと連携するDiscord Bot。SSE streamingで応答を取得します。
+自前RAG API（FastAPI）と連携するDiscord Bot。@メンションで過去ログに基づいた回答を返します。
 
 ## セットアップ
 
@@ -33,8 +36,8 @@ Dify Chatflow APIと連携するDiscord Bot。SSE streamingで応答を取得し
 - Python 3.11+
 - Docker / Docker Compose
 - Discord Bot トークン
-- Dify（セルフホスト）
-- OpenAI API キー（contextualizer用）
+- OpenAI API キー（embedding / contextualizer用）
+- OpenRouter API キー（Query Rewriter / 回答LLM用）
 
 ### インストール
 
@@ -45,31 +48,28 @@ cd waiwai-oracle
 # 環境変数を設定
 cp .env.example .env
 cp config.yml.example config.yml
+cp moimoichan_Discordbot/config.yml.example moimoichan_Discordbot/config.yml
 # .env と config.yml を編集
 
-# Dockerで実行
-docker compose up -d
+# 取り込みパイプライン（初回）
 docker compose run oracle python dry_run.py
-```
+docker compose run oracle python crawler.py
+docker compose run oracle python chunker.py
+docker compose run oracle python contextualizer.py
+docker compose run oracle python indexer.py
 
-### Discord Bot
-
-```bash
-cd moimoichan_Discordbot
-pip install -r requirements.txt
-cp config.yml.example config.yml
-# config.yml を編集（Dify APIエンドポイント等）
-python bot.py
+# サービス起動（Qdrant + RAG API + Discord Bot）
+docker compose up -d qdrant api bot
 ```
 
 ## 技術スタック
 
 - **言語**: Python 3.11+
 - **Discord**: discord.py
-- **DB**: SQLite
-- **RAG基盤**: Dify（セルフホスト）
+- **DB**: SQLite + Qdrant（ベクトルDB）
+- **RAG**: FastAPI + 自前エンジン（クエリ書き換え→ベクトル検索→回答生成）
 - **Embedding**: OpenAI text-embedding-3-small
-- **LLM**: OpenRouter経由（Gemini 2.0 Flash / Kimi K2 等）
+- **LLM**: OpenRouter経由（Query Rewriter: Gemini 2.5 Flash / 回答: Kimi K2）
 
 ## ドキュメント
 
