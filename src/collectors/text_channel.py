@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import aiohttp
 import discord
+import psycopg
 
 from src.collectors.base import MessageCollector
 from src.db import (
@@ -28,19 +28,28 @@ class TextChannelCollector(MessageCollector):
         cfg: dict,
     ) -> None:
         self._guild = guild
+        self._guild_id = str(guild.id)
         crawl = cfg.get("crawl", {})
         self._exclude_names: set[str] = set(crawl.get("exclude_channels", []))
         self._exclude_ids: set[str] = {str(i) for i in crawl.get("exclude_channel_ids", [])}
         self._download: bool = crawl.get("download_attachments", False)
         self._attachment_dir = Path(crawl.get("attachment_dir", "data/attachments"))
 
-    async def collect(self, conn: sqlite3.Connection, run_id: str) -> int:
+    async def collect(
+        self,
+        conn: psycopg.Connection,
+        run_id: str,
+        channels: list[discord.TextChannel] | None = None,
+    ) -> int:
+        """channels 未指定なら guild の全テキストチャンネル（config の除外設定を適用）。
+        指定時はそのリストだけを収集する（ワーカーが許可チャンネルを渡す）。"""
         total = 0
-        channels = [
-            ch for ch in self._guild.text_channels
-            if ch.name not in self._exclude_names
-            and str(ch.id) not in self._exclude_ids
-        ]
+        if channels is None:
+            channels = [
+                ch for ch in self._guild.text_channels
+                if ch.name not in self._exclude_names
+                and str(ch.id) not in self._exclude_ids
+            ]
         print(f"対象チャンネル: {len(channels)} ch")
 
         for ch in channels:
@@ -51,7 +60,7 @@ class TextChannelCollector(MessageCollector):
 
     async def _collect_channel(
         self,
-        conn: sqlite3.Connection,
+        conn: psycopg.Connection,
         run_id: str,
         ch: discord.TextChannel,
     ) -> int:
@@ -63,7 +72,7 @@ class TextChannelCollector(MessageCollector):
 
         try:
             async for msg in ch.history(limit=None, oldest_first=True, after=after):
-                raw = _to_raw_message(msg)
+                raw = _to_raw_message(msg, self._guild_id)
                 insert_message(conn, raw)
 
                 for att in msg.attachments:
@@ -88,19 +97,20 @@ class TextChannelCollector(MessageCollector):
 
         except discord.Forbidden:
             print(f"  #{ch.name}: アクセス権なし（スキップ）")
-            log_run(conn, run_id, "crawl", "skip", f"Forbidden: #{ch.name}")
+            log_run(conn, run_id, "crawl", "skip", f"Forbidden: #{ch.name}", self._guild_id)
             conn.commit()
             return count
         except discord.HTTPException as e:
             print(f"  #{ch.name}: HTTP エラー {e.status}（スキップ）")
-            log_run(conn, run_id, "crawl", "error", f"HTTPException {e.status}: #{ch.name}")
+            log_run(conn, run_id, "crawl", "error",
+                    f"HTTPException {e.status}: #{ch.name}", self._guild_id)
             conn.commit()
             return count
 
         if last_message_id and last_message_id != last_id:
-            upsert_crawl_state(conn, str(ch.id), last_message_id)
+            upsert_crawl_state(conn, self._guild_id, str(ch.id), last_message_id)
 
-        log_run(conn, run_id, "crawl", "success", f"#{ch.name}: {count} 件")
+        log_run(conn, run_id, "crawl", "success", f"#{ch.name}: {count} 件", self._guild_id)
         conn.commit()
         print(f"  #{ch.name}: {count:,} 件完了")
         return count
@@ -119,13 +129,14 @@ class TextChannelCollector(MessageCollector):
             pass  # DLに失敗してもURLはDBに残るのでスキップ
 
 
-def _to_raw_message(msg: discord.Message) -> RawMessage:
+def _to_raw_message(msg: discord.Message, guild_id: str) -> RawMessage:
     thread_id = str(msg.thread.id) if msg.thread else None
     thread_name = msg.thread.name if msg.thread else None
     reaction_count = sum(r.count for r in msg.reactions) if msg.reactions else 0
 
     return RawMessage(
         id=str(msg.id),
+        guild_id=guild_id,
         channel_id=str(msg.channel.id),
         channel_name=msg.channel.name,
         author_id=str(msg.author.id),
