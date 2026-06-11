@@ -1,27 +1,27 @@
 """bot.py - moimoichan Discord Bot エントリポイント
 
 使い方:
-    cp .env.example .env          # DISCORD_TOKEN / DIFY_CHAT_APP_KEY を記入
+    cp .env.example .env          # DISCORD_TOKEN を記入
     cp config.yml.example config.yml
     pip install -r requirements.txt
     python bot.py
+
+応答は waiwai-oracle APIサーバ（src/api.py）から取得する。
+APIはステートレスのため会話履歴は保持しない（conversation_id 廃止）。
 """
 
 import asyncio
 import os
 import sys
-import time
 from pathlib import Path
 
 import discord
 import yaml
 from dotenv import load_dotenv
 
-from dify_client import DifyClient
+from oracle_client import OracleClient
 
-_TTL_SECONDS = 3600   # 会話 TTL: 60 分
-_MAX_ENTRIES = 500    # 会話キャッシュ上限
-_MAX_REPLY_LEN = 2000 # Discord 文字数制限
+_MAX_REPLY_LEN = 2000  # Discord 文字数制限
 
 
 def _load_config() -> dict:
@@ -34,14 +34,12 @@ def _load_config() -> dict:
 
 
 class MoimoichanBot(discord.Client):
-    def __init__(self, dify: DifyClient, cfg: dict) -> None:
+    def __init__(self, oracle: OracleClient, cfg: dict) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
-        self.dify = dify
+        self.oracle = oracle
         self.cfg = cfg
-        # key: (channel_id, user_id)  value: (conversation_id, last_updated)
-        self.conversations: dict[tuple[int, int], tuple[str, float]] = {}
 
     async def on_ready(self) -> None:
         print(f"[INFO] Logged in as {self.user} (id={self.user.id})")
@@ -49,6 +47,8 @@ class MoimoichanBot(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
+        if message.guild is None:
+            return  # DMには応答しない（guild単位のRAGのため）
         if not self._should_respond(message):
             return
 
@@ -57,16 +57,15 @@ class MoimoichanBot(discord.Client):
             await message.reply("何か聞いてみてね！っ 🎤")
             return
 
-        key = (message.channel.id, message.author.id)
-        conv_id = self._get_conv_id(key)
-        dify_user = f"{message.channel.id}:{message.author.id}"
+        user = f"{message.channel.id}:{message.author.id}"
 
         async with message.channel.typing():
             try:
-                answer, new_conv_id = await self.dify.chat(query, conv_id, dify_user)
-                self._set_conv_id(key, new_conv_id)
-                reply = answer[:_MAX_REPLY_LEN] if len(answer) > _MAX_REPLY_LEN else answer
-                await message.reply(reply)
+                answer = await self.oracle.chat(
+                    query, str(message.guild.id), user
+                )
+                reply = answer[:_MAX_REPLY_LEN]
+                await message.reply(reply or "……（何も思いつかなかった！っ 😅）")
             except asyncio.TimeoutError:
                 print(f"[TIMEOUT] channel={message.channel.id} user={message.author.id}")
                 try:
@@ -97,43 +96,24 @@ class MoimoichanBot(discord.Client):
             text = text.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "")
         return text.strip()
 
-    def _get_conv_id(self, key: tuple[int, int]) -> str:
-        entry = self.conversations.get(key)
-        if entry is None:
-            return ""
-        conv_id, ts = entry
-        if time.time() - ts > _TTL_SECONDS:
-            del self.conversations[key]
-            return ""
-        return conv_id
-
-    def _set_conv_id(self, key: tuple[int, int], conv_id: str) -> None:
-        self.conversations[key] = (conv_id, time.time())
-        if len(self.conversations) > _MAX_ENTRIES:
-            oldest = min(self.conversations, key=lambda k: self.conversations[k][1])
-            del self.conversations[oldest]
-
 
 def main() -> None:
     load_dotenv()
     token = os.getenv("DISCORD_TOKEN", "")
-    chat_key = os.getenv("DIFY_CHAT_APP_KEY", "")
     if not token:
         print("エラー: DISCORD_TOKEN が未設定です (.env を確認してください)")
         sys.exit(1)
-    if not chat_key:
-        print("エラー: DIFY_CHAT_APP_KEY が未設定です (.env を確認してください)")
-        sys.exit(1)
 
     cfg = _load_config()
-    endpoint = cfg.get("dify", {}).get("api_endpoint", "")
-    timeout = cfg.get("dify", {}).get("chat_timeout", 90)
-    if not endpoint:
-        print("エラー: config.yml に dify.api_endpoint が設定されていません")
+    oracle_cfg = cfg.get("oracle", {})
+    api_url = os.getenv("ORACLE_API_URL") or oracle_cfg.get("api_url", "")
+    timeout = oracle_cfg.get("chat_timeout", 90)
+    if not api_url:
+        print("エラー: ORACLE_API_URL も config.yml の oracle.api_url も未設定です")
         sys.exit(1)
 
-    dify = DifyClient(endpoint=endpoint, api_key=chat_key, timeout=timeout)
-    bot = MoimoichanBot(dify=dify, cfg=cfg)
+    oracle = OracleClient(base_url=api_url, timeout=timeout)
+    bot = MoimoichanBot(oracle=oracle, cfg=cfg)
     bot.run(token)
 
 
