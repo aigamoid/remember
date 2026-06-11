@@ -1,38 +1,25 @@
-"""src/exporter.py のテスト（インメモリ SQLite を使用）"""
+"""src/exporter.py のテスト（実Postgresを使用・tests/conftest.py の conn フィクスチャ）"""
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
-import pytest
-
-from src.db import _DDL, insert_chunk
+from src.db import insert_chunk
 from src.exporter import _safe_filename, run_exporter
 
 
-@pytest.fixture
-def conn():
-    c = sqlite3.connect(":memory:")
-    c.executescript(_DDL)
-    c.commit()
-    yield c
-    c.close()
-
-
 def _insert_msg(
-    conn: sqlite3.Connection,
+    conn,
     msg_id: str,
     channel_id: str,
     channel_name: str,
     content: str = "テスト内容",
     timestamp: str = "2024-01-01T00:00:00+00:00",
+    guild_id: str = "g1",
 ) -> None:
     conn.execute(
         "INSERT INTO messages "
-        "(id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (msg_id, channel_id, channel_name, "u1", "user", content, timestamp, 0),
+        "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (msg_id, guild_id, channel_id, channel_name, "u1", "user", content, timestamp, 0),
     )
 
 
@@ -63,7 +50,7 @@ class TestRunExporter:
     def test_creates_output_directory(self, conn, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _insert_msg(conn, "m1", "ch1", "general")
-        insert_chunk(conn, "c1", "m1", "ch1", "チャンクテキスト")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "チャンクテキスト")
         conn.commit()
 
         run_exporter(conn, {}, "run-1")
@@ -73,8 +60,8 @@ class TestRunExporter:
         monkeypatch.chdir(tmp_path)
         _insert_msg(conn, "m1", "ch1", "general")
         _insert_msg(conn, "m2", "ch2", "random")
-        insert_chunk(conn, "c1", "m1", "ch1", "チャンクA")
-        insert_chunk(conn, "c2", "m2", "ch2", "チャンクB")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "チャンクA")
+        insert_chunk(conn, "c2", "g1", "m2", "ch2", "チャンクB")
         conn.commit()
 
         done = run_exporter(conn, {}, "run-1")
@@ -85,7 +72,7 @@ class TestRunExporter:
     def test_file_contains_chunk_text(self, conn, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _insert_msg(conn, "m1", "ch1", "general")
-        insert_chunk(conn, "c1", "m1", "ch1", "これはテストチャンクです")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "これはテストチャンクです")
         conn.commit()
 
         run_exporter(conn, {}, "run-1")
@@ -97,8 +84,8 @@ class TestRunExporter:
         monkeypatch.chdir(tmp_path)
         _insert_msg(conn, "m1", "ch1", "general", timestamp="2024-01-01T00:00:00+00:00")
         _insert_msg(conn, "m2", "ch1", "general", timestamp="2024-01-01T02:00:00+00:00")
-        insert_chunk(conn, "c1", "m1", "ch1", "チャンク1の内容")
-        insert_chunk(conn, "c2", "m2", "ch1", "チャンク2の内容")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "チャンク1の内容")
+        insert_chunk(conn, "c2", "g1", "m2", "ch1", "チャンク2の内容")
         conn.commit()
 
         run_exporter(conn, {}, "run-1")
@@ -121,7 +108,7 @@ class TestRunExporter:
     def test_filename_includes_channel_id_prefix(self, conn, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _insert_msg(conn, "m1", "ABCDEF12345", "general")
-        insert_chunk(conn, "c1", "m1", "ABCDEF12345", "テスト")
+        insert_chunk(conn, "c1", "g1", "m1", "ABCDEF12345", "テスト")
         conn.commit()
 
         run_exporter(conn, {}, "run-1")
