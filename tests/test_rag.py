@@ -184,3 +184,20 @@ class TestAnswer:
         llm = FakeLLM(["q", "答えのみ"])
         result = asyncio.run(_engine(store, llm).answer("g1", "query"))
         assert "<think>" not in result["answer"]
+
+    def test_guild_name_injected_into_prompt(self, store):
+        """リクエストで渡された guild_name がプロンプトに使われる。"""
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(
+            _engine(store, llm).answer("g1", "query", guild_name="別のサーバー")
+        )
+        assert "別のサーバー" in llm.calls[1]["system"]
+
+    def test_guild_name_falls_back_to_config(self, store):
+        _seed(store)
+        cfg = {"rag": {"top_k": 5, "guild_name": "コンフィグ名"}}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm)
+        asyncio.run(engine.answer("g1", "query"))
+        assert "コンフィグ名" in llm.calls[1]["system"]
