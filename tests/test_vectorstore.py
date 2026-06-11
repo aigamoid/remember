@@ -20,11 +20,13 @@ def store():
     )
 
 
-def _payload(chunk_id: str, guild_id: str = "g1", text: str = "テスト") -> dict:
+def _payload(
+    chunk_id: str, guild_id: str = "g1", text: str = "テスト", channel_id: str = "ch1"
+) -> dict:
     return {
         "guild_id": guild_id,
         "chunk_id": chunk_id,
-        "channel_id": "ch1",
+        "channel_id": channel_id,
         "channel_name": "general",
         "chunk_text": text,
         "context_text": None,
@@ -96,6 +98,36 @@ class TestCount:
         assert store.count("g1") == 1
         assert store.count("g2") == 1
         assert store.count() == 2
+
+
+class TestDelete:
+    def test_delete_by_guild_removes_only_that_guild(self, store):
+        store.ensure_collection()
+        store.upsert(
+            [_payload("c1", guild_id="g1"), _payload("c2", guild_id="g2")],
+            [_vec(1.0), _vec(0.5)],
+        )
+        store.delete_by_guild("g1")
+        assert store.count("g1") == 0
+        assert store.count("g2") == 1
+
+    def test_delete_by_channel_removes_only_that_channel(self, store):
+        store.ensure_collection()
+        store.upsert(
+            [
+                _payload("c1", channel_id="ch1"),
+                _payload("c2", channel_id="ch2"),
+                _payload("c3", guild_id="g2", channel_id="ch1"),  # 別guildの同名ch
+            ],
+            [_vec(1.0), _vec(0.5), _vec(0.3)],
+        )
+        store.delete_by_channel("g1", "ch1")
+        assert store.count("g1") == 1   # ch2 のみ残る
+        assert store.count("g2") == 1   # 別guildは無傷
+
+    def test_delete_on_missing_collection_is_noop(self, store):
+        store.delete_by_guild("g1")          # 例外にならない
+        store.delete_by_channel("g1", "ch1")  # 例外にならない
 
 
 class TestDropCollection:
