@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sqlite3
 from datetime import datetime, timedelta, timezone
+
+import psycopg
 
 from src.db import fetch_chunks_for_context, update_chunk_context
 from src.formatter import format_message_line
@@ -31,7 +32,7 @@ _SYSTEM_PROMPT = """\
 
 
 def _get_preceding_messages(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection,
     anchor_msg_id: str,
     channel_id: str,
     n: int = 10,
@@ -42,7 +43,7 @@ def _get_preceding_messages(
     戻り値: (preceding_text, anchor_timestamp_jst)
     """
     anchor_row = conn.execute(
-        "SELECT timestamp FROM messages WHERE id = ?",
+        "SELECT timestamp FROM messages WHERE id = %s",
         (anchor_msg_id,),
     ).fetchone()
     if anchor_row is None:
@@ -55,10 +56,10 @@ def _get_preceding_messages(
         """
         SELECT author_name, content, timestamp, has_attachment
         FROM messages
-        WHERE channel_id = ?
-          AND (timestamp < ? OR (timestamp = ? AND id < ?))
+        WHERE channel_id = %s
+          AND (timestamp < %s OR (timestamp = %s AND id < %s))
         ORDER BY timestamp DESC, id DESC
-        LIMIT ?
+        LIMIT %s
         """,
         (channel_id, anchor_ts, anchor_ts, anchor_msg_id, n),
     ).fetchall()
@@ -101,7 +102,9 @@ async def generate_context(
     return response.choices[0].message.content.strip()
 
 
-async def _run_async(conn: sqlite3.Connection, cfg: dict) -> int:
+async def _run_async(
+    conn: psycopg.Connection, cfg: dict, guild_id: str | None = None
+) -> int:
     """非同期で全チャンクを並列処理する。生成件数を返す。"""
     import openai
 
@@ -123,7 +126,7 @@ async def _run_async(conn: sqlite3.Connection, cfg: dict) -> int:
     )
     client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    chunks = fetch_chunks_for_context(conn)
+    chunks = fetch_chunks_for_context(conn, guild_id)
     total = len(chunks)
     print(f"  context_text が NULL のチャンク: {total:,} 件")
 
@@ -195,7 +198,7 @@ async def _run_async(conn: sqlite3.Connection, cfg: dict) -> int:
                     if attempt == max_retries:
                         error_msg = f"[attempt {attempt}] {type(e).__name__}: {e}"
                         conn.execute(
-                            "UPDATE chunk_index SET error_message = ? WHERE chunk_id = ?",
+                            "UPDATE chunk_index SET error_message = %s WHERE chunk_id = %s",
                             (error_msg, chunk_id),
                         )
                         print(f"  ERROR chunk_id={chunk_id[:8]}…: {error_msg}")
@@ -229,6 +232,11 @@ async def _run_async(conn: sqlite3.Connection, cfg: dict) -> int:
     return done
 
 
-def run_contextualizer(conn: sqlite3.Connection, cfg: dict) -> int:
-    """context_text が NULL の全チャンクに文脈説明を付与する（同期ラッパー）。生成件数を返す。"""
-    return asyncio.run(_run_async(conn, cfg))
+def run_contextualizer(
+    conn: psycopg.Connection, cfg: dict, guild_id: str | None = None
+) -> int:
+    """context_text が NULL のチャンクに文脈説明を付与する（同期ラッパー）。生成件数を返す。
+
+    guild_id を指定すると、そのサーバーのチャンクだけを処理する（ワーカーが使用）。
+    """
+    return asyncio.run(_run_async(conn, cfg, guild_id))
