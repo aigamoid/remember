@@ -27,6 +27,7 @@ class ChatRequest(BaseModel):
     guild_id: str
     query: str
     user: Optional[str] = None  # ログ用（"channel_id:user_id" 形式を想定）
+    guild_name: Optional[str] = None  # プロンプト用サーバー名（未指定なら config の値）
 
 
 class ChatResponse(BaseModel):
@@ -77,7 +78,9 @@ def create_app(engine: Optional[RagEngine] = None) -> FastAPI:
     async def chat(req: ChatRequest) -> ChatResponse:
         if not req.query.strip():
             raise HTTPException(status_code=422, detail="query が空です")
-        result = await app.state.engine.answer(req.guild_id, req.query)
+        result = await app.state.engine.answer(
+            req.guild_id, req.query, guild_name=req.guild_name
+        )
         return ChatResponse(**result)
 
     return app
