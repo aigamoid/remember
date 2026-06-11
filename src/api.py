@@ -10,8 +10,11 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+load_dotenv()  # uvicorn 直接起動でも .env を読み込む
 
 from src.config import load_config
 from src.embedder import Embedder
