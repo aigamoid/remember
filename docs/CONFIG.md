@@ -3,10 +3,11 @@
 ## config.yml
 
 ```yaml
-guild_id: 123456789          # 対象DiscordサーバーのID
+guild_id: 123456789          # 手動スクリプト（crawler.py等）の対象サーバーID
+                             # 通常運用はワーカーがジョブのguild_idで動くため未使用
 
 crawl:
-  exclude_channels:          # 除外チャンネル名リスト
+  exclude_channels:          # 除外チャンネル名リスト（手動クロール時のみ有効）
     - bot-log
     - spam
   exclude_channel_ids:       # IDでの除外（名前変更に強い）
@@ -45,31 +46,39 @@ rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
   answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
   top_k: 10                                   # 検索で取得するチャンク数
-  guild_name: "わいわい"                       # 回答プロンプトに埋め込むサーバー名
+  guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト
+                                              # （Bot経由のリクエストでは実サーバー名が優先される）
 
-# 以下は現行コードで未使用（将来・旧設定として保持）
-# dify:
-#   api_endpoint: ...      # Dify廃止（Qdrant + 自前APIに移行）のため不要
-# ollama:
-#   endpoint: ...          # bge-m3 embedding 廃止（Difyプラグインバグのため）のため不要
+worker:
+  poll_interval_seconds: 10  # ingest_jobs キューの確認間隔（秒）
+  sync_interval_hours: 24    # 定期syncの間隔（最後の取り込み完了からの経過時間）
 ```
+
+> Dify / Ollama 関連のセクションは廃止した（2026-06-11）。
+> 旧設定は git 履歴と `dify/waiwai-oracle.yml`（移行元プロンプトの記録）を参照。
 
 ## .env
 
 ```env
 DISCORD_TOKEN=your-discord-bot-token
 OPENAI_API_KEY=your-openai-api-key   # contextualizer.py / embedding で使用（openai.api_key が空の場合）
+POSTGRES_PASSWORD=oracle             # composeのpostgresサービスのパスワード
+DATABASE_URL=postgresql://oracle:oracle@localhost:5432/oracle  # ホストから手動スクリプトを実行する場合
 # OPENROUTER_API_KEY=...             # RAG用LLM（config.yml の openai.api_key が空の場合）
 # ORACLE_API_URL=http://localhost:8000  # Bot → APIサーバ接続先（composeでは自動設定）
 # QDRANT_URL=http://qdrant:6333         # Qdrant接続先オーバーライド（composeでは自動設定）
+# TEST_DATABASE_URL=...                 # pytest用DB接続先（デフォルト: localhost:5432/oracle_test）
 ```
+
+> コンテナ内の `DATABASE_URL` は docker-compose.yml の `environment` で
+> `postgres` サービス向きに上書きされるため、.env の値はホスト実行時のみ使われる。
 
 ## 分離ルール
 
 | 種別 | ファイル | Gitコミット |
 |---|---|---|
 | 動作パラメータ | config.yml | ✅ OK |
-| APIキー・トークン | .env | ❌ 必ずgitignore |
+| APIキー・トークン・接続文字列 | .env | ❌ 必ずgitignore |
 
 ## Docker環境での読み込み
 
