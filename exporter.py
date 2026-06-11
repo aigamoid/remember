@@ -9,12 +9,11 @@ exporter.py - chunk_index からチャンネルごとにテキストファイル
 
 import sys
 import uuid
-from pathlib import Path
 
 from dotenv import load_dotenv
 
 from src.config import load_config
-from src.db import init_db, log_run
+from src.db import get_connection, log_run
 from src.exporter import run_exporter
 
 
@@ -22,9 +21,7 @@ def main() -> None:
     load_dotenv()
     cfg = load_config()
 
-    db_path = Path("data/messages.db")
-    conn = init_db(db_path)
-    print(f"DB: {db_path}")
+    conn = get_connection()
 
     run_id = str(uuid.uuid4())
 
