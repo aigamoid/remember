@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+
+import psycopg
 
 from src.db import fetch_chunks_by_channel
 
@@ -22,7 +23,7 @@ def _combine(chunk_text: str, context_text: str | None) -> str:
     return chunk_text
 
 
-def run_exporter(conn: sqlite3.Connection, cfg: dict, run_id: str) -> int:
+def run_exporter(conn: psycopg.Connection, cfg: dict, run_id: str) -> int:
     """chunk_index からチャンネルごとにテキストファイルを output/ に出力する。"""
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
