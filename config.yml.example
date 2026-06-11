@@ -32,6 +32,21 @@ openai:
   api_key: ""              # 空なら環境変数 OPENAI_API_KEY を使用
   base_url: ""             # 空=OpenAIデフォルト / OpenRouter: https://openrouter.ai/api/v1
 
+qdrant:
+  url: "http://localhost:6333"   # compose内のコンテナからは環境変数 QDRANT_URL が優先される
+  collection: "waiwai_chunks"    # コレクション名（全guild共有・payloadのguild_idで分離）
+
+embedding:
+  model: "text-embedding-3-small"  # OpenAI embeddingモデル（APIキーは .env の OPENAI_API_KEY）
+  dimensions: 1536
+  batch_size: 100                  # 1回のembedding APIに渡すチャンク数
+
+rag:
+  rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
+  answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
+  top_k: 10                                   # 検索で取得するチャンク数
+  guild_name: "わいわい"                       # プロンプトに埋め込むサーバー名
+
 contextualizer:
   model: "gpt-4.1-nano"   # コンテキスト生成モデル
   preceding_messages: 10  # 直前のメッセージ参照数
