@@ -10,13 +10,17 @@ from src.db import (
     deny_channel,
     enqueue_job,
     fetch_allowed_channels,
+    fetch_guilds_overview,
     fetch_last_job,
+    fetch_recent_jobs,
+    fetch_usage_summary,
     finish_job,
     get_crawl_state,
     guilds_due_for_sync,
     insert_attachment,
     insert_chunk,
     insert_message,
+    insert_usage,
     log_run,
     mark_guild_left,
     purge_channel_data,
@@ -386,3 +390,52 @@ class TestLogRun:
         log_run(conn, "run-1", "crawl", "error", "ch-2 失敗")
         count = conn.execute("SELECT count(*) FROM run_log").fetchone()[0]
         assert count == 2
+
+
+# ── usage_log ─────────────────────────────────────────────────
+
+class TestUsageLog:
+    def test_insert_and_summary(self, conn):
+        insert_usage(conn, "g-1", "answer", "kimi", 1000, 200, 1200, 0.005, "u1")
+        insert_usage(conn, "g-1", "rewrite", "gemini", 100, 20, 120, 0.001, "u1")
+        insert_usage(conn, "g-2", "answer", "kimi", 500, 100, 600, 0.003, "u2")
+        conn.commit()
+        summary = fetch_usage_summary(conn)
+        assert summary["total_calls"] == 3
+        assert summary["total_tokens"] == 1200 + 120 + 600
+        assert abs(summary["total_cost_usd"] - 0.009) < 1e-9
+        kinds = {k["kind"]: k for k in summary["by_kind"]}
+        assert kinds["answer"]["calls"] == 2
+        guilds = {g["guild_id"]: g for g in summary["by_guild"]}
+        assert abs(guilds["g-1"]["cost_usd"] - 0.006) < 1e-9
+
+    def test_user_id_optional(self, conn):
+        insert_usage(conn, "g-1", "answer", "kimi", 1, 1, 2, 0.0)
+        conn.commit()
+        row = conn.execute("SELECT user_id FROM usage_log").fetchone()
+        assert row[0] is None
+
+    def test_guilds_overview_includes_cost(self, conn):
+        upsert_guild(conn, "g-1", "サーバー1")
+        allow_channel(conn, "g-1", "ch-1", "general", "admin")
+        insert_message(conn, _make_message(id="m1", guild_id="g-1"))
+        insert_chunk(conn, "c1", "g-1", "m1", "ch-1", "本文")
+        insert_usage(conn, "g-1", "answer", "kimi", 100, 10, 110, 0.004)
+        conn.commit()
+        overview = {g["guild_id"]: g for g in fetch_guilds_overview(conn)}
+        g1 = overview["g-1"]
+        assert g1["guild_name"] == "サーバー1"
+        assert g1["allowed_count"] == 1
+        assert g1["message_count"] == 1
+        assert g1["chunk_count"] == 1
+        assert abs(g1["cost_usd_this_month"] - 0.004) < 1e-9
+
+    def test_recent_jobs_join_guild_name(self, conn):
+        upsert_guild(conn, "g-1", "サーバー1")
+        enqueue_job(conn, "g-1", JOB_INGEST, requested_by="admin")
+        conn.commit()
+        jobs = fetch_recent_jobs(conn, limit=10)
+        assert len(jobs) == 1
+        assert jobs[0]["guild_name"] == "サーバー1"
+        assert jobs[0]["kind"] == JOB_INGEST
+        assert jobs[0]["status"] == "queued"
