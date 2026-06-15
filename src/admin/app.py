@@ -30,7 +30,7 @@ def _is_authed(request: Request) -> bool:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="waiwai-oracle admin")
+    app = FastAPI(title="remember admin")
 
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request):
