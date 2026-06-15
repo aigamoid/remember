@@ -107,6 +107,8 @@ guild_id単位の利用量計測・上限が無く、人気が出た瞬間に赤
 現状はベータ：オンプレ（Mac上の `docker compose` 単一ホスト）。顧客が付くと可用性・バックアップ・監視が課題。
 
 **方針（2026-06-15 決定）: 収益化の必須条件として GCP へ移行する。ベータ期間中に実施。**
+→ 実作業手順は **`docs/GCP_MIGRATION.md`**（初心者向けrunbook）。
+構成確定: 単一GCE VM(e2-small/東京) + Tailscale経由・公開インバウンド0・月$20以下。
 
 - **GCP移行アイデア（構成案）**:
   - lift-and-shift（最小手数）: GCE VM 1台で今の `docker compose` をほぼそのまま動かす。
