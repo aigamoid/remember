@@ -34,6 +34,9 @@ class RagEngine:
             "answer_model", "moonshotai/kimi-k2-0905"
         )
         self.top_k: int = rag_cfg.get("top_k", 10)
+        # 書き換え結果は短いので出力上限を絞る。未指定だとモデル既定の
+        # 巨大な max_tokens を要求し、OpenRouterの残高確保で弾かれることがある。
+        self.rewriter_max_tokens: int = rag_cfg.get("rewriter_max_tokens", 256)
         self.guild_name: str = rag_cfg.get("guild_name", "わいわい")
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.store = store
@@ -51,7 +54,8 @@ class RagEngine:
         )
         try:
             out = await self.llm.complete(
-                self.rewriter_model, system, query, temperature=0.2
+                self.rewriter_model, system, query,
+                temperature=0.2, max_tokens=self.rewriter_max_tokens,
             )
         except Exception as e:
             print(f"[WARN] Query Rewriter 失敗（元クエリで検索続行）: {e}")
