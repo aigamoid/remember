@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}ログイン — waiwai-oracle 管理{% endblock %}
+{% block title %}ログイン — remember 管理{% endblock %}
 {% block body %}
 <form class="login" method="post" action="/login">
-  <h1>waiwai-oracle 管理</h1>
+  <h1>remember 管理</h1>
   {% if error %}<p class="err">{{ error }}</p>{% endif %}
   <input type="password" name="password" placeholder="管理パスワード" autofocus>
   <button type="submit">ログイン</button>
