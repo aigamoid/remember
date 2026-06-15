@@ -4,6 +4,45 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-15 — GCP移行（lift-and-shift・検証機/ステージング）完了
+
+OI-14 E。オンプレ（Mac）から GCP の単一VMへ lift-and-shift で移行。**初心者向け・セキュア
+（Tailscale経由・公開インバウンド0）**を方針に、Phase 0〜3 を完走し**6サービス本番稼働＋
+RAGエンドツーエンド動作**を実機確認。このVMは現状ステージング、後に本番化予定。
+
+### 実施内容（Phase別）
+
+| Phase | 内容 |
+|---|---|
+| 0 | gcloud CLI導入・認証 / プロジェクト `remember-beta-2606812` 作成・請求紐付け / **予算アラート¥3,000(≈$20)** |
+| 1 | VM `remember-vm`（e2-small/asia-northeast1-a/Debian12/30GB）作成 / 自動停止スケジュール JST 2,9,17時 |
+| 2 | Tailscale参加（VM=100.98.83.15）/ 公開SSH(22)を**IAP範囲限定**・RDP削除＝**公開インバウンド0** |
+| 3 | Docker+compose+swap2G（`scripts/vm_setup.sh`）/ コードをtarball転送(Private repoのため) / 設定3ファイル転送(.env 600) / **6サービス起動** |
+
+### 決定事項
+- 構成: **単一VM(lift-and-shift)**。Postgres/Qdrant分離は予算超過のため見送り、コードは
+  `DATABASE_URL`/`QDRANT_URL` で疎結合なので後から剥離可能（Phase 6）。
+- アクセス2系統: **あなた=Tailscale SSH** / **自動操作=IAP**（`gcloud ... --tunnel-through-iap`）。
+- データは移行せず**新規取り込みで開始**（waiwai旧データは不使用方針）。
+- 自動停止は**残す**（コスト保険・使う時だけ起動）。Bot稼働はVM1箇所のみ（Mac側は停止維持）。
+- 開発はMacローカル、GCPは検証機→後に本番（[[feedback-dev-on-mac]] 相当をメモリ化）。
+
+### 実行結果（実機・GCP上）
+- 取り込み: テストサーバーで `/oracle allow` → job done（crawled=241 / chunks=9 / contexts=9 / indexed=9）。
+  Postgres 241msg・indexed 9・Qdrant points 9 で三者整合。
+- 回答: @メンション質問 → `POST /chat 200` ×2、`usage_log` に rewrite/embedding/answer を実user_id付きで記録。
+- **実測コスト: 1問 ≈ $0.016（≈¥2.5）**・answer約26kトークンが支配的 → 概算の3〜16倍。**OI-16** に最適化課題を記録。
+
+### ハマりポイント
+- 予算作成が `INVALID_ARGUMENT` → 請求アカウントが**JPY建て**のため `20USD`不可。`3000JPY`で解決。
+- VM作成前に **Compute Engine API有効化**が必要 / 自動停止は**サービスエージェントへのIAM付与**が無いと実行されない（runbookに反映済み）。
+- Private repo のため git clone せず Mac→VM へ tarball 転送（data/.git/.venv除外、設定ファイルは同梱）。
+
+### 次のステップ
+- OI-16: 1問コスト最適化（まず `top_k` 10→5 を usage_log で before/after 計測）。
+- Phase 5: バックアップ(スナップショット)自動化・監視 / `.env`→Secret Manager。
+- 後に本番機へ移行（現状ステージング）。Phase 6 マネージド化(Cloud SQL/Run)。
+
 ## 2026-06-15 — 利用量計測(OI-14 C-1) ＋ 管理ポータル(codename: remember)
 
 収益化ロードマップ OI-14 の **C-1（利用量計測）** と、追加要望の **管理ポータル** を
