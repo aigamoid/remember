@@ -4,6 +4,45 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-15 — 実機E2E完走（OI-12）＋ Query Rewriter修正
+
+ステップ2（feature/multitenant-ingest）の実機E2Eを、テスト用Discordサーバー
+「もいもいAI砂場」で実施し完走した。waiwaiサーバーは使用していない。
+
+### E2E結果（全シナリオ想定通り）
+
+| シナリオ | 結果 |
+|---|---|
+| Bot招待 → `/oracle allow #一般` | ジョブ投入→自動クロール→チャンク→文脈付与→Qdrant登録 |
+| 取り込み結果 | 511msg→30チャンク→30ベクトル（guild_id分離をQdrant/PGで確認） |
+| @メンション質問 | 実ログ準拠の回答（Rewriter→Qdrant検索→Kimi K2生成） |
+| `/oracle deny #一般` | チャンネル単位削除（−513msg/−30chunk、他chは無傷） |
+| Botキック | guild単位の全削除（実データ0化、guilds行は left_at 付きで墓標として残存＝設計通り） |
+
+### 途中で直したこと
+
+1. **Query Rewriter が毎回402で失敗**
+   - 原因: OpenRouterはmax_tokens未指定時にモデル既定の巨大な出力枠（65535）を
+     要求し、残高確保で弾かれる。`rewrite()` が握りつぶして元クエリで検索を続行する
+     設計のため回答自体は返るが、書き換えが効かず検索精度が落ちる。
+   - 対処: `rag.rewriter_max_tokens`（既定256）を新設し `rewrite()` に渡す。
+     残高追加＋本修正で警告ゼロを実測確認。テスト1件追加（全212 PASS・安定順序）。
+   - 変更: src/rag/engine.py / config.yml(.example) / tests/test_rag.py（各1コミット）
+
+2. **Qdrantの旧 waiwai_chunks コレクション破損で起動不能**
+   - 原因: 前回のDocker停止が不完全で page ファイル欠損。Qdrantが panic 起動失敗、
+     連鎖でworkerも落ちた。
+   - 対処: `data/qdrant_quarantine/` へ退避（削除せず復元可能）。waiwaiはアクセス禁止
+     方針＆元チャンクはPostgresに残存のため実害なし。workerが空コレクションを再生成。
+
+### 補足
+
+- pytest はランダム順序（pytest-randomly）だと test_db 同士の分離揺らぎで稀に1件error。
+  安定順序では212件全PASS。今回の変更とは無関係の既存事象（別途要対応）。
+- OI-12 を完了に更新。Dockerは起動したまま（次セッションで停止判断）。
+
+---
+
 ## 2026-06-11 — SaaS化ステップ2: マルチテナント自動取り込み（feature/multitenant-ingest）
 
 ### 目的
