@@ -1,5 +1,13 @@
 # waiwai-oracle
 
+> **コードネーム: remember**（このプロダクトの正式呼称）。
+> 段階的に `waiwai-oracle` → `remember` へ改名していく方針。
+> 2026-06-15 時点では**管理ポータル（src/admin）の表示名のみ** `remember` に統一済み。
+> リポジトリ名・compose・Qdrantコレクション名（`waiwai_chunks`）等の全体改名は未実施
+> （Qdrantコレクション名はデータ移行が絡むため別途要相談）。
+> なお「わいわい」はテナントのDiscordサーバー名・「わいわいちゃん」はBotの回答キャラ名であり、
+> プロダクト名 `remember` とは別物（改名対象外）。
+
 Discordサーバーの過去ログをRAG化し、チャットボットで回答するPOCプロジェクト。
 マルチテナント対応済み（サーバーごとに opt-in 取り込み・guild_id でデータ分離）。
 
