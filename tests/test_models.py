@@ -6,6 +6,7 @@ from src.models import RawAttachment, RawMessage
 def _make_message(**kwargs) -> RawMessage:
     defaults = dict(
         id="111",
+        guild_id="g-111",
         channel_id="222",
         channel_name="general",
         author_id="333",
@@ -25,6 +26,7 @@ class TestRawMessage:
     def test_basic_fields(self):
         msg = _make_message()
         assert msg.id == "111"
+        assert msg.guild_id == "g-111"
         assert msg.channel_name == "general"
         assert msg.content == "こんにちは"
 

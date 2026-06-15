@@ -1,14 +1,41 @@
+"""Postgres への接続とマルチテナント（guild単位）データ操作。
+
+接続先は環境変数 DATABASE_URL（例: postgresql://oracle:oracle@localhost:5432/oracle）。
+パイプライン系の関数は commit しない（呼び出し元がトランザクションを管理する）。
+Bot/ワーカーが使うジョブキュー・許可チャンネル系の関数は内部で commit する。
+"""
+
 from __future__ import annotations
 
-import sqlite3
-from datetime import datetime, timezone
-from pathlib import Path
+import os
+from datetime import datetime, timedelta, timezone
+
+import psycopg
 
 from src.models import RawAttachment, RawMessage
 
+_DEFAULT_DSN = "postgresql://oracle:oracle@localhost:5432/oracle"
+
 _DDL = """
+CREATE TABLE IF NOT EXISTS guilds (
+    guild_id   TEXT PRIMARY KEY,
+    guild_name TEXT NOT NULL DEFAULT '',
+    joined_at  TEXT,
+    left_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS allowed_channels (
+    guild_id     TEXT NOT NULL,
+    channel_id   TEXT NOT NULL,
+    channel_name TEXT NOT NULL DEFAULT '',
+    allowed_by   TEXT,
+    allowed_at   TEXT NOT NULL,
+    PRIMARY KEY (guild_id, channel_id)
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id             TEXT PRIMARY KEY,
+    guild_id       TEXT NOT NULL,
     channel_id     TEXT NOT NULL,
     channel_name   TEXT NOT NULL,
     author_id      TEXT NOT NULL,
@@ -24,6 +51,8 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_channel_timestamp
     ON messages (channel_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_guild
+    ON messages (guild_id);
 
 CREATE TABLE IF NOT EXISTS attachments (
     id           TEXT PRIMARY KEY,
@@ -38,35 +67,49 @@ CREATE TABLE IF NOT EXISTS attachments (
 
 CREATE TABLE IF NOT EXISTS crawl_state (
     channel_id      TEXT PRIMARY KEY,
+    guild_id        TEXT NOT NULL,
     last_message_id TEXT NOT NULL,
     crawled_at      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS chunk_index (
     chunk_id      TEXT PRIMARY KEY,
+    guild_id      TEXT NOT NULL,
     anchor_msg_id TEXT NOT NULL,
     channel_id    TEXT NOT NULL,
     chunk_text    TEXT NOT NULL,
     context_text  TEXT,
-    dify_doc_id   TEXT,
     status        TEXT DEFAULT 'pending',
     indexed_at    TEXT,
     error_message TEXT
 );
 
-CREATE TABLE IF NOT EXISTS upload_state (
-    channel_id    TEXT PRIMARY KEY,
-    channel_name  TEXT NOT NULL,
-    dataset_id    TEXT,
-    document_id   TEXT,
-    status        TEXT DEFAULT 'pending',
+CREATE INDEX IF NOT EXISTS idx_chunk_guild
+    ON chunk_index (guild_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_no_context
+    ON chunk_index (guild_id, channel_id) WHERE context_text IS NULL;
+
+CREATE TABLE IF NOT EXISTS ingest_jobs (
+    id            BIGSERIAL PRIMARY KEY,
+    guild_id      TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    channel_id    TEXT,
+    status        TEXT NOT NULL DEFAULT 'queued',
+    requested_by  TEXT,
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    finished_at   TEXT,
     error_message TEXT,
-    indexed_at    TEXT
+    result        TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_jobs_status
+    ON ingest_jobs (status, id);
+
 CREATE TABLE IF NOT EXISTS run_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         BIGSERIAL PRIMARY KEY,
     run_id     TEXT NOT NULL,
+    guild_id   TEXT,
     phase      TEXT NOT NULL,
     status     TEXT NOT NULL,
     message    TEXT,
@@ -74,45 +117,239 @@ CREATE TABLE IF NOT EXISTS run_log (
 );
 """
 
+# ingest_jobs.kind の取りうる値
+JOB_INGEST = "ingest"              # クロール→チャンク→文脈付与→インデックス（差分・冪等）
+JOB_PURGE_CHANNEL = "purge_channel"  # 1チャンネル分のデータを全削除
+JOB_PURGE_GUILD = "purge_guild"      # 1サーバー分のデータを全削除
 
-def init_db(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.executescript(_DDL)
-    add_context_text_column(conn)
-    conn.commit()
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def get_connection(dsn: str | None = None, init: bool = True) -> psycopg.Connection:
+    """Postgres に接続する。dsn 未指定なら環境変数 DATABASE_URL を使う。"""
+    dsn = dsn or os.environ.get("DATABASE_URL") or _DEFAULT_DSN
+    conn = psycopg.connect(dsn)
+    if init:
+        init_schema(conn)
     return conn
 
 
-def add_context_text_column(conn: sqlite3.Connection) -> None:
-    """context_text カラムが無い場合のみ ALTER TABLE で追加し、部分インデックスを作成する（冪等）。"""
-    existing = {
-        row[1]
-        for row in conn.execute("PRAGMA table_info(chunk_index)").fetchall()
-    }
-    if "context_text" not in existing:
-        conn.execute("ALTER TABLE chunk_index ADD COLUMN context_text TEXT")
+def init_schema(conn: psycopg.Connection) -> None:
+    """テーブル・インデックスを作成する（冪等）。"""
+    conn.execute(_DDL)
+    conn.commit()
+
+
+# ---- guilds / allowed_channels（Bot のスラッシュコマンドが使用・内部で commit）----
+
+def upsert_guild(conn: psycopg.Connection, guild_id: str, guild_name: str) -> None:
+    """サーバーを登録する。再参加（left_at あり）の場合は復帰扱いにする。"""
     conn.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_chunk_no_context
-            ON chunk_index(channel_id, chunk_id) WHERE context_text IS NULL
-        """
+        INSERT INTO guilds (guild_id, guild_name, joined_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET
+            guild_name = EXCLUDED.guild_name,
+            left_at    = NULL
+        """,
+        (guild_id, guild_name, _now()),
     )
+    conn.commit()
 
 
-def insert_message(conn: sqlite3.Connection, msg: RawMessage) -> None:
+def mark_guild_left(conn: psycopg.Connection, guild_id: str) -> None:
+    conn.execute(
+        "UPDATE guilds SET left_at = %s WHERE guild_id = %s", (_now(), guild_id)
+    )
+    conn.commit()
+
+
+def allow_channel(
+    conn: psycopg.Connection,
+    guild_id: str,
+    channel_id: str,
+    channel_name: str,
+    allowed_by: str,
+) -> None:
     conn.execute(
         """
-        INSERT OR IGNORE INTO messages
-            (id, channel_id, channel_name, author_id, author_name,
+        INSERT INTO allowed_channels (guild_id, channel_id, channel_name, allowed_by, allowed_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (guild_id, channel_id) DO UPDATE SET
+            channel_name = EXCLUDED.channel_name,
+            allowed_by   = EXCLUDED.allowed_by,
+            allowed_at   = EXCLUDED.allowed_at
+        """,
+        (guild_id, channel_id, channel_name, allowed_by, _now()),
+    )
+    conn.commit()
+
+
+def deny_channel(conn: psycopg.Connection, guild_id: str, channel_id: str) -> bool:
+    """許可を取り消す。行が存在して削除できたら True。"""
+    cur = conn.execute(
+        "DELETE FROM allowed_channels WHERE guild_id = %s AND channel_id = %s",
+        (guild_id, channel_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def fetch_allowed_channels(
+    conn: psycopg.Connection, guild_id: str
+) -> list[tuple[str, str]]:
+    """(channel_id, channel_name) のリストを返す。"""
+    return conn.execute(
+        "SELECT channel_id, channel_name FROM allowed_channels "
+        "WHERE guild_id = %s ORDER BY channel_name",
+        (guild_id,),
+    ).fetchall()
+
+
+# ---- ingest_jobs ジョブキュー（Bot が enqueue・ワーカーが claim。内部で commit）----
+
+def enqueue_job(
+    conn: psycopg.Connection,
+    guild_id: str,
+    kind: str,
+    channel_id: str | None = None,
+    requested_by: str | None = None,
+) -> int | None:
+    """ジョブを投入する。同内容のジョブが queued で待機中なら投入せず None を返す。"""
+    dup = conn.execute(
+        """
+        SELECT id FROM ingest_jobs
+        WHERE guild_id = %s AND kind = %s AND status = 'queued'
+          AND channel_id IS NOT DISTINCT FROM %s
+        LIMIT 1
+        """,
+        (guild_id, kind, channel_id),
+    ).fetchone()
+    if dup:
+        conn.commit()
+        return None
+    row = conn.execute(
+        """
+        INSERT INTO ingest_jobs (guild_id, kind, channel_id, requested_by, created_at)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (guild_id, kind, channel_id, requested_by, _now()),
+    ).fetchone()
+    conn.commit()
+    return row[0]
+
+
+def claim_next_job(conn: psycopg.Connection) -> dict | None:
+    """queued の先頭ジョブを running にして返す（FOR UPDATE SKIP LOCKED で競合安全）。"""
+    row = conn.execute(
+        """
+        UPDATE ingest_jobs SET status = 'running', started_at = %s
+        WHERE id = (
+            SELECT id FROM ingest_jobs WHERE status = 'queued'
+            ORDER BY id LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, guild_id, kind, channel_id, requested_by
+        """,
+        (_now(),),
+    ).fetchone()
+    conn.commit()
+    if row is None:
+        return None
+    return {
+        "id": row[0],
+        "guild_id": row[1],
+        "kind": row[2],
+        "channel_id": row[3],
+        "requested_by": row[4],
+    }
+
+
+def finish_job(
+    conn: psycopg.Connection,
+    job_id: int,
+    ok: bool,
+    result: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    conn.execute(
+        "UPDATE ingest_jobs SET status = %s, finished_at = %s, result = %s, "
+        "error_message = %s WHERE id = %s",
+        ("done" if ok else "error", _now(), result, error_message, job_id),
+    )
+    conn.commit()
+
+
+def fetch_last_job(conn: psycopg.Connection, guild_id: str) -> dict | None:
+    """そのサーバーの最新ジョブを返す（/oracle status 用）。"""
+    row = conn.execute(
+        """
+        SELECT id, kind, status, created_at, finished_at, result, error_message
+        FROM ingest_jobs WHERE guild_id = %s ORDER BY id DESC LIMIT 1
+        """,
+        (guild_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row[0],
+        "kind": row[1],
+        "status": row[2],
+        "created_at": row[3],
+        "finished_at": row[4],
+        "result": row[5],
+        "error_message": row[6],
+    }
+
+
+def guilds_due_for_sync(
+    conn: psycopg.Connection, interval_hours: float
+) -> list[str]:
+    """定期syncの対象 guild_id を返す。
+
+    条件: 在籍中・許可チャンネルあり・実行中/待機中ジョブなし・
+    最後の ingest 完了から interval_hours 以上経過（一度も完了していなければ対象）。
+    """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=interval_hours)
+    ).isoformat()
+    rows = conn.execute(
+        """
+        SELECT g.guild_id FROM guilds g
+        WHERE g.left_at IS NULL
+          AND EXISTS (SELECT 1 FROM allowed_channels a WHERE a.guild_id = g.guild_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM ingest_jobs j
+              WHERE j.guild_id = g.guild_id AND j.status IN ('queued', 'running')
+          )
+          AND COALESCE((
+              SELECT MAX(j.finished_at) FROM ingest_jobs j
+              WHERE j.guild_id = g.guild_id AND j.kind = 'ingest' AND j.status = 'done'
+          ), '') < %s
+        ORDER BY g.guild_id
+        """,
+        (cutoff,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+# ---- messages / attachments / crawl_state（crawler が使用）----
+
+def insert_message(conn: psycopg.Connection, msg: RawMessage) -> None:
+    conn.execute(
+        """
+        INSERT INTO messages
+            (id, guild_id, channel_id, channel_name, author_id, author_name,
              content, timestamp, has_attachment, is_pinned, reaction_count,
              thread_id, thread_name)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (id) DO NOTHING
         """,
         (
-            msg.id, msg.channel_id, msg.channel_name,
+            msg.id, msg.guild_id, msg.channel_id, msg.channel_name,
             msg.author_id, msg.author_name, msg.content,
             msg.timestamp, int(msg.has_attachment), int(msg.is_pinned),
             msg.reaction_count, msg.thread_id, msg.thread_name,
@@ -120,69 +357,83 @@ def insert_message(conn: sqlite3.Connection, msg: RawMessage) -> None:
     )
 
 
-def insert_attachment(conn: sqlite3.Connection, att: RawAttachment) -> None:
+def insert_attachment(conn: psycopg.Connection, att: RawAttachment) -> None:
     conn.execute(
         """
-        INSERT OR IGNORE INTO attachments (id, message_id, url, filename, content_type)
-        VALUES (?,?,?,?,?)
+        INSERT INTO attachments (id, message_id, url, filename, content_type)
+        VALUES (%s,%s,%s,%s,%s)
+        ON CONFLICT (id) DO NOTHING
         """,
         (att.id, att.message_id, att.url, att.filename, att.content_type),
     )
 
 
 def upsert_crawl_state(
-    conn: sqlite3.Connection, channel_id: str, last_message_id: str
+    conn: psycopg.Connection, guild_id: str, channel_id: str, last_message_id: str
 ) -> None:
-    now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """
-        INSERT INTO crawl_state (channel_id, last_message_id, crawled_at)
-        VALUES (?,?,?)
-        ON CONFLICT(channel_id) DO UPDATE SET
-            last_message_id = excluded.last_message_id,
-            crawled_at      = excluded.crawled_at
+        INSERT INTO crawl_state (channel_id, guild_id, last_message_id, crawled_at)
+        VALUES (%s,%s,%s,%s)
+        ON CONFLICT (channel_id) DO UPDATE SET
+            guild_id        = EXCLUDED.guild_id,
+            last_message_id = EXCLUDED.last_message_id,
+            crawled_at      = EXCLUDED.crawled_at
         """,
-        (channel_id, last_message_id, now),
+        (channel_id, guild_id, last_message_id, _now()),
     )
 
 
-def get_crawl_state(conn: sqlite3.Connection, channel_id: str) -> str | None:
+def get_crawl_state(conn: psycopg.Connection, channel_id: str) -> str | None:
     row = conn.execute(
-        "SELECT last_message_id FROM crawl_state WHERE channel_id = ?",
+        "SELECT last_message_id FROM crawl_state WHERE channel_id = %s",
         (channel_id,),
     ).fetchone()
     return row[0] if row else None
 
 
+# ---- chunk_index（chunker / contextualizer / indexer が使用）----
+
 def insert_chunk(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection,
     chunk_id: str,
+    guild_id: str,
     anchor_msg_id: str,
     channel_id: str,
     chunk_text: str,
 ) -> None:
+    """チャンクを upsert する。本文が変わった場合は context_text を破棄し
+    status を 'pending' に戻して、再contextualize・再インデックス対象にする。"""
     conn.execute(
         """
-        INSERT INTO chunk_index (chunk_id, anchor_msg_id, channel_id, chunk_text)
-        VALUES (?,?,?,?)
-        ON CONFLICT(chunk_id) DO UPDATE SET
-            anchor_msg_id = excluded.anchor_msg_id,
-            channel_id    = excluded.channel_id,
-            chunk_text    = excluded.chunk_text,
+        INSERT INTO chunk_index (chunk_id, guild_id, anchor_msg_id, channel_id, chunk_text)
+        VALUES (%s,%s,%s,%s,%s)
+        ON CONFLICT (chunk_id) DO UPDATE SET
+            guild_id      = EXCLUDED.guild_id,
+            anchor_msg_id = EXCLUDED.anchor_msg_id,
+            channel_id    = EXCLUDED.channel_id,
+            chunk_text    = EXCLUDED.chunk_text,
             context_text  = CASE
-                WHEN chunk_index.chunk_text    IS NOT excluded.chunk_text
-                  OR chunk_index.anchor_msg_id IS NOT excluded.anchor_msg_id
-                  OR chunk_index.channel_id    IS NOT excluded.channel_id
+                WHEN chunk_index.chunk_text    IS DISTINCT FROM EXCLUDED.chunk_text
+                  OR chunk_index.anchor_msg_id IS DISTINCT FROM EXCLUDED.anchor_msg_id
+                  OR chunk_index.channel_id    IS DISTINCT FROM EXCLUDED.channel_id
                 THEN NULL
                 ELSE chunk_index.context_text
+            END,
+            status = CASE
+                WHEN chunk_index.chunk_text    IS DISTINCT FROM EXCLUDED.chunk_text
+                  OR chunk_index.anchor_msg_id IS DISTINCT FROM EXCLUDED.anchor_msg_id
+                  OR chunk_index.channel_id    IS DISTINCT FROM EXCLUDED.channel_id
+                THEN 'pending'
+                ELSE chunk_index.status
             END
         """,
-        (chunk_id, anchor_msg_id, channel_id, chunk_text),
+        (chunk_id, guild_id, anchor_msg_id, channel_id, chunk_text),
     )
 
 
 def fetch_chunks_by_channel(
-    conn: sqlite3.Connection, channel_id: str
+    conn: psycopg.Connection, channel_id: str
 ) -> list[tuple[str, str | None]]:
     """指定 channel_id のチャンクを anchor メッセージの timestamp 昇順で返す。
     戻り値: (chunk_text, context_text) のタプルリスト。
@@ -192,7 +443,7 @@ def fetch_chunks_by_channel(
         """
         SELECT ci.chunk_text, ci.context_text FROM chunk_index ci
         JOIN messages m ON ci.anchor_msg_id = m.id
-        WHERE ci.channel_id = ?
+        WHERE ci.channel_id = %s
         ORDER BY m.timestamp ASC, m.id ASC
         """,
         (channel_id,),
@@ -201,156 +452,186 @@ def fetch_chunks_by_channel(
 
 
 def update_chunk_context(
-    conn: sqlite3.Connection, chunk_id: str, context_text: str
+    conn: psycopg.Connection, chunk_id: str, context_text: str
 ) -> None:
-    """context_text を chunk_id で更新する。"""
     conn.execute(
-        "UPDATE chunk_index SET context_text = ? WHERE chunk_id = ?",
+        "UPDATE chunk_index SET context_text = %s WHERE chunk_id = %s",
         (context_text, chunk_id),
     )
 
 
 def fetch_chunks_for_context(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection, guild_id: str | None = None
 ) -> list[tuple[str, str, str, str]]:
-    """context_text が NULL のチャンクを全件取得する。
+    """context_text が NULL のチャンクを取得する（guild_id 指定で絞り込み）。
     戻り値: (chunk_id, anchor_msg_id, channel_id, chunk_text) のリスト。
     """
+    where = "WHERE context_text IS NULL"
+    params: tuple = ()
+    if guild_id is not None:
+        where += " AND guild_id = %s"
+        params = (guild_id,)
     return conn.execute(
-        """
+        f"""
         SELECT chunk_id, anchor_msg_id, channel_id, chunk_text
         FROM chunk_index
-        WHERE context_text IS NULL
+        {where}
         ORDER BY channel_id, chunk_id
-        """
+        """,
+        params,
     ).fetchall()
 
 
 def fetch_chunks_for_indexing(
-    conn: sqlite3.Connection, include_indexed: bool = False
-) -> list[tuple[str, str, str, str, str | None, str]]:
+    conn: psycopg.Connection,
+    guild_id: str | None = None,
+    include_indexed: bool = False,
+) -> list[tuple[str, str, str, str, str, str | None, str]]:
     """Qdrant 登録対象のチャンクを返す（indexer.py が使用）。
-    戻り値: (chunk_id, channel_id, channel_name, chunk_text, context_text, anchor_timestamp)
+    戻り値: (chunk_id, guild_id, channel_id, channel_name, chunk_text, context_text, anchor_timestamp)
     """
-    where = "" if include_indexed else "WHERE ci.status != 'indexed'"
+    conds = []
+    params: list = []
+    if not include_indexed:
+        conds.append("ci.status != 'indexed'")
+    if guild_id is not None:
+        conds.append("ci.guild_id = %s")
+        params.append(guild_id)
+    where = f"WHERE {' AND '.join(conds)}" if conds else ""
     return conn.execute(
         f"""
-        SELECT ci.chunk_id, ci.channel_id, m.channel_name,
+        SELECT ci.chunk_id, ci.guild_id, ci.channel_id, m.channel_name,
                ci.chunk_text, ci.context_text, m.timestamp
         FROM chunk_index ci
         JOIN messages m ON ci.anchor_msg_id = m.id
         {where}
         ORDER BY ci.channel_id, m.timestamp, m.id
-        """
+        """,
+        params,
     ).fetchall()
 
 
-def mark_chunks_indexed(conn: sqlite3.Connection, chunk_ids: list[str]) -> None:
+def mark_chunks_indexed(conn: psycopg.Connection, chunk_ids: list[str]) -> None:
     """Qdrant 登録済みチャンクの status を 'indexed' に更新する（indexer.py が使用）。"""
-    now = datetime.now(timezone.utc).isoformat()
-    conn.executemany(
-        "UPDATE chunk_index SET status='indexed', indexed_at=?, error_message=NULL "
-        "WHERE chunk_id=?",
-        [(now, cid) for cid in chunk_ids],
-    )
+    now = _now()
+    with conn.cursor() as cur:
+        cur.executemany(
+            "UPDATE chunk_index SET status='indexed', indexed_at=%s, error_message=NULL "
+            "WHERE chunk_id=%s",
+            [(now, cid) for cid in chunk_ids],
+        )
 
 
-def reset_chunk_index_status(conn: sqlite3.Connection) -> int:
-    """全チャンクの status を 'pending' に戻す（indexer.py --clean が使用）。"""
-    cur = conn.execute(
-        "UPDATE chunk_index SET status='pending', indexed_at=NULL"
-    )
+def reset_chunk_index_status(
+    conn: psycopg.Connection, guild_id: str | None = None
+) -> int:
+    """チャンクの status を 'pending' に戻す（indexer.py --clean が使用）。"""
+    if guild_id is None:
+        cur = conn.execute(
+            "UPDATE chunk_index SET status='pending', indexed_at=NULL"
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE chunk_index SET status='pending', indexed_at=NULL WHERE guild_id=%s",
+            (guild_id,),
+        )
     return cur.rowcount
 
 
-def count_chunks(conn: sqlite3.Connection, status: str | None = None) -> int:
-    if status is None:
-        row = conn.execute("SELECT count(*) FROM chunk_index").fetchone()
+def count_chunks(
+    conn: psycopg.Connection,
+    status: str | None = None,
+    guild_id: str | None = None,
+) -> int:
+    conds = []
+    params: list = []
+    if status is not None:
+        conds.append("status = %s")
+        params.append(status)
+    if guild_id is not None:
+        conds.append("guild_id = %s")
+        params.append(guild_id)
+    where = f"WHERE {' AND '.join(conds)}" if conds else ""
+    row = conn.execute(
+        f"SELECT count(*) FROM chunk_index {where}", params
+    ).fetchone()
+    return row[0]
+
+
+def count_messages(conn: psycopg.Connection, guild_id: str | None = None) -> int:
+    if guild_id is None:
+        row = conn.execute("SELECT count(*) FROM messages").fetchone()
     else:
         row = conn.execute(
-            "SELECT count(*) FROM chunk_index WHERE status = ?", (status,)
+            "SELECT count(*) FROM messages WHERE guild_id = %s", (guild_id,)
         ).fetchone()
     return row[0]
 
 
-def init_upload_state(conn: sqlite3.Connection) -> int:
-    """messages テーブルのチャンネル一覧から未登録分を upload_state に追加する。"""
-    cur = conn.execute(
+# ---- データ削除（ワーカーの purge ジョブが使用。Qdrant 側の削除は呼び出し元が行う）----
+
+def purge_channel_data(
+    conn: psycopg.Connection, guild_id: str, channel_id: str
+) -> dict:
+    """1チャンネル分の messages / attachments / chunk_index / crawl_state を削除する。"""
+    atts = conn.execute(
         """
-        INSERT OR IGNORE INTO upload_state (channel_id, channel_name)
-        SELECT DISTINCT channel_id, channel_name FROM messages
-        """
-    )
-    return cur.rowcount
-
-
-def fetch_pending_channels(conn: sqlite3.Connection) -> list[tuple[str, str, str | None]]:
-    """pending チャンネルを返す。(channel_id, channel_name, dataset_id)"""
-    return conn.execute(
-        "SELECT channel_id, channel_name, dataset_id FROM upload_state WHERE status = 'pending'"
-    ).fetchall()
-
-
-def mark_channel_indexed(
-    conn: sqlite3.Connection, channel_id: str, dataset_id: str, document_id: str,
-) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+        DELETE FROM attachments WHERE message_id IN (
+            SELECT id FROM messages WHERE guild_id = %s AND channel_id = %s
+        )
+        """,
+        (guild_id, channel_id),
+    ).rowcount
+    msgs = conn.execute(
+        "DELETE FROM messages WHERE guild_id = %s AND channel_id = %s",
+        (guild_id, channel_id),
+    ).rowcount
+    chunks = conn.execute(
+        "DELETE FROM chunk_index WHERE guild_id = %s AND channel_id = %s",
+        (guild_id, channel_id),
+    ).rowcount
     conn.execute(
-        "UPDATE upload_state SET status='indexed', dataset_id=?, document_id=?, indexed_at=? WHERE channel_id=?",
-        (dataset_id, document_id, now, channel_id),
+        "DELETE FROM crawl_state WHERE guild_id = %s AND channel_id = %s",
+        (guild_id, channel_id),
     )
+    conn.commit()
+    return {"messages": msgs, "attachments": atts, "chunks": chunks}
 
 
-def mark_channel_error(
-    conn: sqlite3.Connection, channel_id: str, error_msg: str,
-    dataset_id: str | None = None,
-    document_id: str | None = None,
-) -> None:
-    if dataset_id:
-        conn.execute(
-            "UPDATE upload_state SET status='error', error_message=?, dataset_id=?, document_id=? WHERE channel_id=?",
-            (error_msg, dataset_id, document_id, channel_id),
+def purge_guild_data(conn: psycopg.Connection, guild_id: str) -> dict:
+    """1サーバー分の全データ（許可チャンネル設定含む）を削除する。guilds 行は left_at を残す。"""
+    atts = conn.execute(
+        """
+        DELETE FROM attachments WHERE message_id IN (
+            SELECT id FROM messages WHERE guild_id = %s
         )
-    else:
-        conn.execute(
-            "UPDATE upload_state SET status='error', error_message=? WHERE channel_id=?",
-            (error_msg, channel_id),
-        )
+        """,
+        (guild_id,),
+    ).rowcount
+    msgs = conn.execute(
+        "DELETE FROM messages WHERE guild_id = %s", (guild_id,)
+    ).rowcount
+    chunks = conn.execute(
+        "DELETE FROM chunk_index WHERE guild_id = %s", (guild_id,)
+    ).rowcount
+    conn.execute("DELETE FROM crawl_state WHERE guild_id = %s", (guild_id,))
+    conn.execute("DELETE FROM allowed_channels WHERE guild_id = %s", (guild_id,))
+    conn.commit()
+    return {"messages": msgs, "attachments": atts, "chunks": chunks}
 
 
-def reset_upload_errors(conn: sqlite3.Connection) -> int:
-    """error → pending に戻す。dataset_id は保持。"""
-    cur = conn.execute(
-        "UPDATE upload_state SET status='pending', error_message=NULL WHERE status='error'"
-    )
-    return cur.rowcount
-
-
-def fetch_datasets_to_clean(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
-    """dataset_id が記録されている全チャンネルを返す。(channel_id, channel_name, dataset_id)"""
-    return conn.execute(
-        "SELECT channel_id, channel_name, dataset_id FROM upload_state WHERE dataset_id IS NOT NULL"
-    ).fetchall()
-
-
-def reset_all_upload_state(conn: sqlite3.Connection) -> int:
-    """全チャンネルを pending に戻し、dataset_id/document_id をクリアする。"""
-    cur = conn.execute(
-        "UPDATE upload_state SET status='pending', dataset_id=NULL, document_id=NULL, "
-        "error_message=NULL, indexed_at=NULL"
-    )
-    return cur.rowcount
-
+# ---- run_log ----
 
 def log_run(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection,
     run_id: str,
     phase: str,
     status: str,
     message: str | None = None,
+    guild_id: str | None = None,
 ) -> None:
-    now = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        "INSERT INTO run_log (run_id, phase, status, message, created_at) VALUES (?,?,?,?,?)",
-        (run_id, phase, status, message, now),
+        "INSERT INTO run_log (run_id, guild_id, phase, status, message, created_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s)",
+        (run_id, guild_id, phase, status, message, _now()),
     )

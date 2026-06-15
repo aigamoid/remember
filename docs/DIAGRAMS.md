@@ -1,7 +1,7 @@
 # 処理フロー・設計図（Mermaid）
 
-現在の waiwai-oracle の全体像を3つの視点で図解する。
-（2026-06-11 時点: Dify廃止・Qdrant + FastAPI 自前RAGスタック移行後）
+現在の waiwai-oracle の全体像を4つの視点で図解する。
+（2026-06-11 時点: SaaS化ステップ2「マルチテナント自動取り込み」反映後）
 
 ## ① 全体像（コンテナ構成・運用視点）
 
@@ -9,50 +9,93 @@
 flowchart LR
     subgraph FRONT["フロントエンド（薄いクライアント・2モード）"]
         CLI["chat_cli.py<br>（CLI・動作確認用）"]
-        BOT["botコンテナ<br>moimoichan_Discordbot"]
+        BOT["botコンテナ<br>moimoichan_Discordbot<br>/oracleコマンド"]
     end
 
     subgraph COMPOSE["docker compose"]
         API["apiコンテナ<br>FastAPI src/api.py<br>:8000"]
+        WORKER["workerコンテナ<br>worker.py<br>取り込みジョブ処理・定期sync"]
         QD[("qdrantコンテナ<br>ベクトルDB :6333<br>data/qdrant/")]
-        ORACLE["oracleコンテナ<br>バッチ実行用<br>（crawler〜indexer）"]
+        PG[("postgresコンテナ<br>:5432 data/postgres/<br>messages / chunk_index /<br>guilds / ingest_jobs")]
+        ORACLE["oracleコンテナ<br>手動バッチ実行用<br>（crawler〜indexer）"]
     end
 
     subgraph EXT["外部API"]
+        DISCORD["Discord API"]
         OAI["OpenAI<br>embedding"]
         ORT["OpenRouter<br>Gemini / Kimi / DeepSeek"]
     end
 
-    SQLITE[("SQLite<br>data/messages.db")]
-
     CLI -- "POST /chat" --> API
     BOT -- "POST /chat" --> API
+    BOT -- "ジョブ投入・許可設定" --> PG
+    WORKER -- "ジョブ取得・結果記録" --> PG
+    WORKER -- "差分クロール" --> DISCORD
+    WORKER --> OAI & ORT
+    WORKER --> QD
     API --> QD
     API --> OAI & ORT
-    ORACLE --> SQLITE
-    ORACLE --> QD
-    ENV[".env<br>APIキー類"] -.-> API & ORACLE
+    ORACLE --> PG
+    ENV[".env<br>APIキー類"] -.-> API & WORKER & ORACLE & BOT
 ```
 
-**ポイント**: フロントは2つともAPIを呼ぶだけ。RAGの頭脳はすべて `api` コンテナ側に
-あるので、フロントを増やしても（Web UIなど）本体は無変更でよい。
+**ポイント**: Bot は「ジョブを予約する係」、worker は「実際に取り込む係」に分業。
+重い処理（クロール・LLM・embedding）はすべて worker に隔離され、Bot の応答は止まらない。
 
-## ② 取り込みパイプライン（Phase 0〜4・バッチ）
+## ② サーバー導入から質問できるまで（自動取り込みフロー）
+
+```mermaid
+sequenceDiagram
+    participant Admin as サーバー管理者
+    participant B as Bot（bot.py）
+    participant PG as Postgres<br>(ingest_jobs)
+    participant W as worker.py
+    participant D as Discord API
+    participant Q as Qdrant
+
+    Note over Admin,B: Botをサーバーに招待
+    B->>PG: guilds に登録（on_guild_join）
+    B-->>Admin: 「/oracle allow で読んでいい<br>チャンネルを教えてね」
+
+    Admin->>B: /oracle allow #雑談
+    B->>PG: allowed_channels 追加 + ingestジョブ投入
+    B-->>Admin: ✅ 取り込みを始めるね（ephemeral）
+
+    W->>PG: ジョブを claim（FOR UPDATE SKIP LOCKED）
+    W->>D: 許可チャンネルだけ差分クロール（REST）
+    W->>W: チャンク化 → context付与 → embedding
+    W->>Q: upsert（payload に guild_id）
+    W->>PG: ジョブ完了（result に件数）
+
+    Admin->>B: /oracle status
+    B-->>Admin: 取り込み済み件数・最新ジョブ状態
+
+    Note over W,PG: 以降は24時間ごとに自動で差分sync<br>（/oracle sync で即時実行も可）
+```
+
+**ポイント**: 招待しただけでは何も読まない（opt-in）。`/oracle deny` で許可を取り消すと
+該当チャンネルのデータが Qdrant / Postgres から削除され、Bot をサーバーから外すと
+サーバー全体のデータが削除される（purgeジョブ）。
+
+## ③ 取り込みパイプライン（ワーカー内部・ジョブ1件の処理）
 
 ```mermaid
 flowchart TB
-    DISCORD["Discord API"] -->|"Phase 1: crawler.py<br>全メッセージ取得"| MSG[("messagesテーブル<br>36,128件")]
-    MSG -->|"Phase 2: chunker.py<br>時間ギャップ60分で会話単位に分割<br>ノイズ除去・短文吸収"| CHUNK[("chunk_indexテーブル<br>8,364チャンク<br>context_text=NULL")]
-    CHUNK -->|"Phase 2.5: contextualizer.py<br>DeepSeekが各チャンクに<br>1〜2文の文脈説明を付与"| CTX[("chunk_index<br>context_text付き")]
-    CTX -->|"Phase 4: indexer.py"| EMB["Embedder<br>『context + chunk』を<br>text-embedding-3-smallでベクトル化<br>（8,000トークン超は切り詰め）"]
-    EMB -->|"uuid5(chunk_id)を点IDに<br>upsert（再実行=上書きで冪等）"| QDRANT[("Qdrant<br>payload: guild_id, channel_name,<br>chunk_text, context_text, timestamp")]
-    CTX -.->|"Phase 3: exporter.py<br>（旧Dify用・いまは任意）"| TXT["output/*.txt"]
+    JOB["ingestジョブ<br>（/oracle allow・sync・定期スケジューラが投入）"]
+    JOB --> CRAWL["① crawl<br>allowed_channels のみ<br>crawl_state の続きから差分取得"]
+    CRAWL --> MSG[("messages<br>guild_id付き")]
+    MSG --> CHUNK["② chunk<br>時間ギャップ60分で会話単位に分割<br>ノイズ除去・短文吸収"]
+    CHUNK --> CI[("chunk_index<br>本文が変わったチャンクだけ<br>context_text=NULL / status=pending に戻る")]
+    CI --> CTX["③ contextualize<br>context_text が NULL のチャンクだけ<br>LLMで1〜2文の文脈説明を付与"]
+    CTX --> EMB["④ index<br>『context + chunk』を embedding<br>（8,000トークン超は切り詰め）"]
+    EMB --> QD[("Qdrant<br>uuid5(chunk_id)で上書きupsert")]
+    QD --> DONE["ジョブ完了<br>result: crawled=N chunks=N contexts=N indexed=N"]
 ```
 
-**ポイント**: 各フェーズは独立したスクリプトで、途中失敗しても再実行すれば
-続きから動く（status列で管理）。
+**ポイント**: 各段階が冪等なので、途中で失敗しても次のジョブで続きから処理される。
+差分syncでは「新着分＋伸びた末尾チャンク」だけが再処理され、APIコストが最小になる。
 
-## ③ 回答フロー（質問1回あたりの処理）
+## ④ 回答フロー（質問1回あたりの処理）
 
 ```mermaid
 sequenceDiagram
@@ -64,7 +107,7 @@ sequenceDiagram
     participant Q as Qdrant
     participant K as Kimi K2<br>(OpenRouter)
 
-    U->>A: guild_id + 質問
+    U->>A: guild_id + guild_name + 質問
     A->>E: answer()
     E->>G: ① クエリ書き換え<br>（現在日時JSTを注入、temp 0.2）
     G-->>E: 検索用クエリ<br>（失敗時は元の質問で続行）
@@ -81,5 +124,6 @@ sequenceDiagram
 **ポイント**:
 
 - ③の **guild_idフィルタが必須**なのがマルチテナントの肝。別サーバーのデータは構造的に見えない
+- guild_name は Bot がリクエストに載せるので、どのサーバーでも「そのサーバーの名前」で答える
 - ①が失敗しても止まらず元の質問で検索続行（フォールバック設計）
 - 所要時間の大半は④のKimi K2の生成。高速化するならここのモデル変更が効く

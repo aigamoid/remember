@@ -1,38 +1,26 @@
-"""src/chunker.py のテスト（インメモリ SQLite を使用）"""
+"""src/chunker.py のテスト（実Postgresを使用・tests/conftest.py の conn フィクスチャ）"""
 
 from __future__ import annotations
 
-import sqlite3
-
-import pytest
-
 from src.chunker import _build_chunk_text, _is_noise, generate_chunk_id, run_chunker
-from src.db import _DDL, count_chunks, insert_chunk
-
-
-@pytest.fixture
-def conn():
-    c = sqlite3.connect(":memory:")
-    c.executescript(_DDL)
-    c.commit()
-    yield c
-    c.close()
+from src.db import count_chunks, insert_chunk
 
 
 def _insert_msg(
-    conn: sqlite3.Connection,
+    conn,
     msg_id: str,
     channel_id: str,
     content: str,
     has_attachment: int = 0,
     author: str = "user",
     timestamp: str = "2024-01-01T00:00:00+00:00",
+    guild_id: str = "g1",
 ) -> None:
     conn.execute(
         "INSERT INTO messages "
-        "(id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (msg_id, channel_id, "ch", "u1", author, content, timestamp, has_attachment),
+        "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (msg_id, guild_id, channel_id, "ch", "u1", author, content, timestamp, has_attachment),
     )
 
 
@@ -103,7 +91,7 @@ class TestBuildChunkText:
 
 class TestInsertChunk:
     def test_saves_with_pending_status(self, conn):
-        insert_chunk(conn, "cid1", "mid1", "ch1", "text")
+        insert_chunk(conn, "cid1", "g1", "mid1", "ch1", "text")
         row = conn.execute(
             "SELECT anchor_msg_id, channel_id, status FROM chunk_index WHERE chunk_id='cid1'"
         ).fetchone()
@@ -113,24 +101,24 @@ class TestInsertChunk:
         assert row[2] == "pending"
 
     def test_is_idempotent(self, conn):
-        insert_chunk(conn, "cid1", "mid1", "ch1", "text")
-        insert_chunk(conn, "cid1", "mid1", "ch1", "text")
+        insert_chunk(conn, "cid1", "g1", "mid1", "ch1", "text")
+        insert_chunk(conn, "cid1", "g1", "mid1", "ch1", "text")
         assert count_chunks(conn) == 1
 
     def test_count_chunks_no_filter(self, conn):
-        insert_chunk(conn, "c1", "m1", "ch1", "a")
-        insert_chunk(conn, "c2", "m2", "ch1", "b")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "a")
+        insert_chunk(conn, "c2", "g1", "m2", "ch1", "b")
         assert count_chunks(conn) == 2
 
     def test_count_chunks_by_status(self, conn):
-        insert_chunk(conn, "c1", "m1", "ch1", "a")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "a")
         conn.execute("UPDATE chunk_index SET status='indexed' WHERE chunk_id='c1'")
-        insert_chunk(conn, "c2", "m2", "ch1", "b")
+        insert_chunk(conn, "c2", "g1", "m2", "ch1", "b")
         assert count_chunks(conn, status="pending") == 1
         assert count_chunks(conn, status="indexed") == 1
 
     def test_count_chunks_unknown_status_returns_zero(self, conn):
-        insert_chunk(conn, "c1", "m1", "ch1", "a")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "a")
         assert count_chunks(conn, status="no_such_status") == 0
 
 
@@ -207,6 +195,25 @@ class TestRunChunker:
         anchors = {r[0] for r in conn.execute("SELECT anchor_msg_id FROM chunk_index").fetchall()}
         assert "a1" in anchors
         assert "b1" in anchors
+
+    def test_guild_filter_processes_only_target_guild(self, conn):
+        """guild_id 指定時は他サーバーのメッセージをチャンク化しない。"""
+        _insert_msg(conn, "a1", "ch-A", "ギルド1のメッセージです", guild_id="g1")
+        _insert_msg(conn, "b1", "ch-B", "ギルド2のメッセージです", guild_id="g2")
+        conn.commit()
+
+        total = run_chunker(conn, _make_cfg(), "run-1", guild_id="g1")
+        assert total == 1
+        rows = conn.execute("SELECT DISTINCT guild_id FROM chunk_index").fetchall()
+        assert rows == [("g1",)]
+
+    def test_chunk_records_guild_id(self, conn):
+        _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ", guild_id="g9")
+        conn.commit()
+
+        run_chunker(conn, _make_cfg(), "run-1")
+        row = conn.execute("SELECT guild_id FROM chunk_index").fetchone()
+        assert row[0] == "g9"
 
     def test_idempotency_db_count_unchanged_on_rerun(self, conn):
         _insert_msg(conn, "m1", "ch1", "十分な長さのメッセージ")

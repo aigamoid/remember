@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
 from datetime import datetime, timezone
+
+import psycopg
 
 from src.db import insert_chunk
 from src.formatter import format_message_line
@@ -40,8 +41,9 @@ def _is_noise(content: str, has_attachment: bool, min_len: int) -> bool:
 
 
 def _flush_buffer(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection,
     buffer: list[tuple],
+    guild_id: str,
     channel_id: str,
     tz_offset: int,
 ) -> None:
@@ -49,11 +51,12 @@ def _flush_buffer(
     anchor_msg_id = buffer[0][0]
     chunk_id = generate_chunk_id(anchor_msg_id)
     chunk_text = _build_chunk_text(buffer, tz_offset)
-    insert_chunk(conn, chunk_id, anchor_msg_id, channel_id, chunk_text)
+    insert_chunk(conn, chunk_id, guild_id, anchor_msg_id, channel_id, chunk_text)
 
 
 def _process_channel(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection,
+    guild_id: str,
     channel_id: str,
     time_gap_minutes: int,
     max_chunk_messages: int,
@@ -64,7 +67,7 @@ def _process_channel(
     """1チャンネル分を時間ギャップ方式で処理し、生成チャンク数を返す。"""
     rows = conn.execute(
         "SELECT id, author_name, content, timestamp, has_attachment FROM messages "
-        "WHERE channel_id = ? ORDER BY timestamp ASC",
+        "WHERE channel_id = %s ORDER BY timestamp ASC",
         (channel_id,),
     ).fetchall()
 
@@ -90,7 +93,7 @@ def _process_channel(
                     buffer.append(row)
                     # prev_ts 更新なし（ギャップ計算を通常メッセージ基準に保つ）
                     if len(buffer) >= max_chunk_messages:
-                        _flush_buffer(conn, buffer, channel_id, tz_offset)
+                        _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset)
                         chunk_count += 1
                         buffer = []
                     continue
@@ -109,7 +112,7 @@ def _process_channel(
             should_split = True
 
         if should_split and buffer:
-            _flush_buffer(conn, buffer, channel_id, tz_offset)
+            _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset)
             chunk_count += 1
             buffer = []
 
@@ -117,14 +120,22 @@ def _process_channel(
         prev_ts = curr_ts
 
     if buffer:
-        _flush_buffer(conn, buffer, channel_id, tz_offset)
+        _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset)
         chunk_count += 1
 
     return chunk_count
 
 
-def run_chunker(conn: sqlite3.Connection, cfg: dict, run_id: str) -> int:
-    """messages テーブルをチャンネルごとに処理し、chunk_index に保存する。生成チャンク数を返す。"""
+def run_chunker(
+    conn: psycopg.Connection,
+    cfg: dict,
+    run_id: str,
+    guild_id: str | None = None,
+) -> int:
+    """messages テーブルをチャンネルごとに処理し、chunk_index に保存する。生成チャンク数を返す。
+
+    guild_id を指定すると、そのサーバーのチャンネルだけを処理する（ワーカーが使用）。
+    """
     chunk_cfg = cfg.get("chunk", {})
     time_gap_minutes: int = chunk_cfg.get("time_gap_minutes", 60)
     max_chunk_messages: int = chunk_cfg.get("max_chunk_messages", 30)
@@ -132,17 +143,22 @@ def run_chunker(conn: sqlite3.Connection, cfg: dict, run_id: str) -> int:
     short_reply_max_chars: int = chunk_cfg.get("short_reply_max_chars", 10)
     tz_offset: int = chunk_cfg.get("timezone_offset", 9)
 
-    total = 0
-    channel_ids = [
-        row[0] for row in
-        conn.execute(
-            "SELECT DISTINCT channel_id FROM messages ORDER BY channel_id"
+    if guild_id is None:
+        channels = conn.execute(
+            "SELECT DISTINCT guild_id, channel_id FROM messages ORDER BY channel_id"
         ).fetchall()
-    ]
+    else:
+        channels = conn.execute(
+            "SELECT DISTINCT guild_id, channel_id FROM messages "
+            "WHERE guild_id = %s ORDER BY channel_id",
+            (guild_id,),
+        ).fetchall()
 
-    for channel_id in channel_ids:
+    total = 0
+    for ch_guild_id, channel_id in channels:
         count = _process_channel(
-            conn, channel_id, time_gap_minutes, max_chunk_messages, min_len, tz_offset,
+            conn, ch_guild_id, channel_id,
+            time_gap_minutes, max_chunk_messages, min_len, tz_offset,
             short_reply_max_chars,
         )
         total += count

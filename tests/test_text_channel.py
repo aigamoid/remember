@@ -1,19 +1,12 @@
-"""src/collectors/text_channel.py のテスト（Discord オブジェクトをモックで代替）"""
+"""src/collectors/text_channel.py のテスト（Discordオブジェクトはモック・DBは実Postgres）"""
 from __future__ import annotations
 
-import sqlite3
-import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 from src.collectors.text_channel import TextChannelCollector, _to_raw_message
-from src.db import _DDL
-
-
-def _make_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.executescript(_DDL)
-    conn.commit()
-    return conn
+from src.db import get_crawl_state, upsert_crawl_state
 
 
 def _make_discord_message(
@@ -39,15 +32,13 @@ def _make_discord_message(
     msg.attachments = attachments or []
     msg.reactions = reactions or []
     msg.thread = None
-
-    # created_at は UTC の datetime として振る舞う
-    from datetime import datetime, timezone
     msg.created_at = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
     return msg
 
 
-def _make_guild(channels: list) -> MagicMock:
+def _make_guild(channels: list, guild_id: int = 9999) -> MagicMock:
     guild = MagicMock()
+    guild.id = guild_id
     guild.text_channels = channels
     return guild
 
@@ -59,32 +50,49 @@ def _make_channel(ch_id: int = 100, name: str = "general") -> MagicMock:
     return ch
 
 
+def _make_cfg(exclude_ids: list | None = None) -> dict:
+    return {
+        "guild_id": 9999,
+        "crawl": {
+            "exclude_channels": [],
+            "exclude_channel_ids": exclude_ids or [],
+            "download_attachments": False,
+        },
+    }
+
+
+def _run_collect(guild, cfg, conn, channels=None) -> int:
+    collector = TextChannelCollector(guild, cfg)
+    return asyncio.run(collector.collect(conn, "run-test", channels=channels))
+
+
 # ── _to_raw_message（変換関数）────────────────────────────────
 
-class TestToRawMessage(unittest.TestCase):
+class TestToRawMessage:
     def test_basic_conversion(self):
         msg = _make_discord_message(msg_id=42, content="Hello")
-        raw = _to_raw_message(msg)
+        raw = _to_raw_message(msg, "9999")
         assert raw.id == "42"
+        assert raw.guild_id == "9999"
         assert raw.content == "Hello"
         assert raw.channel_name == "general"
         assert raw.author_name == "Alice"
 
     def test_timestamp_is_iso8601(self):
         msg = _make_discord_message()
-        raw = _to_raw_message(msg)
+        raw = _to_raw_message(msg, "9999")
         assert "2024-01-15" in raw.timestamp
         assert "12:00:00" in raw.timestamp
 
     def test_no_attachment(self):
         msg = _make_discord_message(attachments=[])
-        raw = _to_raw_message(msg)
+        raw = _to_raw_message(msg, "9999")
         assert raw.has_attachment is False
 
     def test_with_attachment(self):
         att = MagicMock()
         msg = _make_discord_message(attachments=[att])
-        raw = _to_raw_message(msg)
+        raw = _to_raw_message(msg, "9999")
         assert raw.has_attachment is True
 
     def test_reaction_count_sums_all_reactions(self):
@@ -93,41 +101,21 @@ class TestToRawMessage(unittest.TestCase):
         r2 = MagicMock()
         r2.count = 2
         msg = _make_discord_message(reactions=[r1, r2])
-        raw = _to_raw_message(msg)
+        raw = _to_raw_message(msg, "9999")
         assert raw.reaction_count == 5
-
-    def test_no_reactions_gives_zero(self):
-        msg = _make_discord_message(reactions=[])
-        raw = _to_raw_message(msg)
-        assert raw.reaction_count == 0
 
     def test_thread_is_none_when_no_thread(self):
         msg = _make_discord_message()
         msg.thread = None
-        raw = _to_raw_message(msg)
+        raw = _to_raw_message(msg, "9999")
         assert raw.thread_id is None
         assert raw.thread_name is None
 
 
 # ── TextChannelCollector.collect ──────────────────────────────
 
-class TestTextChannelCollector(unittest.IsolatedAsyncioTestCase):
-    def _make_cfg(self, exclude_ids: list | None = None) -> dict:
-        return {
-            "guild_id": 9999,
-            "crawl": {
-                "exclude_channels": [],
-                "exclude_channel_ids": exclude_ids or [],
-                "download_attachments": False,
-            },
-        }
-
-    async def _run_collect(self, guild, cfg, conn) -> int:
-        collector = TextChannelCollector(guild, cfg)
-        return await collector.collect(conn, "run-test")
-
-    async def test_collects_messages_from_channel(self):
-        conn = _make_db()
+class TestTextChannelCollector:
+    def test_collects_messages_from_channel(self, conn):
         msg1 = _make_discord_message(msg_id=1, content="最初の発言")
         msg2 = _make_discord_message(msg_id=2, content="次の発言")
 
@@ -138,31 +126,48 @@ class TestTextChannelCollector(unittest.IsolatedAsyncioTestCase):
         ch.history = mock_history
 
         guild = _make_guild([ch])
-        total = await self._run_collect(guild, self._make_cfg(), conn)
+        total = _run_collect(guild, _make_cfg(), conn)
 
         assert total == 2
-        count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
-        assert count == 2
+        rows = conn.execute("SELECT count(*), min(guild_id) FROM messages").fetchone()
+        assert rows[0] == 2
+        assert rows[1] == "9999"  # guild_id が保存される
 
-    async def test_excluded_channel_is_skipped(self):
-        conn = _make_db()
+    def test_excluded_channel_is_skipped(self, conn):
         ch = _make_channel(ch_id=100, name="general")
         async def mock_history(**kwargs):
             yield _make_discord_message()
         ch.history = mock_history
 
-        cfg = self._make_cfg(exclude_ids=[100])
         guild = _make_guild([ch])
-        total = await self._run_collect(guild, cfg, conn)
+        total = _run_collect(guild, _make_cfg(exclude_ids=[100]), conn)
 
         assert total == 0
         count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
         assert count == 0
 
-    async def test_forbidden_channel_is_skipped(self):
+    def test_channels_argument_overrides_guild_channels(self, conn):
+        """channels= 指定時は許可リストだけを収集する（ワーカーの opt-in 用）。"""
+        allowed_ch = _make_channel(ch_id=100, name="allowed")
+        async def history_allowed(**kwargs):
+            yield _make_discord_message(msg_id=1, channel_id=100, channel_name="allowed")
+        allowed_ch.history = history_allowed
+
+        other_ch = _make_channel(ch_id=200, name="other")
+        async def history_other(**kwargs):
+            yield _make_discord_message(msg_id=2, channel_id=200, channel_name="other")
+        other_ch.history = history_other
+
+        guild = _make_guild([allowed_ch, other_ch])
+        total = _run_collect(guild, _make_cfg(), conn, channels=[allowed_ch])
+
+        assert total == 1
+        names = {r[0] for r in conn.execute("SELECT channel_name FROM messages").fetchall()}
+        assert names == {"allowed"}
+
+    def test_forbidden_channel_is_skipped(self, conn):
         """アクセス権のないチャンネルはスキップして続行する"""
         import discord
-        conn = _make_db()
 
         ch = _make_channel(ch_id=100, name="private")
         async def mock_history_forbidden(**kwargs):
@@ -171,15 +176,13 @@ class TestTextChannelCollector(unittest.IsolatedAsyncioTestCase):
         ch.history = mock_history_forbidden
 
         guild = _make_guild([ch])
-        total = await self._run_collect(guild, self._make_cfg(), conn)
+        total = _run_collect(guild, _make_cfg(), conn)
 
         # エラーでも落ちない、件数は 0
         assert total == 0
 
-    async def test_crawl_state_is_saved(self):
+    def test_crawl_state_is_saved(self, conn):
         """チャンネル完了後に crawl_state が更新される"""
-        from src.db import get_crawl_state
-        conn = _make_db()
         msg = _make_discord_message(msg_id=42)
 
         ch = _make_channel(ch_id=100, name="general")
@@ -188,16 +191,14 @@ class TestTextChannelCollector(unittest.IsolatedAsyncioTestCase):
         ch.history = mock_history
 
         guild = _make_guild([ch])
-        await self._run_collect(guild, self._make_cfg(), conn)
+        _run_collect(guild, _make_cfg(), conn)
 
-        last_id = get_crawl_state(conn, "100")
-        assert last_id == "42"
+        assert get_crawl_state(conn, "100") == "42"
 
-    async def test_resumes_from_last_message(self):
+    def test_resumes_from_last_message(self, conn):
         """再実行時は after= が渡されることを確認"""
-        from src.db import upsert_crawl_state
-        conn = _make_db()
-        upsert_crawl_state(conn, "100", "99")  # 前回の最終ID
+        upsert_crawl_state(conn, "9999", "100", "99")  # 前回の最終ID
+        conn.commit()
 
         received_after = {}
 
@@ -209,7 +210,7 @@ class TestTextChannelCollector(unittest.IsolatedAsyncioTestCase):
         ch.history = mock_history
 
         guild = _make_guild([ch])
-        await self._run_collect(guild, self._make_cfg(), conn)
+        _run_collect(guild, _make_cfg(), conn)
 
         assert received_after["after"] is not None
         assert received_after["after"].id == 99

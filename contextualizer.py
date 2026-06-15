@@ -11,25 +11,26 @@ contextualizer.py - 各チャンクに LLM 生成の文脈説明を付与する�
 
 import argparse
 import sys
-from pathlib import Path
 
 from dotenv import load_dotenv
 
 from src.config import load_config
 from src.contextualizer import run_contextualizer
-from src.db import fetch_chunks_for_context, init_db, log_run
+from src.db import fetch_chunks_for_context, get_connection, log_run
 
 
-def _do_clean(conn) -> None:
+def _do_clean(conn, guild_id: str) -> None:
     cur = conn.execute(
-        "UPDATE chunk_index SET context_text = NULL, error_message = NULL"
+        "UPDATE chunk_index SET context_text = NULL, error_message = NULL "
+        "WHERE guild_id = %s",
+        (guild_id,),
     )
     conn.commit()
     print(f"  --clean: {cur.rowcount:,} 件をリセットしました")
 
 
-def _do_dry_run(conn, cfg: dict) -> None:
-    chunks = fetch_chunks_for_context(conn)
+def _do_dry_run(conn, cfg: dict, guild_id: str) -> None:
+    chunks = fetch_chunks_for_context(conn, guild_id)
     count = len(chunks)
     if count == 0:
         print("  処理対象: 0 件（全チャンクに context_text 付与済み）")
@@ -76,15 +77,14 @@ def main() -> None:
     if args.concurrency is not None:
         cfg.setdefault("contextualizer", {})["concurrency"] = args.concurrency
 
-    db_path = Path("data/messages.db")
-    conn = init_db(db_path)
-    print(f"DB: {db_path}")
+    guild_id = str(cfg["guild_id"])
+    conn = get_connection()
 
     if args.clean:
-        _do_clean(conn)
+        _do_clean(conn, guild_id)
 
     if args.dry_run:
-        _do_dry_run(conn, cfg)
+        _do_dry_run(conn, cfg, guild_id)
         conn.close()
         return
 
@@ -92,8 +92,8 @@ def main() -> None:
     run_id = str(uuid.uuid4())
 
     try:
-        done = run_contextualizer(conn, cfg)
-        log_run(conn, run_id, "contextualize", "success", f"完了: {done:,} 件")
+        done = run_contextualizer(conn, cfg, guild_id=guild_id)
+        log_run(conn, run_id, "contextualize", "success", f"完了: {done:,} 件", guild_id)
         conn.commit()
         print(f"\n完了: {done:,} チャンクに context_text を付与しました")
     except Exception as e:

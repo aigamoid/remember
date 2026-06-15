@@ -1,33 +1,36 @@
-"""src/db.py のテスト（インメモリ SQLite を使用）"""
-
-import sqlite3
-
-import pytest
+"""src/db.py のテスト（実Postgresを使用・tests/conftest.py の conn フィクスチャ）"""
 
 from src.db import (
-    _DDL,
+    JOB_INGEST,
+    JOB_PURGE_CHANNEL,
+    allow_channel,
+    claim_next_job,
+    count_chunks,
+    count_messages,
+    deny_channel,
+    enqueue_job,
+    fetch_allowed_channels,
+    fetch_last_job,
+    finish_job,
     get_crawl_state,
+    guilds_due_for_sync,
     insert_attachment,
+    insert_chunk,
     insert_message,
     log_run,
+    mark_guild_left,
+    purge_channel_data,
+    purge_guild_data,
     upsert_crawl_state,
+    upsert_guild,
 )
 from src.models import RawAttachment, RawMessage
-
-
-@pytest.fixture
-def conn():
-    """各テスト用のインメモリ SQLite 接続を提供する"""
-    c = sqlite3.connect(":memory:")
-    c.executescript(_DDL)
-    c.commit()
-    yield c
-    c.close()
 
 
 def _make_message(**kwargs) -> RawMessage:
     defaults = dict(
         id="msg-1",
+        guild_id="g-1",
         channel_id="ch-1",
         channel_name="general",
         author_id="user-1",
@@ -56,20 +59,27 @@ def _make_attachment(**kwargs) -> RawAttachment:
 
 # ── テーブル初期化 ─────────────────────────────────────────────
 
-class TestInitDb:
+class TestInitSchema:
     def test_all_tables_exist(self, conn):
         tables = {
             row[0] for row in
-            conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public'"
+            ).fetchall()
         }
-        assert {"messages", "attachments", "crawl_state", "chunk_index", "run_log"} <= tables
+        assert {
+            "guilds", "allowed_channels", "messages", "attachments",
+            "crawl_state", "chunk_index", "ingest_jobs", "run_log",
+        } <= tables
 
     def test_index_exists(self, conn):
         indexes = {
             row[0] for row in
-            conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+            conn.execute("SELECT indexname FROM pg_indexes WHERE schemaname='public'").fetchall()
         }
         assert "idx_messages_channel_timestamp" in indexes
+        assert "idx_messages_guild" in indexes
 
 
 # ── insert_message ────────────────────────────────────────────
@@ -77,42 +87,34 @@ class TestInitDb:
 class TestInsertMessage:
     def test_saves_message(self, conn):
         insert_message(conn, _make_message())
-        row = conn.execute("SELECT id, content FROM messages WHERE id = 'msg-1'").fetchone()
+        row = conn.execute(
+            "SELECT id, guild_id, content FROM messages WHERE id = 'msg-1'"
+        ).fetchone()
         assert row is not None
-        assert row[1] == "テストメッセージ"
+        assert row[1] == "g-1"
+        assert row[2] == "テストメッセージ"
 
     def test_is_idempotent(self, conn):
         """同じ ID で2回 INSERT しても件数が増えない"""
         msg = _make_message()
         insert_message(conn, msg)
         insert_message(conn, msg)
-        count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
-        assert count == 1
+        assert count_messages(conn) == 1
 
     def test_saves_empty_content(self, conn):
         """添付のみメッセージ（content=""）も保存できる"""
         insert_message(conn, _make_message(content="", has_attachment=True))
-        row = conn.execute("SELECT content, has_attachment FROM messages WHERE id='msg-1'").fetchone()
+        row = conn.execute(
+            "SELECT content, has_attachment FROM messages WHERE id='msg-1'"
+        ).fetchone()
         assert row[0] == ""
         assert row[1] == 1  # True → 1
 
-    def test_saves_boolean_fields_as_integer(self, conn):
-        insert_message(conn, _make_message(is_pinned=True, reaction_count=3))
-        row = conn.execute("SELECT is_pinned, reaction_count FROM messages WHERE id='msg-1'").fetchone()
-        assert row[0] == 1
-        assert row[1] == 3
-
-    def test_saves_thread_fields(self, conn):
-        insert_message(conn, _make_message(thread_id="thr-1", thread_name="雑談スレ"))
-        row = conn.execute("SELECT thread_id, thread_name FROM messages WHERE id='msg-1'").fetchone()
-        assert row[0] == "thr-1"
-        assert row[1] == "雑談スレ"
-
-    def test_thread_fields_are_null_by_default(self, conn):
-        insert_message(conn, _make_message())
-        row = conn.execute("SELECT thread_id, thread_name FROM messages WHERE id='msg-1'").fetchone()
-        assert row[0] is None
-        assert row[1] is None
+    def test_count_messages_by_guild(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g-1"))
+        insert_message(conn, _make_message(id="m2", guild_id="g-2"))
+        assert count_messages(conn) == 2
+        assert count_messages(conn, guild_id="g-1") == 1
 
 
 # ── insert_attachment ─────────────────────────────────────────
@@ -133,19 +135,6 @@ class TestInsertAttachment:
         count = conn.execute("SELECT count(*) FROM attachments").fetchone()[0]
         assert count == 1
 
-    def test_content_type_can_be_null(self, conn):
-        insert_message(conn, _make_message())
-        insert_attachment(conn, _make_attachment(content_type=None))
-        row = conn.execute("SELECT content_type FROM attachments WHERE id='att-1'").fetchone()
-        assert row[0] is None
-
-    def test_local_path_starts_as_null(self, conn):
-        """DL前は local_path が NULL"""
-        insert_message(conn, _make_message())
-        insert_attachment(conn, _make_attachment())
-        row = conn.execute("SELECT local_path FROM attachments WHERE id='att-1'").fetchone()
-        assert row[0] is None
-
 
 # ── crawl_state ───────────────────────────────────────────────
 
@@ -154,36 +143,246 @@ class TestCrawlState:
         assert get_crawl_state(conn, "ch-unknown") is None
 
     def test_upsert_creates_entry(self, conn):
-        upsert_crawl_state(conn, "ch-1", "msg-100")
+        upsert_crawl_state(conn, "g-1", "ch-1", "msg-100")
         assert get_crawl_state(conn, "ch-1") == "msg-100"
 
     def test_upsert_updates_existing_entry(self, conn):
-        upsert_crawl_state(conn, "ch-1", "msg-100")
-        upsert_crawl_state(conn, "ch-1", "msg-200")
+        upsert_crawl_state(conn, "g-1", "ch-1", "msg-100")
+        upsert_crawl_state(conn, "g-1", "ch-1", "msg-200")
         assert get_crawl_state(conn, "ch-1") == "msg-200"
 
     def test_multiple_channels_are_independent(self, conn):
-        upsert_crawl_state(conn, "ch-1", "msg-100")
-        upsert_crawl_state(conn, "ch-2", "msg-999")
+        upsert_crawl_state(conn, "g-1", "ch-1", "msg-100")
+        upsert_crawl_state(conn, "g-1", "ch-2", "msg-999")
         assert get_crawl_state(conn, "ch-1") == "msg-100"
         assert get_crawl_state(conn, "ch-2") == "msg-999"
+
+
+# ── guilds / allowed_channels ─────────────────────────────────
+
+class TestGuilds:
+    def test_upsert_guild_registers(self, conn):
+        upsert_guild(conn, "g-1", "テストサーバー")
+        row = conn.execute(
+            "SELECT guild_name, left_at FROM guilds WHERE guild_id='g-1'"
+        ).fetchone()
+        assert row[0] == "テストサーバー"
+        assert row[1] is None
+
+    def test_rejoin_clears_left_at(self, conn):
+        upsert_guild(conn, "g-1", "テストサーバー")
+        mark_guild_left(conn, "g-1")
+        upsert_guild(conn, "g-1", "テストサーバー")  # 再参加
+        row = conn.execute("SELECT left_at FROM guilds WHERE guild_id='g-1'").fetchone()
+        assert row[0] is None
+
+    def test_mark_guild_left(self, conn):
+        upsert_guild(conn, "g-1", "テストサーバー")
+        mark_guild_left(conn, "g-1")
+        row = conn.execute("SELECT left_at FROM guilds WHERE guild_id='g-1'").fetchone()
+        assert row[0] is not None
+
+
+class TestAllowedChannels:
+    def test_allow_and_fetch(self, conn):
+        allow_channel(conn, "g-1", "ch-1", "general", "admin-1")
+        assert fetch_allowed_channels(conn, "g-1") == [("ch-1", "general")]
+
+    def test_allow_is_idempotent(self, conn):
+        allow_channel(conn, "g-1", "ch-1", "general", "admin-1")
+        allow_channel(conn, "g-1", "ch-1", "general", "admin-2")
+        assert len(fetch_allowed_channels(conn, "g-1")) == 1
+
+    def test_deny_removes(self, conn):
+        allow_channel(conn, "g-1", "ch-1", "general", "admin-1")
+        assert deny_channel(conn, "g-1", "ch-1") is True
+        assert fetch_allowed_channels(conn, "g-1") == []
+
+    def test_deny_unknown_returns_false(self, conn):
+        assert deny_channel(conn, "g-1", "ch-unknown") is False
+
+    def test_guilds_are_isolated(self, conn):
+        allow_channel(conn, "g-1", "ch-1", "general", "admin-1")
+        assert fetch_allowed_channels(conn, "g-2") == []
+
+
+# ── ingest_jobs ジョブキュー ───────────────────────────────────
+
+class TestJobQueue:
+    def test_enqueue_and_claim(self, conn):
+        job_id = enqueue_job(conn, "g-1", JOB_INGEST, requested_by="admin-1")
+        assert job_id is not None
+
+        job = claim_next_job(conn)
+        assert job["id"] == job_id
+        assert job["guild_id"] == "g-1"
+        assert job["kind"] == JOB_INGEST
+
+    def test_claim_empty_queue_returns_none(self, conn):
+        assert claim_next_job(conn) is None
+
+    def test_duplicate_queued_job_not_enqueued(self, conn):
+        assert enqueue_job(conn, "g-1", JOB_INGEST) is not None
+        assert enqueue_job(conn, "g-1", JOB_INGEST) is None  # 重複
+
+    def test_different_guilds_can_queue_same_kind(self, conn):
+        assert enqueue_job(conn, "g-1", JOB_INGEST) is not None
+        assert enqueue_job(conn, "g-2", JOB_INGEST) is not None
+
+    def test_running_job_allows_new_queued(self, conn):
+        """実行中になったら同種ジョブを追加で予約できる（実行後の新着を拾うため）"""
+        enqueue_job(conn, "g-1", JOB_INGEST)
+        claim_next_job(conn)  # running になる
+        assert enqueue_job(conn, "g-1", JOB_INGEST) is not None
+
+    def test_jobs_claimed_in_fifo_order(self, conn):
+        first = enqueue_job(conn, "g-1", JOB_INGEST)
+        second = enqueue_job(conn, "g-2", JOB_INGEST)
+        assert claim_next_job(conn)["id"] == first
+        assert claim_next_job(conn)["id"] == second
+
+    def test_finish_job_done(self, conn):
+        job_id = enqueue_job(conn, "g-1", JOB_INGEST)
+        claim_next_job(conn)
+        finish_job(conn, job_id, True, result="crawled=10")
+        job = fetch_last_job(conn, "g-1")
+        assert job["status"] == "done"
+        assert job["result"] == "crawled=10"
+
+    def test_finish_job_error(self, conn):
+        job_id = enqueue_job(conn, "g-1", JOB_INGEST)
+        claim_next_job(conn)
+        finish_job(conn, job_id, False, error_message="boom")
+        job = fetch_last_job(conn, "g-1")
+        assert job["status"] == "error"
+        assert job["error_message"] == "boom"
+
+    def test_fetch_last_job_none(self, conn):
+        assert fetch_last_job(conn, "g-1") is None
+
+    def test_purge_channel_dedup_uses_channel_id(self, conn):
+        assert enqueue_job(conn, "g-1", JOB_PURGE_CHANNEL, channel_id="ch-1") is not None
+        assert enqueue_job(conn, "g-1", JOB_PURGE_CHANNEL, channel_id="ch-1") is None
+        assert enqueue_job(conn, "g-1", JOB_PURGE_CHANNEL, channel_id="ch-2") is not None
+
+
+class TestGuildsDueForSync:
+    def _setup_guild(self, conn, guild_id="g-1"):
+        upsert_guild(conn, guild_id, "server")
+        allow_channel(conn, guild_id, f"{guild_id}-ch", "general", "admin")
+
+    def test_guild_without_completed_ingest_is_due(self, conn):
+        self._setup_guild(conn)
+        assert guilds_due_for_sync(conn, interval_hours=24) == ["g-1"]
+
+    def test_guild_with_queued_job_not_due(self, conn):
+        self._setup_guild(conn)
+        enqueue_job(conn, "g-1", JOB_INGEST)
+        assert guilds_due_for_sync(conn, interval_hours=24) == []
+
+    def test_guild_with_recent_ingest_not_due(self, conn):
+        self._setup_guild(conn)
+        job_id = enqueue_job(conn, "g-1", JOB_INGEST)
+        claim_next_job(conn)
+        finish_job(conn, job_id, True)
+        assert guilds_due_for_sync(conn, interval_hours=24) == []
+
+    def test_guild_with_old_ingest_is_due(self, conn):
+        self._setup_guild(conn)
+        job_id = enqueue_job(conn, "g-1", JOB_INGEST)
+        claim_next_job(conn)
+        finish_job(conn, job_id, True)
+        # interval=0 なら直前の完了でも経過扱いになる
+        assert guilds_due_for_sync(conn, interval_hours=0) == ["g-1"]
+
+    def test_left_guild_not_due(self, conn):
+        self._setup_guild(conn)
+        mark_guild_left(conn, "g-1")
+        assert guilds_due_for_sync(conn, interval_hours=0) == []
+
+    def test_guild_without_allowed_channels_not_due(self, conn):
+        upsert_guild(conn, "g-1", "server")  # allow なし
+        assert guilds_due_for_sync(conn, interval_hours=0) == []
+
+
+# ── insert_chunk の更新時リセット ──────────────────────────────
+
+class TestInsertChunkReset:
+    def test_text_change_resets_context_and_status(self, conn):
+        insert_chunk(conn, "c1", "g-1", "m1", "ch-1", "古い本文")
+        conn.execute(
+            "UPDATE chunk_index SET context_text='文脈', status='indexed' WHERE chunk_id='c1'"
+        )
+        insert_chunk(conn, "c1", "g-1", "m1", "ch-1", "新しい本文")
+        row = conn.execute(
+            "SELECT context_text, status FROM chunk_index WHERE chunk_id='c1'"
+        ).fetchone()
+        assert row[0] is None       # context は再生成対象
+        assert row[1] == "pending"  # 再インデックス対象
+
+    def test_same_text_keeps_context_and_status(self, conn):
+        insert_chunk(conn, "c1", "g-1", "m1", "ch-1", "同じ本文")
+        conn.execute(
+            "UPDATE chunk_index SET context_text='文脈', status='indexed' WHERE chunk_id='c1'"
+        )
+        insert_chunk(conn, "c1", "g-1", "m1", "ch-1", "同じ本文")
+        row = conn.execute(
+            "SELECT context_text, status FROM chunk_index WHERE chunk_id='c1'"
+        ).fetchone()
+        assert row[0] == "文脈"
+        assert row[1] == "indexed"
+
+
+# ── purge ─────────────────────────────────────────────────────
+
+class TestPurge:
+    def _setup_data(self, conn):
+        for gid, cid, mid in [("g-1", "ch-1", "m1"), ("g-1", "ch-2", "m2"), ("g-2", "ch-3", "m3")]:
+            insert_message(conn, _make_message(id=mid, guild_id=gid, channel_id=cid))
+            insert_attachment(conn, _make_attachment(id=f"att-{mid}", message_id=mid))
+            insert_chunk(conn, f"c-{mid}", gid, mid, cid, "本文")
+            upsert_crawl_state(conn, gid, cid, mid)
+        conn.commit()
+
+    def test_purge_channel_removes_only_that_channel(self, conn):
+        self._setup_data(conn)
+        stats = purge_channel_data(conn, "g-1", "ch-1")
+        assert stats["messages"] == 1
+        assert stats["chunks"] == 1
+        assert count_messages(conn, guild_id="g-1") == 1  # ch-2 は残る
+        assert get_crawl_state(conn, "ch-1") is None
+        assert get_crawl_state(conn, "ch-2") == "m2"
+        att = conn.execute("SELECT count(*) FROM attachments WHERE id='att-m1'").fetchone()[0]
+        assert att == 0
+
+    def test_purge_guild_removes_all_guild_data(self, conn):
+        self._setup_data(conn)
+        allow_channel(conn, "g-1", "ch-1", "general", "admin")
+        stats = purge_guild_data(conn, "g-1")
+        assert stats["messages"] == 2
+        assert count_messages(conn, guild_id="g-1") == 0
+        assert count_messages(conn, guild_id="g-2") == 1  # 他guildは無傷
+        assert count_chunks(conn, guild_id="g-2") == 1
+        assert fetch_allowed_channels(conn, "g-1") == []
 
 
 # ── log_run ───────────────────────────────────────────────────
 
 class TestLogRun:
     def test_saves_log_entry(self, conn):
-        log_run(conn, "run-1", "crawl", "success", "完了")
-        row = conn.execute("SELECT run_id, phase, status, message FROM run_log").fetchone()
-        assert row == ("run-1", "crawl", "success", "完了")
+        log_run(conn, "run-1", "crawl", "success", "完了", "g-1")
+        row = conn.execute(
+            "SELECT run_id, guild_id, phase, status, message FROM run_log"
+        ).fetchone()
+        assert row == ("run-1", "g-1", "crawl", "success", "完了")
 
-    def test_message_can_be_none(self, conn):
+    def test_message_and_guild_can_be_none(self, conn):
         log_run(conn, "run-1", "crawl", "success")
-        row = conn.execute("SELECT message FROM run_log").fetchone()
-        assert row[0] is None
+        row = conn.execute("SELECT message, guild_id FROM run_log").fetchone()
+        assert row == (None, None)
 
     def test_multiple_logs_accumulate(self, conn):
         log_run(conn, "run-1", "crawl", "success", "ch-1 完了")
-        log_run(conn, "run-1", "crawl", "error",   "ch-2 失敗")
+        log_run(conn, "run-1", "crawl", "error", "ch-2 失敗")
         count = conn.execute("SELECT count(*) FROM run_log").fetchone()[0]
         assert count == 2

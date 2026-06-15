@@ -6,6 +6,7 @@ from dataclasses import dataclass
 @dataclass
 class RawMessage:
     id: str
+    guild_id: str
     channel_id: str
     channel_name: str
     author_id: str

@@ -8,6 +8,14 @@
 
 応答は waiwai-oracle APIサーバ（src/api.py）から取得する。
 APIはステートレスのため会話履歴は保持しない（conversation_id 廃止）。
+
+管理者向けスラッシュコマンド（サーバー管理権限が必要）:
+    /oracle allow <channel>  チャンネルの読み取りを許可して取り込みを開始（opt-in）
+    /oracle deny <channel>   許可を取り消し、取り込み済みデータを削除
+    /oracle sync             許可チャンネルの差分取り込みを今すぐ実行
+    /oracle status           取り込み状況を表示
+
+実際の取り込み処理は worker.py（ジョブキュー経由）が行う。
 """
 
 import asyncio
@@ -17,11 +25,28 @@ from pathlib import Path
 
 import discord
 import yaml
+from discord import app_commands
 from dotenv import load_dotenv
 
 from oracle_client import OracleClient
+from store import Store
 
 _MAX_REPLY_LEN = 2000  # Discord 文字数制限
+
+_JOB_STATUS_LABEL = {
+    "queued": "⏳ 待機中",
+    "running": "🏃 実行中",
+    "done": "✅ 完了",
+    "error": "⚠️ エラー",
+}
+
+_WELCOME = (
+    "はじめまして、わいわいちゃんだよ！っ 🎤\n"
+    "このサーバーの過去ログを覚えて質問に答えられるようになるけど、"
+    "**許可されたチャンネルしか読まない**から安心してね。\n"
+    "サーバー管理権限を持つ人が `/oracle allow #チャンネル` で読んでいい"
+    "チャンネルを教えてくれたら、取り込みを始めるよ！っ"
+)
 
 
 def _load_config() -> dict:
@@ -33,16 +58,127 @@ def _load_config() -> dict:
         return yaml.safe_load(f)
 
 
+class OracleGroup(app_commands.Group):
+    """/oracle 管理コマンド群。DBへの書き込みと取り込みジョブの投入のみ行い、
+    実処理はワーカーに任せる。"""
+
+    def __init__(self, store: Store) -> None:
+        super().__init__(
+            name="oracle",
+            description="過去ログ取り込みの管理（サーバー管理権限が必要）",
+            default_permissions=discord.Permissions(manage_guild=True),
+            guild_only=True,
+        )
+        self.store = store
+
+    @app_commands.command(name="allow", description="チャンネルの読み取りを許可して取り込みを開始する")
+    @app_commands.describe(channel="読み取りを許可するテキストチャンネル")
+    async def allow(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        guild_id = str(interaction.guild_id)
+        await self.store.register_guild(guild_id, interaction.guild.name)
+        job_id = await self.store.allow_channel(
+            guild_id, str(channel.id), channel.name, str(interaction.user.id)
+        )
+        note = (
+            "取り込みを始めるね！終わったら質問できるよ。"
+            if job_id is not None
+            else "取り込みはもう予約済みだから、そのまま待っててね。"
+        )
+        await interaction.followup.send(
+            f"✅ {channel.mention} の読み取りを許可したよ！っ {note}", ephemeral=True
+        )
+
+    @app_commands.command(name="deny", description="チャンネルの許可を取り消し、取り込み済みデータを削除する")
+    @app_commands.describe(channel="許可を取り消すテキストチャンネル")
+    async def deny(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        removed = await self.store.deny_channel(
+            str(interaction.guild_id), str(channel.id), str(interaction.user.id)
+        )
+        head = (
+            f"🚫 {channel.mention} の許可を取り消したよ。"
+            if removed
+            else f"{channel.mention} は許可されてなかったよ。"
+        )
+        await interaction.followup.send(
+            f"{head} 取り込み済みデータの削除も予約したからね！っ", ephemeral=True
+        )
+
+    @app_commands.command(name="sync", description="許可チャンネルの新着メッセージを今すぐ取り込む")
+    async def sync(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        guild_id = str(interaction.guild_id)
+        status = await self.store.status(guild_id)
+        if not status["allowed"]:
+            await interaction.followup.send(
+                "まだ許可されたチャンネルがないよ。まず `/oracle allow` で教えてね！っ",
+                ephemeral=True,
+            )
+            return
+        job_id = await self.store.enqueue_sync(guild_id, str(interaction.user.id))
+        msg = (
+            "🔄 差分取り込みを予約したよ！っ"
+            if job_id is not None
+            else "取り込みはもう予約済みだよ。順番に処理するから待っててね！っ"
+        )
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @app_commands.command(name="status", description="取り込み状況を表示する")
+    async def status(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        st = await self.store.status(str(interaction.guild_id))
+
+        channels = ", ".join(f"#{name}" for _, name in st["allowed"]) or "（なし）"
+        lines = [
+            f"**許可チャンネル**: {len(st['allowed'])} 件 — {channels}",
+            f"**取り込み済みメッセージ**: {st['messages']:,} 件",
+            f"**チャンク**: {st['chunks']:,} 件（インデックス済み {st['indexed']:,} 件）",
+        ]
+        job = st["last_job"]
+        if job:
+            label = _JOB_STATUS_LABEL.get(job["status"], job["status"])
+            detail = job["result"] or job["error_message"] or ""
+            lines.append(f"**最新ジョブ**: {job['kind']} — {label} {detail}")
+        else:
+            lines.append("**最新ジョブ**: なし（`/oracle allow` で取り込みを始めてね）")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
 class MoimoichanBot(discord.Client):
-    def __init__(self, oracle: OracleClient, cfg: dict) -> None:
+    def __init__(self, oracle: OracleClient, store: Store, cfg: dict) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
         self.oracle = oracle
+        self.store = store
         self.cfg = cfg
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self) -> None:
+        self.tree.add_command(OracleGroup(self.store))
+        await self.tree.sync()
 
     async def on_ready(self) -> None:
         print(f"[INFO] Logged in as {self.user} (id={self.user.id})")
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        print(f"[INFO] サーバー参加: {guild.name} (id={guild.id})")
+        await self.store.register_guild(str(guild.id), guild.name)
+        channel = guild.system_channel
+        if channel is not None:
+            try:
+                await channel.send(_WELCOME)
+            except discord.Forbidden:
+                pass  # 挨拶が送れなくても opt-in 運用には支障なし
+
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        print(f"[INFO] サーバー退出: {guild.name} (id={guild.id}) → データ削除を予約")
+        await self.store.guild_left(str(guild.id))
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -62,7 +198,8 @@ class MoimoichanBot(discord.Client):
         async with message.channel.typing():
             try:
                 answer = await self.oracle.chat(
-                    query, str(message.guild.id), user
+                    query, str(message.guild.id), user,
+                    guild_name=message.guild.name,
                 )
                 reply = answer[:_MAX_REPLY_LEN]
                 await message.reply(reply or "……（何も思いつかなかった！っ 😅）")
@@ -113,7 +250,8 @@ def main() -> None:
         sys.exit(1)
 
     oracle = OracleClient(base_url=api_url, timeout=timeout)
-    bot = MoimoichanBot(oracle=oracle, cfg=cfg)
+    store = Store()
+    bot = MoimoichanBot(oracle=oracle, store=store, cfg=cfg)
     bot.run(token)
 
 

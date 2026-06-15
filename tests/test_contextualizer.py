@@ -1,42 +1,31 @@
-"""src/contextualizer.py のテスト（インメモリ SQLite を使用）"""
+"""src/contextualizer.py のテスト（実Postgresを使用・tests/conftest.py の conn フィクスチャ）"""
 
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.contextualizer import _get_preceding_messages, generate_context, run_contextualizer
-from src.db import _DDL, fetch_chunks_for_context, insert_chunk, update_chunk_context
-from src.db import add_context_text_column
-
-
-@pytest.fixture
-def conn():
-    c = sqlite3.connect(":memory:")
-    c.executescript(_DDL)
-    add_context_text_column(c)
-    c.commit()
-    yield c
-    c.close()
+from src.db import fetch_chunks_for_context, insert_chunk, update_chunk_context
 
 
 def _insert_msg(
-    conn: sqlite3.Connection,
+    conn,
     msg_id: str,
     channel_id: str,
     content: str,
     timestamp: str,
     author: str = "user",
     has_attachment: int = 0,
+    guild_id: str = "g1",
 ) -> None:
     conn.execute(
         "INSERT INTO messages "
-        "(id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (msg_id, channel_id, "ch-test", "u1", author, content, timestamp, has_attachment),
+        "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (msg_id, guild_id, channel_id, "ch-test", "u1", author, content, timestamp, has_attachment),
     )
 
 
@@ -171,7 +160,7 @@ class TestGenerateContext:
 class TestRunContextualizer:
     def test_processes_null_chunks(self, conn):
         _insert_msg(conn, "m1", "ch1", "hello world", "2024-01-01T00:00:00+00:00")
-        insert_chunk(conn, "chunk1", "m1", "ch1", "hello world")
+        insert_chunk(conn, "chunk1", "g1", "m1", "ch1", "hello world")
         conn.commit()
 
         cfg = _make_cfg()
@@ -193,7 +182,7 @@ class TestRunContextualizer:
 
     def test_skips_already_contextualized_chunks(self, conn):
         _insert_msg(conn, "m1", "ch1", "hello world", "2024-01-01T00:00:00+00:00")
-        insert_chunk(conn, "chunk1", "m1", "ch1", "hello world")
+        insert_chunk(conn, "chunk1", "g1", "m1", "ch1", "hello world")
         update_chunk_context(conn, "chunk1", "既存のコンテキスト")
         conn.commit()
 
@@ -210,7 +199,7 @@ class TestRunContextualizer:
 
     def test_records_error_on_api_failure(self, conn):
         _insert_msg(conn, "m1", "ch1", "hello world", "2024-01-01T00:00:00+00:00")
-        insert_chunk(conn, "chunk1", "m1", "ch1", "hello world")
+        insert_chunk(conn, "chunk1", "g1", "m1", "ch1", "hello world")
         conn.commit()
 
         cfg = _make_cfg()
@@ -235,7 +224,7 @@ class TestRunContextualizer:
         import openai as _openai
 
         _insert_msg(conn, "m1", "ch1", "hello world", "2024-01-01T00:00:00+00:00")
-        insert_chunk(conn, "chunk1", "m1", "ch1", "hello world")
+        insert_chunk(conn, "chunk1", "g1", "m1", "ch1", "hello world")
         conn.commit()
 
         cfg = _make_cfg()
@@ -254,7 +243,7 @@ class TestRunContextualizer:
     def test_retry_succeeds_on_second_attempt(self, conn):
         """一時的エラー後にリトライして成功するケース。"""
         _insert_msg(conn, "m1", "ch1", "hello world", "2024-01-01T00:00:00+00:00")
-        insert_chunk(conn, "chunk1", "m1", "ch1", "hello world")
+        insert_chunk(conn, "chunk1", "g1", "m1", "ch1", "hello world")
         conn.commit()
 
         cfg = _make_cfg(max_retries=2)
@@ -283,7 +272,7 @@ class TestRunContextualizer:
 
         for i in range(3):
             _insert_msg(conn, f"m{i}", "ch1", f"msg{i}", f"2024-01-01T00:0{i}:00+00:00")
-            insert_chunk(conn, f"chunk{i}", f"m{i}", "ch1", f"msg{i}")
+            insert_chunk(conn, f"chunk{i}", "g1", f"m{i}", "ch1", f"msg{i}")
         conn.commit()
 
         cfg = _make_cfg(concurrency=1)  # 逐次実行でabortの効果を確認
@@ -305,7 +294,7 @@ class TestRunContextualizer:
     def test_processes_multiple_chunks(self, conn):
         for i in range(3):
             _insert_msg(conn, f"m{i}", "ch1", f"メッセージ{i}", f"2024-01-01T00:0{i}:00+00:00")
-            insert_chunk(conn, f"chunk{i}", f"m{i}", "ch1", f"メッセージ{i}")
+            insert_chunk(conn, f"chunk{i}", "g1", f"m{i}", "ch1", f"メッセージ{i}")
         conn.commit()
 
         cfg = _make_cfg()
@@ -334,12 +323,24 @@ class TestFetchChunksForContext:
     def test_returns_only_null_context_chunks(self, conn):
         _insert_msg(conn, "m1", "ch1", "hello", "2024-01-01T00:00:00+00:00")
         _insert_msg(conn, "m2", "ch1", "world", "2024-01-01T00:01:00+00:00")
-        insert_chunk(conn, "c1", "m1", "ch1", "hello")
-        insert_chunk(conn, "c2", "m2", "ch1", "world")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "hello")
+        insert_chunk(conn, "c2", "g1", "m2", "ch1", "world")
         update_chunk_context(conn, "c1", "付与済みコンテキスト")
         conn.commit()
 
         results = fetch_chunks_for_context(conn)
+
+        assert len(results) == 1
+        assert results[0][0] == "c2"
+
+    def test_guild_filter(self, conn):
+        _insert_msg(conn, "m1", "ch1", "hello", "2024-01-01T00:00:00+00:00", guild_id="g1")
+        _insert_msg(conn, "m2", "ch2", "world", "2024-01-01T00:01:00+00:00", guild_id="g2")
+        insert_chunk(conn, "c1", "g1", "m1", "ch1", "hello")
+        insert_chunk(conn, "c2", "g2", "m2", "ch2", "world")
+        conn.commit()
+
+        results = fetch_chunks_for_context(conn, guild_id="g2")
 
         assert len(results) == 1
         assert results[0][0] == "c2"

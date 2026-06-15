@@ -4,6 +4,110 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-15 — 実機E2E完走（OI-12）＋ Query Rewriter修正
+
+ステップ2（feature/multitenant-ingest）の実機E2Eを、テスト用Discordサーバー
+「もいもいAI砂場」で実施し完走した。waiwaiサーバーは使用していない。
+
+### E2E結果（全シナリオ想定通り）
+
+| シナリオ | 結果 |
+|---|---|
+| Bot招待 → `/oracle allow #一般` | ジョブ投入→自動クロール→チャンク→文脈付与→Qdrant登録 |
+| 取り込み結果 | 511msg→30チャンク→30ベクトル（guild_id分離をQdrant/PGで確認） |
+| @メンション質問 | 実ログ準拠の回答（Rewriter→Qdrant検索→Kimi K2生成） |
+| `/oracle deny #一般` | チャンネル単位削除（−513msg/−30chunk、他chは無傷） |
+| Botキック | guild単位の全削除（実データ0化、guilds行は left_at 付きで墓標として残存＝設計通り） |
+
+### 途中で直したこと
+
+1. **Query Rewriter が毎回402で失敗**
+   - 原因: OpenRouterはmax_tokens未指定時にモデル既定の巨大な出力枠（65535）を
+     要求し、残高確保で弾かれる。`rewrite()` が握りつぶして元クエリで検索を続行する
+     設計のため回答自体は返るが、書き換えが効かず検索精度が落ちる。
+   - 対処: `rag.rewriter_max_tokens`（既定256）を新設し `rewrite()` に渡す。
+     残高追加＋本修正で警告ゼロを実測確認。テスト1件追加（全212 PASS・安定順序）。
+   - 変更: src/rag/engine.py / config.yml(.example) / tests/test_rag.py（各1コミット）
+
+2. **Qdrantの旧 waiwai_chunks コレクション破損で起動不能**
+   - 原因: 前回のDocker停止が不完全で page ファイル欠損。Qdrantが panic 起動失敗、
+     連鎖でworkerも落ちた。
+   - 対処: `data/qdrant_quarantine/` へ退避（削除せず復元可能）。waiwaiはアクセス禁止
+     方針＆元チャンクはPostgresに残存のため実害なし。workerが空コレクションを再生成。
+
+### 補足
+
+- pytest はランダム順序（pytest-randomly）だと test_db 同士の分離揺らぎで稀に1件error。
+  安定順序では212件全PASS。今回の変更とは無関係の既存事象（別途要対応）。
+- OI-12 を完了に更新。Dockerは起動したまま（次セッションで停止判断）。
+
+---
+
+## 2026-06-11 — SaaS化ステップ2: マルチテナント自動取り込み（feature/multitenant-ingest）
+
+### 目的
+
+「Botをサーバーに導入したら勝手にRAG化して答えてくれる」の取り込み側を実現する。
+回答側のテナント分離（Qdrant guild_idフィルタ）はステップ1で実装済みだったため、
+今回は **取り込みの自動化・マルチテナント化・opt-in制御** が対象。
+
+### 実装内容
+
+1. **SQLite → Postgres 移行**（ユーザー判断でフルスコープ採用）
+   - `src/db.py` を psycopg で全面書き換え。全データ系テーブルに guild_id
+   - 新テーブル: `guilds` / `allowed_channels` / `ingest_jobs`（ジョブキュー）
+   - Dify遺産（upload_state テーブル・dify_doc_id 列）を廃止
+   - `scripts/migrate_sqlite_to_pg.py` で既存waiwaiデータを移行
+     （messages 27,769 / chunk_index 8,364 / status='indexed' 保持＝再embedding費用ゼロ）
+
+2. **常駐ワーカー**（`worker.py` → `src/worker.py`・composeの worker サービス）
+   - ingest_jobs を `FOR UPDATE SKIP LOCKED` で1件ずつ処理（単一ライター原則を維持）
+   - ingest: 許可チャンネルのみREST差分クロール → チャンク → 文脈付与 → Qdrant登録
+   - purge_channel / purge_guild: Qdrant + Postgres からデータ削除
+   - 定期sync: 最終取り込みから `worker.sync_interval_hours`（24h）経過したguildへ自動投入
+   - Discordへはgateway接続せず `client.login()` + REST のみ（Botとのセッション競合なし）
+
+3. **Botのスラッシュコマンド**（`/oracle` グループ・サーバー管理権限のみ）
+   - allow: 許可登録+取り込みジョブ投入 / deny: 許可取消+チャンネルデータ削除
+   - sync: 差分取り込み即時実行 / status: 件数・最新ジョブ表示
+   - on_guild_join: guilds登録+案内 / on_guild_remove: purge_guild（退出=全データ削除）
+   - DBアクセスは `store.py`（src/db.py の薄い非同期ラッパー・botビルドはルートコンテキストに変更）
+
+4. **差分sync対応のバグ修正**: `insert_chunk` が chunk_text 変更時に
+   context_text だけでなく **status も 'pending' に戻す**ようにした
+   （旧実装では伸びた末尾チャンクが再インデックスされない）
+
+5. **guild_name の伝搬**: Bot → /chat → RagEngine。どのサーバーでも
+   「そのサーバーの名前」でわいわいちゃんが答える（未指定時は config の値）
+
+### テスト
+
+- DB依存テストを実Postgres（oracle_test DB・conftest.py で TRUNCATE管理）に移行
+- 新規: test_worker.py（ジョブ処理・purge・定期sync）ほか
+- **211件 全PASS**（旧167件から拡充）
+
+### 残課題
+
+- 実機E2E未実施（OI-12: トークン再発行＋テスト用サーバーが必要）
+- 取り込み完了のDiscord通知なし（OI-13: 現状 /oracle status で確認）
+
+### 運用メモ: waiwaiサーバーの扱い
+
+移行スクリプトは既存チャンネルを allowed_channels に登録するが、
+**waiwaiサーバーにはもうアクセスしない方針**のため、移行後に waiwai の
+allowed_channels 32件を手動削除した（messages / chunk_index / Qdrant のデータは
+テスト用に保持。検索・回答は引き続き動く）。
+これによりワーカーの定期syncや /oracle sync が waiwai をクロールすることはない。
+再度 migrate_sqlite_to_pg.py を実行すると allowed_channels が復活するので注意。
+
+### 状態（2026-06-15更新）
+
+- ブランチ `feature/multitenant-ingest`（50コミット）を push、**PR #6 作成**
+  （https://github.com/aigamoid/waiwai-oracle/pull/6 → develop。マージは人間判断）
+- 実装・テスト（211件PASS）は完了。次の作業は OI-12 の実機E2E（トークン再発行＋テスト用サーバー待ち）
+
+---
+
 ## 2026-06-11 — contextualizer の要否検証（A/Bテスト）
 
 ### 背景

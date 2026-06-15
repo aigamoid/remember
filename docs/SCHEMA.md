@@ -1,12 +1,66 @@
 # スキーマ定義
 
-## SQLiteテーブル
+## Postgresテーブル
+
+DB: `oracle`（compose の `postgres` サービス・接続先は環境変数 `DATABASE_URL`）。
+全テーブルは `src/db.py` の `init_schema()` が作成する（冪等）。
+マルチテナント対応のため、データ系テーブルは全て `guild_id`（DiscordサーバーID）を持つ。
+
+### guilds（Bot導入サーバー）
+
+```sql
+CREATE TABLE guilds (
+    guild_id   TEXT PRIMARY KEY,        -- DiscordサーバーID
+    guild_name TEXT NOT NULL DEFAULT '',
+    joined_at  TEXT,                    -- Bot参加日時（bot.py の on_guild_join が記録）
+    left_at    TEXT                     -- Bot退出日時（NULL=在籍中。再参加でNULLに戻る）
+);
+```
+
+### allowed_channels（opt-in許可チャンネル）
+
+```sql
+CREATE TABLE allowed_channels (
+    guild_id     TEXT NOT NULL,
+    channel_id   TEXT NOT NULL,
+    channel_name TEXT NOT NULL DEFAULT '',
+    allowed_by   TEXT,                  -- 許可した管理者のユーザーID
+    allowed_at   TEXT NOT NULL,
+    PRIMARY KEY (guild_id, channel_id)
+);
+```
+
+> ワーカーはこのテーブルにあるチャンネル**だけ**をクロールする（opt-in方式）。
+> `/oracle allow` で追加、`/oracle deny` で削除（削除時は purge_channel ジョブも投入される）。
+
+### ingest_jobs（取り込みジョブキュー）
+
+```sql
+CREATE TABLE ingest_jobs (
+    id            BIGSERIAL PRIMARY KEY,
+    guild_id      TEXT NOT NULL,
+    kind          TEXT NOT NULL,        -- 'ingest' | 'purge_channel' | 'purge_guild'
+    channel_id    TEXT,                 -- purge_channel のみ使用
+    status        TEXT NOT NULL DEFAULT 'queued', -- 'queued'|'running'|'done'|'error'
+    requested_by  TEXT,                 -- 操作したユーザーID / 'scheduler' / 'guild_remove'
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    finished_at   TEXT,
+    error_message TEXT,
+    result        TEXT                  -- 例: "crawled=120 chunks=15 contexts=15 indexed=15"
+);
+```
+
+> Bot（bot.py / store.py）が投入し、ワーカー（worker.py）が
+> `FOR UPDATE SKIP LOCKED` で1件ずつ取り出して処理する。
+> 同一guild・同一kindのジョブが queued にある間は重複投入されない。
 
 ### messages（生データ）
 
 ```sql
 CREATE TABLE messages (
     id            TEXT PRIMARY KEY,        -- Discord message ID
+    guild_id      TEXT NOT NULL,           -- マルチテナント分離キー
     channel_id    TEXT NOT NULL,
     channel_name  TEXT NOT NULL,
     author_id     TEXT NOT NULL,
@@ -21,8 +75,8 @@ CREATE TABLE messages (
 );
 
 -- chunkerが頻繁に発行するクエリ用インデックス
-CREATE INDEX IF NOT EXISTS idx_messages_channel_timestamp
-    ON messages (channel_id, timestamp);
+CREATE INDEX idx_messages_channel_timestamp ON messages (channel_id, timestamp);
+CREATE INDEX idx_messages_guild ON messages (guild_id);
 ```
 
 ### attachments（添付ファイル）
@@ -40,23 +94,13 @@ CREATE TABLE attachments (
 );
 ```
 
-> **config.yml での制御：**
-> ```yaml
-> crawl:
->   download_attachments: false        # true にするとクロール時にローカルDL
->   attachment_dir: "data/attachments" # DL先（download_attachments: true 時のみ使用）
-> ```
->
-> `local_path` が NULL の場合、将来の `describer.py` は `url` からのDLを試みる（期限切れ時は skip）。
-
----
-
 ### crawl_state（クロール進捗）
 
 ```sql
 CREATE TABLE crawl_state (
     channel_id      TEXT PRIMARY KEY,
-    last_message_id TEXT NOT NULL,    -- ここまで取得済み
+    guild_id        TEXT NOT NULL,
+    last_message_id TEXT NOT NULL,    -- ここまで取得済み（差分syncはこの続きから）
     crawled_at      TEXT NOT NULL
 );
 ```
@@ -66,16 +110,20 @@ CREATE TABLE crawl_state (
 ```sql
 CREATE TABLE chunk_index (
     chunk_id      TEXT PRIMARY KEY, -- MD5(anchor_msg_id)
+    guild_id      TEXT NOT NULL,    -- マルチテナント分離キー
     anchor_msg_id TEXT NOT NULL,
     channel_id    TEXT NOT NULL,    -- exporter.py がチャンネル別出力に使用
-    chunk_text    TEXT NOT NULL,    -- タイムスタンプ付き JST テキスト（exporter.py がファイルに出力）
+    chunk_text    TEXT NOT NULL,    -- タイムスタンプ付き JST テキスト
     context_text  TEXT,             -- LLMが生成した文脈説明（contextualizer.py が付与、NULL=未処理）
-    dify_doc_id   TEXT,             -- 旧Dify用（廃止済み・未使用）
     status        TEXT DEFAULT 'pending', -- 'pending' | 'indexed'（indexer.py がQdrant登録済みを記録）
     indexed_at    TEXT,             -- indexer.py がQdrant登録日時を記録
     error_message TEXT
 );
 ```
+
+> **差分sync時の挙動**: `insert_chunk()`（src/db.py）は upsert で、chunk_text が
+> 変わった場合のみ `context_text=NULL`・`status='pending'` に戻す。
+> これにより新着メッセージで末尾チャンクが伸びたときだけ再contextualize・再インデックスされる。
 
 > **chunk_text のフォーマット：**
 > ```
@@ -85,12 +133,23 @@ CREATE TABLE chunk_index (
 > ```
 > タイムスタンプは `config.yml` の `timezone_offset`（デフォルト 9 = JST）で UTC から変換。
 
-> **context_text のフォーマット：**
-> LLMが生成した1〜2文の文脈説明。exporter.py は chunk_text の前に `[CONTEXT]\n...\n[CHUNK]\n` 形式で付加して出力する。
+### run_log（実行ログ）
+
+```sql
+CREATE TABLE run_log (
+    id         BIGSERIAL PRIMARY KEY,
+    run_id     TEXT NOT NULL,          -- UUIDなど実行単位の識別子
+    guild_id   TEXT,                   -- 対象サーバー（不明な場合はNULL）
+    phase      TEXT NOT NULL,          -- 'crawl' | 'chunk' | 'contextualize' | 'index' | 'export'
+    status     TEXT NOT NULL,          -- 'success' | 'error' | 'skip'
+    message    TEXT,
+    created_at TEXT NOT NULL
+);
+```
 
 ## Qdrant ペイロード仕様
 
-コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`）
+コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`・全guild共有）
 点ID: chunk_id から `uuid5(NAMESPACE_URL, chunk_id)` で決定的に生成（再登録=上書き）
 ベクトル: text-embedding-3-small 1536次元（`context_text + "\n\n" + chunk_text` を埋め込み）
 
@@ -106,29 +165,12 @@ CREATE TABLE chunk_index (
 }
 ```
 
-### upload_state（チャンネル別アップロード状態・旧Dify用）
+`/oracle deny`・Bot退出時は guild_id（+ channel_id）フィルタで点を削除する
+（`src/vectorstore.py` の `delete_by_channel` / `delete_by_guild`）。
 
-```sql
-CREATE TABLE upload_state (
-    channel_id    TEXT PRIMARY KEY,
-    channel_name  TEXT NOT NULL,
-    dataset_id    TEXT,             -- Dify側のデータセットID
-    document_id   TEXT,             -- Dify側のドキュメントID
-    status        TEXT DEFAULT 'pending', -- 'pending' | 'indexed' | 'error'
-    error_message TEXT,
-    indexed_at    TEXT
-);
-```
+## 旧SQLiteからの移行
 
-### run_log（実行ログ）
-
-```sql
-CREATE TABLE run_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id     TEXT NOT NULL,          -- UUIDなど実行単位の識別子
-    phase      TEXT NOT NULL,          -- 'crawl' | 'chunk' | 'contextualize' | 'export'
-    status     TEXT NOT NULL,          -- 'success' | 'error' | 'skip'
-    message    TEXT,
-    created_at TEXT NOT NULL
-);
-```
+単一guild時代の `data/messages.db`（SQLite）は `scripts/migrate_sqlite_to_pg.py` で
+guild_id を付与しながら Postgres へ移行済み（2026-06-11）。
+status='indexed' を保持して移行するため、再embedding は発生しない。
+旧 `upload_state` テーブル（Dify用）と `chunk_index.dify_doc_id` 列は廃止した。
