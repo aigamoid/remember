@@ -61,6 +61,12 @@ allowed_channels 32件を手動削除した（messages / chunk_index / Qdrant �
 これによりワーカーの定期syncや /oracle sync が waiwai をクロールすることはない。
 再度 migrate_sqlite_to_pg.py を実行すると allowed_channels が復活するので注意。
 
+### 状態（2026-06-15更新）
+
+- ブランチ `feature/multitenant-ingest`（50コミット）を push、**PR #6 作成**
+  （https://github.com/aigamoid/waiwai-oracle/pull/6 → develop。マージは人間判断）
+- 実装・テスト（211件PASS）は完了。次の作業は OI-12 の実機E2E（トークン再発行＋テスト用サーバー待ち）
+
 ---
 
 ## 2026-06-11 — contextualizer の要否検証（A/Bテスト）
