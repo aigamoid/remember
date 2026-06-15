@@ -115,6 +115,24 @@ CREATE TABLE IF NOT EXISTS run_log (
     message    TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS usage_log (
+    id                BIGSERIAL PRIMARY KEY,
+    guild_id          TEXT NOT NULL,
+    user_id           TEXT,                  -- 質問したユーザーID（集計単位の選択肢）
+    created_at        TEXT NOT NULL,         -- ISO8601 (UTC)
+    kind              TEXT NOT NULL,         -- 'rewrite'|'answer'|'embedding'|'contextualize'
+    model             TEXT,
+    prompt_tokens     INTEGER DEFAULT 0,
+    completion_tokens INTEGER DEFAULT 0,
+    total_tokens      INTEGER DEFAULT 0,
+    cost_usd          NUMERIC DEFAULT 0      -- config の pricing 単価表から算出した推定コスト
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_guild_created
+    ON usage_log (guild_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_created
+    ON usage_log (created_at);
 """
 
 # ingest_jobs.kind の取りうる値
@@ -635,3 +653,138 @@ def log_run(
         "VALUES (%s,%s,%s,%s,%s,%s)",
         (run_id, guild_id, phase, status, message, _now()),
     )
+
+
+# ---- usage_log（LLM/embedding 利用量計測。recorder が commit を管理する）----
+
+def insert_usage(
+    conn: psycopg.Connection,
+    guild_id: str,
+    kind: str,
+    model: str | None = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: float = 0.0,
+    user_id: str | None = None,
+) -> None:
+    """LLM/embedding 1回分の利用量を記録する（commit は呼び出し元が行う）。"""
+    conn.execute(
+        """
+        INSERT INTO usage_log
+            (guild_id, user_id, created_at, kind, model,
+             prompt_tokens, completion_tokens, total_tokens, cost_usd)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (guild_id, user_id, _now(), kind, model,
+         prompt_tokens, completion_tokens, total_tokens, cost_usd),
+    )
+
+
+def _month_start_iso() -> str:
+    """今月初日 00:00 UTC の ISO8601 文字列（created_at の文字列比較に使う）。"""
+    now = datetime.now(timezone.utc)
+    return now.replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    ).isoformat()
+
+
+def fetch_guilds_overview(conn: psycopg.Connection) -> list[dict]:
+    """管理ポータル用: サーバーごとの概況（許可ch数・msg数・chunk数・今月のコスト）。"""
+    month_start = _month_start_iso()
+    rows = conn.execute(
+        """
+        SELECT
+            g.guild_id, g.guild_name, g.joined_at, g.left_at,
+            (SELECT count(*) FROM allowed_channels a WHERE a.guild_id = g.guild_id),
+            (SELECT count(*) FROM messages m WHERE m.guild_id = g.guild_id),
+            (SELECT count(*) FROM chunk_index c WHERE c.guild_id = g.guild_id),
+            COALESCE((
+                SELECT sum(u.cost_usd) FROM usage_log u
+                WHERE u.guild_id = g.guild_id AND u.created_at >= %s
+            ), 0)
+        FROM guilds g
+        ORDER BY (g.left_at IS NULL) DESC, g.guild_name
+        """,
+        (month_start,),
+    ).fetchall()
+    return [
+        {
+            "guild_id": r[0],
+            "guild_name": r[1],
+            "joined_at": r[2],
+            "left_at": r[3],
+            "allowed_count": r[4],
+            "message_count": r[5],
+            "chunk_count": r[6],
+            "cost_usd_this_month": float(r[7]),
+        }
+        for r in rows
+    ]
+
+
+def fetch_recent_jobs(conn: psycopg.Connection, limit: int = 50) -> list[dict]:
+    """管理ポータル用: 最近の取り込みジョブ（処理中・完了・エラー）。"""
+    rows = conn.execute(
+        """
+        SELECT j.id, j.guild_id, g.guild_name, j.kind, j.status,
+               j.created_at, j.started_at, j.finished_at, j.result, j.error_message
+        FROM ingest_jobs j
+        LEFT JOIN guilds g ON g.guild_id = j.guild_id
+        ORDER BY j.id DESC
+        LIMIT %s
+        """,
+        (limit,),
+    ).fetchall()
+    return [
+        {
+            "id": r[0], "guild_id": r[1], "guild_name": r[2], "kind": r[3],
+            "status": r[4], "created_at": r[5], "started_at": r[6],
+            "finished_at": r[7], "result": r[8], "error_message": r[9],
+        }
+        for r in rows
+    ]
+
+
+def fetch_usage_summary(conn: psycopg.Connection) -> dict:
+    """管理ポータル用: 今月の利用量サマリ（合計・種別別・サーバー別）。"""
+    month_start = _month_start_iso()
+    total = conn.execute(
+        "SELECT COALESCE(sum(cost_usd),0), COALESCE(sum(total_tokens),0), count(*) "
+        "FROM usage_log WHERE created_at >= %s",
+        (month_start,),
+    ).fetchone()
+    by_kind = conn.execute(
+        """
+        SELECT kind, COALESCE(sum(cost_usd),0), COALESCE(sum(total_tokens),0), count(*)
+        FROM usage_log WHERE created_at >= %s
+        GROUP BY kind ORDER BY 2 DESC
+        """,
+        (month_start,),
+    ).fetchall()
+    by_guild = conn.execute(
+        """
+        SELECT u.guild_id, g.guild_name, COALESCE(sum(u.cost_usd),0), count(*)
+        FROM usage_log u
+        LEFT JOIN guilds g ON g.guild_id = u.guild_id
+        WHERE u.created_at >= %s
+        GROUP BY u.guild_id, g.guild_name ORDER BY 3 DESC
+        """,
+        (month_start,),
+    ).fetchall()
+    return {
+        "month_start": month_start,
+        "total_cost_usd": float(total[0]),
+        "total_tokens": int(total[1]),
+        "total_calls": int(total[2]),
+        "by_kind": [
+            {"kind": r[0], "cost_usd": float(r[1]),
+             "tokens": int(r[2]), "calls": int(r[3])}
+            for r in by_kind
+        ],
+        "by_guild": [
+            {"guild_id": r[0], "guild_name": r[1],
+             "cost_usd": float(r[2]), "calls": int(r[3])}
+            for r in by_guild
+        ],
+    }
