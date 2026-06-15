@@ -16,11 +16,20 @@ from pydantic import BaseModel
 
 load_dotenv()  # uvicorn 直接起動でも .env を読み込む
 
+from src import db
 from src.config import load_config
 from src.embedder import Embedder
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM
+from src.usage import UsageRecorder
 from src.vectorstore import VectorStore
+
+
+def _parse_user_id(user: Optional[str]) -> Optional[str]:
+    """ログ用 user 文字列（"channel_id:user_id" 形式）から user_id を取り出す。"""
+    if not user:
+        return None
+    return user.rsplit(":", 1)[-1] or None
 
 
 class ChatRequest(BaseModel):
@@ -57,7 +66,7 @@ def build_engine(cfg: dict) -> RagEngine:
         api_key=openai_cfg.get("api_key") or os.environ.get("OPENROUTER_API_KEY"),
         base_url=openai_cfg.get("base_url", "https://openrouter.ai/api/v1"),
     )
-    return RagEngine(cfg, store, embedder, llm)
+    return RagEngine(cfg, store, embedder, llm, usage_recorder=UsageRecorder())
 
 
 def create_app(engine: Optional[RagEngine] = None) -> FastAPI:
@@ -67,8 +76,15 @@ def create_app(engine: Optional[RagEngine] = None) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        if app.state.engine is None:
-            app.state.engine = build_engine(load_config())
+        if app.state.engine is not None:
+            return  # テスト等で engine を注入済みなら DB 初期化はしない
+        app.state.engine = build_engine(load_config())
+        # usage_log などのテーブルを用意（DB未起動でも /chat は動くので失敗は無視）
+        try:
+            conn = db.get_connection(init=True)
+            conn.close()
+        except Exception as e:
+            print(f"[WARN] usage_log スキーマ初期化スキップ: {e}")
 
     @app.get("/health")
     async def health() -> dict:
@@ -79,7 +95,8 @@ def create_app(engine: Optional[RagEngine] = None) -> FastAPI:
         if not req.query.strip():
             raise HTTPException(status_code=422, detail="query が空です")
         result = await app.state.engine.answer(
-            req.guild_id, req.query, guild_name=req.guild_name
+            req.guild_id, req.query, guild_name=req.guild_name,
+            user_id=_parse_user_id(req.user),
         )
         return ChatResponse(**result)
 
