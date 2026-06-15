@@ -66,3 +66,14 @@ class Embedder:
     def embed_one(self, text: str) -> list[float]:
         """単一テキストをベクトルに変換する。"""
         return self.embed([text])[0]
+
+    def embed_one_with_usage(self, text: str) -> tuple[list[float], int]:
+        """単一テキストを (ベクトル, 消費トークン数) で返す。
+        src/rag/engine.py がクエリ embedding のコスト計上に使う。"""
+        safe = self._truncate(text) if text.strip() else " "
+        resp = self._get_client().embeddings.create(
+            model=self.model, input=[safe], dimensions=self.dimensions
+        )
+        usage = getattr(resp, "usage", None)
+        tokens = getattr(usage, "total_tokens", 0) or 0
+        return resp.data[0].embedding, tokens

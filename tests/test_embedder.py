@@ -27,12 +27,17 @@ class FakeOpenAI:
         self.inputs: list[list[str]] = []
         outer = self
 
+        class _Usage:
+            def __init__(self, total_tokens):
+                self.total_tokens = total_tokens
+
         class _Embeddings:
             def create(self, model, input, dimensions):
                 outer.inputs.append(input)
 
                 class _Resp:
                     data = [FakeEmbeddingData([0.0] * dimensions) for _ in input]
+                    usage = _Usage(sum(len(t) for t in input))
 
                 return _Resp()
 
@@ -70,3 +75,15 @@ class TestEmbed:
         client = FakeOpenAI()
         vec = _embedder(client).embed_one("テスト")
         assert len(vec) == 4
+
+    def test_embed_one_with_usage_returns_vector_and_tokens(self):
+        client = FakeOpenAI()
+        vec, tokens = _embedder(client).embed_one_with_usage("テスト")
+        assert len(vec) == 4
+        assert tokens == 3  # FakeEncoder: 1文字=1トークン、"テスト"=3
+
+    def test_embed_one_with_usage_empty_uses_placeholder(self):
+        client = FakeOpenAI()
+        vec, tokens = _embedder(client).embed_one_with_usage("   ")
+        assert client.inputs[0] == [" "]
+        assert tokens == 1

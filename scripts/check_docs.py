@@ -22,7 +22,7 @@ TARGET_DOCS = [
 ]
 
 # ファイル探索ディレクトリ（優先順）
-SEARCH_DIRS = [".", "src", "src/collectors", "src/rag", "moimoichan_Discordbot", "scripts", "tests"]
+SEARCH_DIRS = [".", "src", "src/collectors", "src/rag", "src/admin", "moimoichan_Discordbot", "scripts", "tests"]
 
 # 外部ライブラリ・ツール名として使われる既知の除外ワード（プロジェクトファイルではない）
 EXCLUDED_NAMES = {"discord"}  # discord.py = ライブラリ名

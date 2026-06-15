@@ -4,6 +4,65 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-15 — 利用量計測(OI-14 C-1) ＋ 管理ポータル(codename: remember)
+
+収益化ロードマップ OI-14 の **C-1（利用量計測）** と、追加要望の **管理ポータル** を
+`feature/usage-metering-portal` で実装し PR #7 を作成（base: feature/multitenant-ingest）。
+回答の挙動は不変（計測は副作用なし・DB障害でも /chat は止まらない設計）。
+
+### 変更ファイル
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/db.py` | `usage_log` テーブル新設・`insert_usage`・ポータル用集計（`fetch_guilds_overview`/`fetch_recent_jobs`/`fetch_usage_summary`） |
+| 2 | `config.yml(.example)` | `pricing` 単価表（USD/100万トークン）追加 |
+| 3 | `src/usage.py`（新規） | コスト算出 `compute_cost` ＋ `UsageRecorder`（記録失敗は握りつぶす） |
+| 4 | `src/rag/llm.py` | `complete()` が `Completion`（本文＋usage）を返すよう変更 |
+| 5 | `src/embedder.py` | `embed_one_with_usage` 追加（クエリembeddingのトークン取得） |
+| 6 | `src/rag/engine.py` | rewrite/embedding/answer の usage を集約して recorder へ・`user_id` 対応 |
+| 7 | `src/api.py` | recorder 配線・`user`→user_id 抽出・起動時スキーマ初期化 |
+| 8 | `src/admin/`（新規） | FastAPI+Jinja2 ポータル（`app.py`/`auth.py`/templates 4枚） |
+| 9 | `docker-compose.yml` | `admin` サービス追加(8001)・`api` に DATABASE_URL/depends 追加 |
+| 10 | `requirements.txt` | `jinja2`・`python-multipart` 追加 |
+| 11 | `.env.example` | `ADMIN_PASSWORD`・`ADMIN_SESSION_SECRET` 追加 |
+| 12 | `scripts/check_docs.py` | 探索ディレクトリに `src/admin` 追加 |
+| 13 | tests/（6ファイル） | usage計測・admin認証/ログイン・DB集計・embedder のテスト追加/更新 |
+| 14 | docs/・CLAUDE.md | SCHEMA/ARCHITECTURE/CONFIG/OPEN_ISSUES/CLAUDE を更新 |
+| 15 | `src/admin/*`・CLAUDE.md | ポータル表示名を codename **remember** に統一 |
+
+### 決定事項
+
+- **認証**: 管理ポータルは簡易パスワード（`ADMIN_PASSWORD`・HMAC署名Cookie・stdlibのみ）。
+- **公開面**: 公開API(/chat)と分離した別 compose サービス `admin`（ポート8001）。
+- **集計単位**: guild_id に加え **user_id も記録**（将来のユーザー別分析に備える）。
+- **改名スコープ**: 今回は**ポータル表示名のみ** `waiwai-oracle`→`remember`。全体改名は段階実施
+  （Qdrantコレクション `waiwai_chunks` はデータ移行が絡むため別途）。「わいわい」(テナント名)・
+  「わいわいちゃん」(Botキャラ)は別概念で改名対象外。CLAUDE.md 冒頭に明記。
+
+### 実行結果
+
+- pytest **240件 PASS** / `scripts/check_docs.py` 問題なし。
+- 実機: `docker compose up -d --build` → ログイン(301301)→ダッシュボード描画OK。
+  テストサーバーへ `/chat` 1回で `usage_log` に rewrite/embedding/answer の3行が記録
+  （user_id=u999・answer ≈ $0.0012）。**わいわいサーバーは不使用**。
+- データ補正: 移行由来で `left_at` が NULL のままだった「わいわい」guilds行を退出済みに更新
+  （ポータルで在籍誤表示していたため。チャンク8,364件は保持・purgeなし）。
+
+### ハマりポイント
+
+- `complete()` の戻り値型変更がテストのフェイクに波及 → `Completion` を返すフェイクに更新して吸収。
+- ポータルの「在籍中」は `guilds.left_at IS NULL` のみで判定。移行・手動投入の行は実態とズレ得る
+  （真の在籍は Discord ゲートウェイ）。将来 bot.guilds との突き合わせ補正を検討。
+
+### 次のステップ
+
+- C-2（quota/上限）: C-1 のデータを見て料金プラン決定後に着手。
+- pricing 単価を最新の OpenRouter/OpenAI 価格に更新。
+- プロジェクト全体の `remember` 改名（compose/Qdrant等）。
+- ポータルの公開可否（VPN内限定 or 公開＋HTTPS/認証強化）。
+
+---
+
 ## 2026-06-15 — 実機E2E完走（OI-12）＋ Query Rewriter修正
 
 ステップ2（feature/multitenant-ingest）の実機E2Eを、テスト用Discordサーバー

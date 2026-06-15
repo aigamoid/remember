@@ -147,6 +147,32 @@ CREATE TABLE run_log (
 );
 ```
 
+### usage_log（LLM/embedding 利用量・コスト計測）
+
+```sql
+CREATE TABLE usage_log (
+    id                BIGSERIAL PRIMARY KEY,
+    guild_id          TEXT NOT NULL,
+    user_id           TEXT,                  -- 質問したユーザーID（集計単位の選択肢・任意）
+    created_at        TEXT NOT NULL,         -- ISO8601 (UTC)
+    kind              TEXT NOT NULL,         -- 'rewrite'|'answer'|'embedding'|'contextualize'
+    model             TEXT,
+    prompt_tokens     INTEGER DEFAULT 0,
+    completion_tokens INTEGER DEFAULT 0,
+    total_tokens      INTEGER DEFAULT 0,
+    cost_usd          NUMERIC DEFAULT 0      -- config.yml の pricing 単価表から算出した推定コスト
+);
+
+CREATE INDEX idx_usage_guild_created ON usage_log (guild_id, created_at);
+CREATE INDEX idx_usage_created       ON usage_log (created_at);
+```
+
+> 回答時に `src/rag/engine.py` が各 LLM/embedding 呼び出しの token 使用量を集め、
+> `src/usage.py` の `UsageRecorder` 経由でまとめて記録する（`src/db.py` の `insert_usage`）。
+> コストは `config.yml` の `pricing`（USD/100万トークン）から算出。
+> 記録失敗は回答処理を止めない（DB障害時でも `/chat` は動く設計）。
+> 管理ポータル（`src/admin/`）が `fetch_usage_summary` / `fetch_guilds_overview` で集計表示する。
+
 ## Qdrant ペイロード仕様
 
 コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`・全guild共有）

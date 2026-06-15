@@ -24,7 +24,8 @@ TEST_DSN = os.environ.get(
 
 _TRUNCATE = (
     "TRUNCATE guilds, allowed_channels, messages, attachments, "
-    "crawl_state, chunk_index, ingest_jobs, run_log RESTART IDENTITY CASCADE"
+    "crawl_state, chunk_index, ingest_jobs, run_log, usage_log "
+    "RESTART IDENTITY CASCADE"
 )
 
 

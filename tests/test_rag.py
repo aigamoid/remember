@@ -8,15 +8,18 @@ import pytest
 from qdrant_client import QdrantClient
 
 from src.rag.engine import RagEngine
-from src.rag.llm import strip_think
+from src.rag.llm import Completion, Usage, strip_think
 from src.rag.prompts import build_context
 from src.vectorstore import VectorStore
 
 
 class FakeLLM:
-    """API を呼ばず固定応答を返す。呼び出し内容を記録する。"""
+    """API を呼ばず固定応答を返す。呼び出し内容を記録する。
 
-    def __init__(self, responses: list[str]) -> None:
+    responses の各要素は str（usage 0）か Completion か Exception。
+    """
+
+    def __init__(self, responses: list) -> None:
         self._responses = list(responses)
         self.calls: list[dict] = []
 
@@ -30,12 +33,17 @@ class FakeLLM:
         resp = self._responses.pop(0)
         if isinstance(resp, Exception):
             raise resp
-        return resp
+        if isinstance(resp, Completion):
+            return resp
+        return Completion(text=resp, model=model)
 
 
 class FakeEmbedder:
-    def __init__(self, dimensions: int = 4) -> None:
+    model = "text-embedding-3-small"
+
+    def __init__(self, dimensions: int = 4, tokens: int = 7) -> None:
         self.dimensions = dimensions
+        self.tokens = tokens
         self.embedded: list[str] = []
 
     def embed(self, texts):
@@ -44,6 +52,9 @@ class FakeEmbedder:
 
     def embed_one(self, text):
         return self.embed([text])[0]
+
+    def embed_one_with_usage(self, text):
+        return self.embed_one(text), self.tokens
 
 
 @pytest.fixture
@@ -210,3 +221,62 @@ class TestAnswer:
         engine = RagEngine(cfg, store, FakeEmbedder(), llm)
         asyncio.run(engine.answer("g1", "query"))
         assert "コンフィグ名" in llm.calls[1]["system"]
+
+
+# ── usage 計測（usage_recorder） ─────────────────────────────────────────────
+
+_PRICING = {
+    "google/gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "moonshotai/kimi-k2-0905": {"input": 0.60, "output": 2.50},
+    "text-embedding-3-small": {"input": 0.02, "output": 0.0},
+}
+
+
+class TestUsageRecording:
+    def _engine_with_recorder(self, store, llm):
+        captured: list[dict] = []
+        cfg = {"rag": {"top_k": 5}, "pricing": _PRICING}
+        engine = RagEngine(
+            cfg, store, FakeEmbedder(), llm, usage_recorder=captured.extend
+        )
+        return engine, captured
+
+    def test_records_rewrite_embedding_answer(self, store):
+        _seed(store)
+        llm = FakeLLM([
+            Completion("q", "google/gemini-2.5-flash", Usage(100, 20, 120)),
+            Completion("答え", "moonshotai/kimi-k2-0905", Usage(5000, 300, 5300)),
+        ])
+        engine, captured = self._engine_with_recorder(store, llm)
+        asyncio.run(engine.answer("g1", "質問", user_id="u1"))
+        assert [e["kind"] for e in captured] == ["rewrite", "embedding", "answer"]
+        assert all(e["guild_id"] == "g1" for e in captured)
+        assert all(e["user_id"] == "u1" for e in captured)
+
+    def test_answer_cost_computed_from_pricing(self, store):
+        _seed(store)
+        llm = FakeLLM([
+            Completion("q", "google/gemini-2.5-flash", Usage(0, 0, 0)),
+            Completion("答え", "moonshotai/kimi-k2-0905", Usage(5000, 300, 5300)),
+        ])
+        engine, captured = self._engine_with_recorder(store, llm)
+        asyncio.run(engine.answer("g1", "質問"))
+        answer_ev = next(e for e in captured if e["kind"] == "answer")
+        # (5000*0.60 + 300*2.50) / 1e6 = 0.00375
+        assert abs(answer_ev["cost_usd"] - 0.00375) < 1e-9
+
+    def test_rewrite_failure_skips_its_usage(self, store):
+        _seed(store)
+        llm = FakeLLM([
+            RuntimeError("down"),
+            Completion("答え", "moonshotai/kimi-k2-0905", Usage(10, 5, 15)),
+        ])
+        engine, captured = self._engine_with_recorder(store, llm)
+        asyncio.run(engine.answer("g1", "質問"))
+        assert [e["kind"] for e in captured] == ["embedding", "answer"]
+
+    def test_no_recorder_does_not_break(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        result = asyncio.run(_engine(store, llm).answer("g1", "質問"))
+        assert result["answer"] == "答え"
