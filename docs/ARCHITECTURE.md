@@ -11,6 +11,8 @@ waiwai-oracle/
 │   ├── DIAGRAMS.md
 │   ├── SCHEMA.md
 │   ├── CONFIG.md
+│   ├── GCP_MIGRATION.md  # GCP移行runbook（OI-14 E・初心者向け/セキュア）
+│   ├── DEVLOG.md
 │   └── OPEN_ISSUES.md
 ├── src/
 │   ├── config.py          # config.yml ロード
@@ -46,6 +48,7 @@ waiwai-oracle/
 ├── scripts/
 │   ├── check_docs.py      # ドキュメント内 .py 参照の検証（pre-commit hook）
 │   ├── install_hooks.sh
+│   ├── vm_setup.sh        # GCP VM初期セットアップ（Docker+compose+swap・Phase3）
 │   └── migrate_sqlite_to_pg.py # 旧SQLiteデータのPostgres移行（1回だけ実行）
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
 ├── crawler.py             # Phase 1 エントリポイント（手動実行用）
