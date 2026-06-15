@@ -22,7 +22,10 @@ class FakeLLM:
 
     async def complete(self, model, system, user, temperature=0.7, max_tokens=None):
         self.calls.append(
-            {"model": model, "system": system, "user": user, "temperature": temperature}
+            {
+                "model": model, "system": system, "user": user,
+                "temperature": temperature, "max_tokens": max_tokens,
+            }
         )
         resp = self._responses.pop(0)
         if isinstance(resp, Exception):
@@ -136,6 +139,12 @@ class TestRewrite:
         llm = FakeLLM(["q"])
         asyncio.run(_engine(store, llm).rewrite("query"))
         assert llm.calls[0]["temperature"] == 0.2
+
+    def test_caps_rewriter_max_tokens(self, store):
+        # 書き換えは短いので出力上限を絞る（残高不足で弾かれないように）
+        llm = FakeLLM(["q"])
+        asyncio.run(_engine(store, llm).rewrite("query"))
+        assert llm.calls[0]["max_tokens"] == 256
 
 
 # ── RagEngine.answer ────────────────────────────────────────────────────────
