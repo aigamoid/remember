@@ -26,7 +26,11 @@ Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎
 - フロントエンドは2モード（両方維持する）:
   - Discord Bot（`moimoichan_Discordbot/`）
   - CLI（`chat_cli.py` ※動作確認用、`python chat_cli.py` で対話）
-- 起動: `docker compose up -d postgres qdrant api worker`（Botは `bot` サービス）
+- 回答時に各 LLM/embedding の利用量を `usage_log` に記録する（`src/usage.py`・OI-14 C）。
+  コストは config.yml の `pricing`（USD/100万トークン）から推定。記録失敗は回答を止めない。
+- 管理ポータル `src/admin/`（FastAPI+Jinja2・別サービス `admin`・ポート8001）で
+  サーバー/ジョブ/利用量・コストを閲覧できる。認証は `.env` の `ADMIN_PASSWORD`。
+- 起動: `docker compose up -d postgres qdrant api admin worker`（Botは `bot` サービス）
 - テスト: `docker compose up -d postgres` してから `pytest tests/`
   （DB系テストは実Postgresの oracle_test DBを使う。未起動ならskip）
 
