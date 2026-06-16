@@ -31,6 +31,36 @@ Phase ごとの作業記録・設計判断ログ。
 - worker に無害な `RuntimeError: Event loop is closed`（httpx 後始末ログ）が散発 → **OI-19** として既知事項に記録。
   根本対応（非同期クライアント明示クローズ）は検証一段落後に。
 
+---
+
+## 2026-06-16 — OI-18: `<@ID>` メンションの表示名解決（feature/oi18-mention-resolution）
+
+回答に出る `<@123...>` を「誰の発言か」分かるよう **`@表示名` に決定論的に解決**した。
+LLMツール使用（OI-17）に頼らず低コスト・低リスクで品質を上げる狙い。
+
+### 方式の決定
+- **取り込み時に解決して chunk_text に保存**を採用（回答時の追加処理ゼロ＝OI-16のコスト方針と整合）。
+  回答時に毎回置換する案もあったが、エンジンをDBに結合させずに済む取り込み時方式を選んだ。
+- 名前のソースは messages テーブルの `author_id→author_name`（過去に発言した人をカバー）。
+  同一IDで改名があれば最新を採用（`DISTINCT ON ... ORDER BY timestamp DESC`）。
+
+### 変更（1ファイル1コミット・計7）
+- `src/formatter.py`: `resolve_mentions()` ＋ `format_message_line(mention_map=...)`。
+  `<@ID>`/`<@!ID>`→`@名前`、未知IDは原文維持、ロール/チャンネルmentionは対象外。
+- `src/db.py`: `fetch_mention_map(conn, guild_id)`。
+- `src/chunker.py` / `src/contextualizer.py`: map を一度構築し chunk_text・preceding を解決。
+- tests: `test_formatter.py`（新規）＋ `test_db`/`test_chunker` に追加（+13件、計 **253 PASS**）。
+
+### 効果・確認
+- 既存データの **7.3%（614/8395チャンク）** が生 `<@ID>` を含むと実測（読み取りのみ）。
+- 統合テストで run_chunker 後の chunk_text に `@表示名` が入り `<@ID>` が消えることを検証。
+
+### 残
+- 既存チャンクは次回syncの再取り込みで自然反映（即時反映は手動re-chunk＝再embeddingコスト）。
+- lurker（未発言ユーザー）の `<@ID>` は未解決のまま。必要なら将来 Discord REST 補完。
+
+---
+
 ## 2026-06-15 — GCP移行（lift-and-shift・検証機/ステージング）完了
 
 OI-14 E。オンプレ（Mac）から GCP の単一VMへ lift-and-shift で移行。**初心者向け・セキュア
