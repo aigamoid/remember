@@ -94,12 +94,20 @@ api/admin は VM 内部通信、管理画面は自分が Tailscale で入る。
    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
    ```
 2. リポジトリを配置（git clone）。
-3. **機密情報の扱い**（2段階）:
-   - ベータ初期: `.env` を VM 上に置く（パーミッション 600・Tailscale内のみアクセス）。
-   - 推奨: **Secret Manager** に APIキー/トークンを保管し、起動時に取得して環境変数へ。
-     VM のサービスアカウントに `roles/secretmanager.secretAccessor` だけ付与（最小権限）。
-4. `docker compose up -d`（compose のポート公開は `127.0.0.1` バインドにして、外向きに出さない）。
-   - 管理ポータル(8001)・api(8000) は **VM内 or Tailscale からのみ**到達させる。
+3. **機密情報の扱い: Secret Manager（✅ 2026-06-15 導入済み）**。
+   - 鍵は GCP Secret Manager に保管（`discord-token` / `openai-api-key` / `openrouter-api-key` /
+     `admin-password`）。VM上に平文 `.env` を常設しない。
+   - VMは**専用SA `remember-vm@...`（secret読み取りのみ・cloud-platformスコープ）**で動く
+     （デフォルトのEditor権限SAは使わない）。
+   - デプロイ時に `scripts/load_secrets_from_gcp.sh` が Secret Manager から `.env`(600) を生成する
+     （VMのメタデータトークン＋REST API。VMに gcloud 不要）。
+4. 起動（VM上・`~/remember`）:
+   ```sh
+   bash scripts/load_secrets_from_gcp.sh   # Secret Manager → .env 生成
+   sudo docker compose up -d               # 6サービス起動
+   ```
+   - 管理ポータル(8001)・api(8000) は VPCにallowルールが無く公開不可。**Tailscale経由でのみ**到達。
+   - 鍵をローテーションしたいときは Secret Manager に新バージョンを追加 → 上記スクリプト再実行 → `up -d`。
 
 ✅ Phase 3 完了条件: Tailscale から `http://<vm>:8001/login` に入れ、`/health` がOK。
 
