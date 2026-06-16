@@ -12,6 +12,7 @@ from src.db import (
     fetch_allowed_channels,
     fetch_guilds_overview,
     fetch_last_job,
+    fetch_mention_map,
     fetch_recent_jobs,
     fetch_usage_summary,
     finish_job,
@@ -119,6 +120,28 @@ class TestInsertMessage:
         insert_message(conn, _make_message(id="m2", guild_id="g-2"))
         assert count_messages(conn) == 2
         assert count_messages(conn, guild_id="g-1") == 1
+
+
+# ── fetch_mention_map（OI-18）─────────────────────────────────
+
+class TestFetchMentionMap:
+    def test_maps_author_id_to_name(self, conn):
+        insert_message(conn, _make_message(id="m1", author_id="111", author_name="アリス"))
+        insert_message(conn, _make_message(id="m2", author_id="222", author_name="ボブ"))
+        assert fetch_mention_map(conn) == {"111": "アリス", "222": "ボブ"}
+
+    def test_uses_latest_display_name(self, conn):
+        # 同一IDで表示名が変わった場合は timestamp 最大（最新）を採用
+        insert_message(conn, _make_message(
+            id="m1", author_id="111", author_name="旧名", timestamp="2024-01-01T00:00:00+00:00"))
+        insert_message(conn, _make_message(
+            id="m2", author_id="111", author_name="新名", timestamp="2024-06-01T00:00:00+00:00"))
+        assert fetch_mention_map(conn) == {"111": "新名"}
+
+    def test_scoped_by_guild(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g-1", author_id="111", author_name="アリス"))
+        insert_message(conn, _make_message(id="m2", guild_id="g-2", author_id="222", author_name="ボブ"))
+        assert fetch_mention_map(conn, guild_id="g-1") == {"111": "アリス"}
 
 
 # ── insert_attachment ─────────────────────────────────────────
