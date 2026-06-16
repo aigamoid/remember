@@ -42,6 +42,8 @@ class RagEngine:
         # 書き換え結果は短いので出力上限を絞る。未指定だとモデル既定の
         # 巨大な max_tokens を要求し、OpenRouterの残高確保で弾かれることがある。
         self.rewriter_max_tokens: int = rag_cfg.get("rewriter_max_tokens", 256)
+        # 回答出力の上限（OI-16: completionの暴走を防ぐ安全弁）。
+        self.answer_max_tokens: int = rag_cfg.get("answer_max_tokens", 1500)
         self.guild_name: str = rag_cfg.get("guild_name", "わいわい")
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
@@ -135,7 +137,8 @@ class RagEngine:
             "{guild_name}", guild_name or self.guild_name
         ).replace("{context}", build_context(hits))
         comp = await self.llm.complete(
-            self.answer_model, system, query, temperature=0.7
+            self.answer_model, system, query,
+            temperature=0.7, max_tokens=self.answer_max_tokens,
         )
         self._record(events, "answer", comp.model, comp.usage)
 
