@@ -226,6 +226,28 @@ def fetch_allowed_channels(
     ).fetchall()
 
 
+def fetch_mention_map(
+    conn: psycopg.Connection, guild_id: str | None = None
+) -> dict[str, str]:
+    """author_id → 表示名 の対応表を返す（本文中の <@ID> 解決用・OI-18）。
+
+    過去に発言したユーザーが対象。同一IDで表示名が変わっている場合は
+    最新（timestamp最大）の表示名を採用する。guild_id 指定でそのサーバーに限定。
+    """
+    if guild_id is None:
+        rows = conn.execute(
+            "SELECT DISTINCT ON (author_id) author_id, author_name "
+            "FROM messages ORDER BY author_id, timestamp DESC"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT ON (author_id) author_id, author_name "
+            "FROM messages WHERE guild_id = %s ORDER BY author_id, timestamp DESC",
+            (guild_id,),
+        ).fetchall()
+    return {author_id: name for author_id, name in rows}
+
+
 # ---- ingest_jobs ジョブキュー（Bot が enqueue・ワーカーが claim。内部で commit）----
 
 def enqueue_job(
