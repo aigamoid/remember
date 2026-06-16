@@ -89,7 +89,7 @@ sh scripts/install_hooks.sh
 - Postgres（メタデータ・ジョブキュー / psycopg） + Qdrant（ベクトルDB・セルフホスト）
 - FastAPI（RAG回答API）
 - OpenAI API（embedding: text-embedding-3-small / `contextualizer.py` の context_text 生成）
-- OpenRouter（Query Rewriter: Gemini 2.5 Flash / 回答LLM: Kimi K2）
+- OpenRouter（Query Rewriter: Gemini 2.5 Flash / 回答LLM: DeepSeek V3.2 ※OI-16でKimi K2から変更）
 - ※Dify は廃止済み（`dify/waiwai-oracle.yml` は移行元プロンプトの記録として保持）
 - ※SQLite は廃止済み（`data/messages.db` は移行元データとして保持。
   `scripts/migrate_sqlite_to_pg.py` で Postgres へ移行済み）
