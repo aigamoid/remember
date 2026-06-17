@@ -4,6 +4,44 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-17 — OI-10/OI-20: マルチターン会話履歴 ＋ 回答プロンプトへの現在日時注入
+
+回答が「今日」を過去ログ内の日付（例: 5/6）と誤認するバグ（OI-20）を直し、ついでに
+ずっと未対応だったマルチターン会話（OI-10）を実装した。同ブランチ
+`feature/oi10-multiturn-history`。
+
+### きっかけ（OI-20 のバグ）
+「今日は何の予定？」的な質問で、過去ログの「5/6に集合ね！」がヒットし、**実日付（6/17）でなく
+5/6 を「今日」として回答**していた。調査すると `REWRITER_SYSTEM_PROMPT` には現在日時が
+注入されていたのに、**回答プロンプト `ANSWER_SYSTEM_PROMPT` には現在日時が一切無かった**
+（`engine.answer()` は guild_name と context しか差し込んでいなかった）。回答LLMは「今」を
+知らず、日付付きチャンクの過去/現在を判断できなかった。
+
+### OI-20 の修正（現在日時注入）
+- `src/rag/prompts.py`: `ANSWER_SYSTEM_PROMPT` に `## 現在時刻`（`{current_datetime}`）を追加。
+  「記憶の断片はすべて過去の記録／相対表現・予定は記憶内の日付でなく現在時刻基準で判断」と明記。
+- `src/rag/engine.py`: `answer()` で `_now_str()` を差し込む。
+
+### OI-10 の実装（マルチターン会話履歴・ステートレス設計）
+APIはステートレスのまま、**呼び出し側（Bot/CLI）が直近会話を保持して毎回 history を渡す**方式。
+- `src/rag/llm.py`: `complete()` に `history` 追加。messages を `system → history → user` で構築。
+- `src/rag/engine.py`: `answer()`/`rewrite()` に `history`。`_prep_history()` で検証＋直近
+  `rag.history_max_turns` ペアに丸める。**Rewriter にも history を渡す**ので「それ」「さっきの件」
+  の指示語解決も効く（Rewriter プロンプトのルール2 が初めて機能する）。
+- `src/api.py`: `ChatRequest.history` を追加し素通し。
+- `moimoichan_Discordbot/bot.py`: **チャンネル単位** deque で直近やり取りを保持（1ch＝1会話）。
+  成功時のみ追記。`oracle_client.py` が history を送信。
+- `chat_cli.py`: REPL が履歴保持（`reset` でクリア）。CLIでマルチターンの動作確認が可能。
+- 設定: `rag.history_max_turns`（既定5・0で無効）／ bot config `oracle.history_max_turns`。
+
+### テスト・反映
+- テスト +12件（会話履歴・現在日時注入・messages組み立て）。全 **264 PASS**（Mac・worktree）。
+- 反映には api 再ビルドが必要（`docker compose up -d --build api`）。Bot も再起動。
+- コスト注意（OI-16 とトレードオフ）: history を rewrite/answer 両方に積むため prompt token 増。
+  既定5ペアは控えめ。重ければ `history_max_turns` を下げる。履歴は非永続（再起動で消える）。
+
+---
+
 ## 2026-06-17 — OI-16: 回答1メッセージのコスト最適化（Mac＋GCP検証機に反映）
 
 1問あたり実測 ≈ $0.016 だった回答コストを、品質を保ったまま **約1/5（$0.0032）** まで削減した。
