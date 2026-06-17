@@ -18,6 +18,7 @@ from src.rag.prompts import (
     REWRITER_SYSTEM_PROMPT,
     build_context,
 )
+from src.rag.reranker import Reranker
 from src.usage import compute_cost
 from src.vectorstore import VectorStore
 
@@ -30,6 +31,7 @@ class RagEngine:
         embedder: Embedder,
         llm: ChatLLM,
         usage_recorder: Callable[[list[dict]], None] | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         rag_cfg = cfg.get("rag", {})
         self.rewriter_model: str = rag_cfg.get(
@@ -45,12 +47,18 @@ class RagEngine:
         # 回答出力の上限（OI-16: completionの暴走を防ぐ安全弁）。
         self.answer_max_tokens: int = rag_cfg.get("answer_max_tokens", 1500)
         self.guild_name: str = rag_cfg.get("guild_name", "わいわい")
+        # リランカー（OI-9）。enabled かつ reranker が渡された時のみ有効。
+        # dense で rerank_top_n 件取り、cross-encoder で top_k 件に精選する。
+        rerank_cfg = rag_cfg.get("reranker", {})
+        self.rerank_enabled: bool = bool(rerank_cfg.get("enabled", False))
+        self.rerank_top_n: int = rerank_cfg.get("top_n", 30)
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
         self.store = store
         self.embedder = embedder
         self.llm = llm
         self.usage_recorder = usage_recorder
+        self.reranker = reranker
 
     def _now_str(self) -> str:
         tz = timezone(timedelta(hours=self.tz_offset))
@@ -107,6 +115,31 @@ class RagEngine:
         self._record(events, "rewrite", comp.model, comp.usage)
         return comp.text.strip() or query
 
+    @staticmethod
+    def _doc_for_rerank(hit: dict) -> str:
+        """リランカーに渡すドキュメント文字列。context があれば前置きする。"""
+        ctx = hit.get("context_text")
+        chunk = hit.get("chunk_text", "")
+        return f"{ctx}\n{chunk}" if ctx else chunk
+
+    async def _rerank(
+        self, query: str, hits: list[dict], events: list[dict] | None
+    ) -> list[dict]:
+        """hits を query との関連度で並べ替え、上位 top_k 件を返す。
+        失敗時は dense 順のまま top_k 件にして返す（回答は止めない）。"""
+        docs = [self._doc_for_rerank(h) for h in hits]
+        try:
+            result = await self.reranker.rerank(query, docs, self.top_k)
+        except Exception as e:
+            print(f"[WARN] リランク失敗（dense順で続行）: {e}")
+            return hits[: self.top_k]
+        self._record(
+            events, "rerank", self.reranker.model,
+            Usage(result.total_tokens, 0, result.total_tokens),
+        )
+        reranked = [hits[i] for i in result.order if 0 <= i < len(hits)]
+        return reranked or hits[: self.top_k]
+
     async def answer(
         self,
         guild_id: str,
@@ -129,9 +162,14 @@ class RagEngine:
         emb_model = getattr(self.embedder, "model", "text-embedding-3-small")
         self._record(events, "embedding", emb_model, Usage(emb_tokens, 0, emb_tokens))
 
+        # リランク有効時は多め（rerank_top_n）に取って後で top_k に精選する。
+        use_rerank = self.reranker is not None and self.rerank_enabled
+        candidate_k = max(self.rerank_top_n, self.top_k) if use_rerank else self.top_k
         hits = await asyncio.to_thread(
-            self.store.search, str(guild_id), vector, self.top_k
+            self.store.search, str(guild_id), vector, candidate_k
         )
+        if use_rerank and hits:
+            hits = await self._rerank(rewritten, hits, events)
 
         system = ANSWER_SYSTEM_PROMPT.replace(
             "{guild_name}", guild_name or self.guild_name
