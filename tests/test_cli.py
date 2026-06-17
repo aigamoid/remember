@@ -72,6 +72,27 @@ class TestChatOnce:
         assert result["answer"] == "テスト回答！っ"
         assert result["elapsed"] >= 0
 
+    def test_no_history_key_when_absent(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            cli.requests, "post",
+            lambda url, json, timeout: captured.update(json=json)
+            or FakeResponse(200, dict(SAMPLE)),
+        )
+        cli.chat_once("http://x:8000", "g1", "質問")
+        assert "history" not in captured["json"]
+
+    def test_history_included_in_payload(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            cli.requests, "post",
+            lambda url, json, timeout: captured.update(json=json)
+            or FakeResponse(200, dict(SAMPLE)),
+        )
+        hist = [{"role": "user", "content": "前q"}]
+        cli.chat_once("http://x:8000", "g1", "質問", history=hist)
+        assert captured["json"]["history"] == hist
+
     def test_http_error_raises(self, monkeypatch):
         monkeypatch.setattr(
             cli.requests, "post", lambda url, json, timeout: FakeResponse(500)
