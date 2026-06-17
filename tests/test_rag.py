@@ -346,7 +346,44 @@ class TestConversationHistory:
         engine = RagEngine(cfg, store, FakeEmbedder(), llm)
         hist = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
         asyncio.run(engine.answer("g1", "query", history=hist))
-        assert llm.calls[1]["history"] == []
+        assert llm.calls[1]["history"] == []  # answer
+        assert llm.calls[0]["history"] == []  # rewrite も無効
+
+    def test_history_char_budget_drops_oldest(self, store):
+        # 文字数バジェットを超えたら古いメッセージから落とし、最新を残す
+        _seed(store)
+        cfg = {"rag": {"top_k": 5, "history_max_turns": 10, "history_max_chars": 50}}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm)
+        hist = [
+            {"role": "user", "content": "A" * 40},
+            {"role": "assistant", "content": "B" * 40},
+            {"role": "user", "content": "C" * 40},
+            {"role": "assistant", "content": "D" * 40},  # 最新
+        ]
+        asyncio.run(engine.answer("g1", "query", history=hist))
+        sent = llm.calls[1]["history"]  # answer
+        assert sent == [{"role": "assistant", "content": "D" * 40}]
+
+    def test_rewriter_history_is_narrower_than_answer(self, store):
+        # rewriter には回答側より少ないペアだけ渡す（token 二重計上を抑える）
+        _seed(store)
+        cfg = {"rag": {
+            "top_k": 5, "history_max_turns": 5, "history_max_chars": 10000,
+            "rewriter_history_max_turns": 1, "rewriter_history_max_chars": 10000,
+        }}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm)
+        hist = []
+        for i in range(3):
+            hist.append({"role": "user", "content": f"q{i}"})
+            hist.append({"role": "assistant", "content": f"a{i}"})
+        asyncio.run(engine.answer("g1", "query", history=hist))
+        rw = llm.calls[0]["history"]   # rewrite
+        ans = llm.calls[1]["history"]  # answer
+        assert len(ans) == 6           # 3ペア全部
+        assert len(rw) == 2            # 直近1ペアのみ
+        assert rw[0]["content"] == "q2"
 
 
 # ── usage 計測（usage_recorder） ─────────────────────────────────────────────
