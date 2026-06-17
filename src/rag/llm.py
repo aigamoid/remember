@@ -71,13 +71,20 @@ class ChatLLM:
         user: str,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        history: list[dict] | None = None,
     ) -> Completion:
+        """system → (history) → user の順でメッセージを組み立てて回答を得る。
+
+        history は直近の会話を渡すための {"role": "user"|"assistant",
+        "content": str} のリスト（古い順）。マルチターン対応用（OI-10）。
+        """
+        messages = [{"role": "system", "content": system}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user})
         resp = await self._client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )
