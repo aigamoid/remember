@@ -271,6 +271,20 @@ API 経由のアップロード自体がなくなったため問題消滅。
 
 ---
 
+## OI-19: worker の `Event loop is closed` 警告（無害・既知事項）
+
+GCP検証機の取り込み中、worker ログに `RuntimeError: Event loop is closed`
+（`Task exception was never retrieved` / httpx `AsyncClient.aclose()` 由来）が散発する
+（2026-06-17・重いサーバー取り込み時に確認・60分で3回）。
+
+- **影響なし**: 取り込みは全ジョブ done・`error_message` 空、chunk_index 件数と Qdrant
+  ベクトル数も一致（543=543）。終了時の後始末ログのノイズで、データ・機能に害はない。
+- **原因（推定）**: worker がジョブごとに asyncio ループを回す際、非同期HTTPクライアント
+  （embedder/contextualizer 等）を明示クローズせず、GC時にループ閉鎖後の `aclose()` が走るため。
+- **対応方針**: 急がない。検証が一段落したら根本対応を1コミットで
+  （非同期クライアントを明示 `aclose()` する / ループを跨がない作りにする）。
+  放置するとログに常駐し本物のエラーを埋もれさせるので、いずれ潰す。
+
 ## OI-3: ThreadCollector 未実装
 現在はTextChannelのみ取得。スレッド対応は将来実装。
 `collectors/base.py` のABCは拡張を前提に設計済み。
