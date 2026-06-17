@@ -33,6 +33,9 @@ rag:
   top_k: 10                                   # 検索で取得するチャンク数
   rewriter_max_tokens: 256                    # 書き換え出力の上限（過大なtoken要求で残高不足になるのを防ぐ）
   history_max_turns: 5                        # マルチターン会話で渡す直近やり取りの上限ペア数（0で無効・OI-10）
+  history_max_chars: 4000                      # 履歴の合計文字数バジェット（超過分は古い方から落とす・長い回答のtoken膨張対策）
+  rewriter_history_max_turns: 2               # Query Rewriterに渡す履歴ペア数（指示語解決用に少なめ・token二重計上を抑制）
+  rewriter_history_max_chars: 1000            # Query Rewriterに渡す履歴の文字数バジェット
   guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト（Bot経由なら実サーバー名が優先）
 
 contextualizer:
