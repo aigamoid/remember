@@ -21,6 +21,7 @@ from src.config import load_config
 from src.embedder import Embedder
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM
+from src.rag.reranker import Reranker
 from src.usage import UsageRecorder
 from src.vectorstore import VectorStore
 
@@ -69,7 +70,18 @@ def build_engine(cfg: dict) -> RagEngine:
         api_key=openai_cfg.get("api_key") or os.environ.get("OPENROUTER_API_KEY"),
         base_url=openai_cfg.get("base_url", "https://openrouter.ai/api/v1"),
     )
-    return RagEngine(cfg, store, embedder, llm, usage_recorder=UsageRecorder())
+    # リランカー（OI-9）: 設定で有効な場合のみ生成。APIキーは JINA_API_KEY。
+    rerank_cfg = cfg.get("rag", {}).get("reranker", {})
+    reranker = None
+    if rerank_cfg.get("enabled", False):
+        reranker = Reranker(
+            api_key=os.environ.get("JINA_API_KEY"),
+            model=rerank_cfg.get("model", "jina-reranker-v2-base-multilingual"),
+        )
+    return RagEngine(
+        cfg, store, embedder, llm,
+        usage_recorder=UsageRecorder(), reranker=reranker,
+    )
 
 
 def create_app(engine: Optional[RagEngine] = None) -> FastAPI:

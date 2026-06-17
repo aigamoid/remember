@@ -1,11 +1,21 @@
 # 未解決事項・TODO
 
-## OI-9: ハイブリッド検索・リランキング未実装（Dify比で検索構成が簡素化）
+## OI-9: 検索品質（リランキング / ハイブリッド）
 
-旧Difyフローはキーワード0.6/ベクトル0.4のハイブリッド検索 + Jinaリランカーだったが、
-自前RAGエンジン（2026-06-11移行）はベクトル検索のみ（top_k=10）。
-日本語キーワード検索の品質はDify側も怪しかったため一旦純ベクトルで運用し、
-検索精度に不満が出たら Qdrant のスパースベクトル（BM25系）+ リランカー追加を検討する。
+旧Difyフローはキーワード0.6/ベクトル0.4のハイブリッド検索 + Jinaリランカーだった。
+
+### ✅ Phase 1: リランカー実装済み（2026-06-17・feature/oi9-reranker）
+方式は「dense で多めに取って cross-encoder で精選」（Direction A）。日本語に強く・既存データの
+再インデックス不要・OI-16のコスト方針（多く取って絞る）と整合するため、BM25ハイブリッドより先に採用。
+- `src/rag/reranker.py`: Jina Reranker クライアント（`jina-reranker-v2-base-multilingual`）。
+- `src/rag/engine.py`: `rag.reranker.enabled` の時のみ、dense `top_n`(既定30) → リランクで `top_k` に精選。
+  失敗・キー未設定時は dense 順にフォールバック（回答は止めない）。usage_log に `rerank` を記録。
+- **既定オフ**（`enabled: false`）。有効化には `.env` の `JINA_API_KEY` ＋ `config.yml rag.reranker.enabled: true`。
+- 残: 実データでの品質A/B（top_n・top_k の調整）、pricing単価の実値更新、本番有効化の判断。
+
+### ⬜ Phase 2: スパース(BM25)ハイブリッドは見送り中
+Qdrant native の sparse+dense 融合(RRF)は追加API課金ゼロだが、**日本語のBM25分かち書きが弱い**・
+全チャンク**再インデックス**が必要。Phase 1 のリランクで品質が足りなければ再検討する。
 
 ## OI-10: 会話履歴（マルチターン）対応 ✅ 実装完了（2026-06-17・feature/oi10-multiturn-history）
 

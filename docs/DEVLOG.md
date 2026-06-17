@@ -59,6 +59,43 @@ APIはステートレスのまま、**呼び出し側（Bot/CLI）が直近会�
 
 ---
 
+## 2026-06-17 — OI-9 Phase1: リランカー導入（feature/oi9-reranker）
+
+検索品質を上げるため、dense検索の後段に **cross-encoder リランカー**（Jina API）を追加した。
+方式は「dense で多め(top_n=30)に取って top_k に精選」（Direction A）。
+
+### なぜ Direction A（リランカー）を先に
+- 日本語に強い（多言語cross-encoder）。BM25ハイブリッドは日本語分かち書きが弱い。
+- **既存データの再インデックス不要**（dense indexのまま後段で並べ替えるだけ）。
+- 「多く取って絞る」が OI-16 のコスト方針と噛み合う。
+
+### 変更（worktree運用・1ファイル1コミット）
+- `src/rag/reranker.py`（新規）: Jina Reranker クライアント（httpx）。`RerankResult{order, total_tokens}`。
+  キー未設定/失敗は例外 → 呼び出し側でフォールバック。
+- `src/rag/engine.py`: `rag.reranker.enabled` 時のみ dense `top_n`→リランク→`top_k`。
+  失敗時は dense順にフォールバック（回答は止めない）。usage_log に `rerank` を記録（reranker.model）。
+- `src/api.py`: `build_engine` で enabled 時に Reranker を生成して注入（キーは `JINA_API_KEY`）。
+- `config.yml.example` / `docs/CONFIG.md`: `rag.reranker`（enabled/provider/model/top_n）＋pricing追加。
+- `.env.example`: `JINA_API_KEY`。
+- tests: `test_reranker.py`（httpx MockTransportでJina模擬）＋ `test_rag.py` に TestRerank
+  （並べ替え/候補多取り→top_k/無効時不呼出/失敗フォールバック/usage記録）。
+
+### 決定・安全策
+- **既定オフ**（`enabled: false`）。キー無しでも既存動作は不変。有効化は config＋`JINA_API_KEY`。
+- リランカーは engine に注入する設計（テストは FakeReranker でAPI不要）。
+
+### テスト
+- リランカー＋RAGエンジン: **34 PASS**。全体は 258 PASS。
+- ※DB系テストで `InsufficientPrivilege` が散発したが、これは**複数worktreeが同一ローカル
+  `oracle_test` DBを同時に使う競合**（環境要因・OI-9とは無関係）。単独実行では全て通る。
+
+### 残・次
+- 実データで品質A/B（top_n・top_k 調整）と pricing 実値更新 → 本番有効化の判断。
+- 足りなければ Phase2（BM25ハイブリッド）を再検討。
+- 別件: テストDBのworktree間競合は要対処（DB名をworktreeごとに分ける等）。
+
+---
+
 ## 2026-06-17 — OI-16: 回答1メッセージのコスト最適化（Mac＋GCP検証機に反映）
 
 1問あたり実測 ≈ $0.016 だった回答コストを、品質を保ったまま **約1/5（$0.0032）** まで削減した。
