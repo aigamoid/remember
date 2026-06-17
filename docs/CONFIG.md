@@ -48,6 +48,10 @@ rag:
   top_k: 10                                   # 検索で取得するチャンク数
   history_max_turns: 5                        # マルチターン会話で渡す直近やり取りの上限ペア数（OI-10）
                                               # 0で無効（1問1答に戻す）。大きいほど文脈を保てるがprompt tokenが増える
+  history_max_chars: 4000                      # 履歴の合計文字数バジェット（回答LLM向け・超過分は古い方から落とす）
+                                              # 長い回答が積み重なってtokenが膨張するのを防ぐ安全弁（0で無制限）
+  rewriter_history_max_turns: 2               # Query Rewriterに渡す履歴のペア数（指示語解決には少数で十分）
+  rewriter_history_max_chars: 1000            # 同・文字数バジェット。履歴はrewriterにも乗るため別途絞ってtoken二重計上を抑制
   guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト
                                               # （Bot経由のリクエストでは実サーバー名が優先される）
 
