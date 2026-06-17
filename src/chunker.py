@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from src.db import insert_chunk
+from src.db import fetch_mention_map, insert_chunk
 from src.formatter import format_message_line
 
 
@@ -18,10 +18,11 @@ def generate_chunk_id(anchor_msg_id: str) -> str:
 def _build_chunk_text(
     rows: list[tuple],
     tz_offset: int = 9,
+    mention_map: dict[str, str] | None = None,
 ) -> str:
     """ウィンドウ内のメッセージをテキスト化する。タイムスタンプは UTC→指定オフセットに変換。"""
     lines = [
-        format_message_line(author, content, ts, bool(has_att), tz_offset)
+        format_message_line(author, content, ts, bool(has_att), tz_offset, mention_map)
         for _, author, content, ts, has_att in rows
     ]
     return "\n".join(lines)
@@ -46,11 +47,12 @@ def _flush_buffer(
     guild_id: str,
     channel_id: str,
     tz_offset: int,
+    mention_map: dict[str, str] | None = None,
 ) -> None:
     """バッファの内容を chunk_index に書き込む。buffer は空でないこと。"""
     anchor_msg_id = buffer[0][0]
     chunk_id = generate_chunk_id(anchor_msg_id)
-    chunk_text = _build_chunk_text(buffer, tz_offset)
+    chunk_text = _build_chunk_text(buffer, tz_offset, mention_map)
     insert_chunk(conn, chunk_id, guild_id, anchor_msg_id, channel_id, chunk_text)
 
 
@@ -63,6 +65,7 @@ def _process_channel(
     min_len: int,
     tz_offset: int,
     short_reply_max_chars: int = 10,
+    mention_map: dict[str, str] | None = None,
 ) -> int:
     """1チャンネル分を時間ギャップ方式で処理し、生成チャンク数を返す。"""
     rows = conn.execute(
@@ -93,7 +96,7 @@ def _process_channel(
                     buffer.append(row)
                     # prev_ts 更新なし（ギャップ計算を通常メッセージ基準に保つ）
                     if len(buffer) >= max_chunk_messages:
-                        _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset)
+                        _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset, mention_map)
                         chunk_count += 1
                         buffer = []
                     continue
@@ -112,7 +115,7 @@ def _process_channel(
             should_split = True
 
         if should_split and buffer:
-            _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset)
+            _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset, mention_map)
             chunk_count += 1
             buffer = []
 
@@ -120,7 +123,7 @@ def _process_channel(
         prev_ts = curr_ts
 
     if buffer:
-        _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset)
+        _flush_buffer(conn, buffer, guild_id, channel_id, tz_offset, mention_map)
         chunk_count += 1
 
     return chunk_count
@@ -154,12 +157,15 @@ def run_chunker(
             (guild_id,),
         ).fetchall()
 
+    # <@ID> → 表示名 の対応表を一度だけ構築して各チャンネルで使い回す（OI-18）
+    mention_map = fetch_mention_map(conn, guild_id)
+
     total = 0
     for ch_guild_id, channel_id in channels:
         count = _process_channel(
             conn, ch_guild_id, channel_id,
             time_gap_minutes, max_chunk_messages, min_len, tz_offset,
-            short_reply_max_chars,
+            short_reply_max_chars, mention_map,
         )
         total += count
         conn.commit()

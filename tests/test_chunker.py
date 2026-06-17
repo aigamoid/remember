@@ -241,6 +241,27 @@ class TestRunChunker:
         assert "次のテストメッセージです" in row[0]
         assert "[2024-01-01 21:00]" in row[0]  # UTC→JST(+9)
 
+    def test_resolves_mentions_in_chunk_text(self, conn):
+        """本文中の <@author_id> が @表示名 に解決される（OI-18）"""
+        # author_id=111 が「アリス」として発言 → 別メッセージの <@111> を解決できる
+        _insert_msg(conn, "m1", "ch1", "おはようみんな今日もよろしく", author="アリス",
+                    timestamp="2024-01-01T12:00:00+00:00")
+        conn.execute(
+            "INSERT INTO messages "
+            "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("m0", "g1", "ch1", "ch", "111", "アリス", "やっほー元気にしてた？",
+             "2023-12-31T12:00:00+00:00", 0),
+        )
+        _insert_msg(conn, "m2", "ch1", "ねえ <@111> ちょっと聞きたい", author="ボブ",
+                    timestamp="2024-01-01T12:01:00+00:00")
+        conn.commit()
+
+        run_chunker(conn, _make_cfg(), "run-1")
+        texts = " ".join(r[0] for r in conn.execute("SELECT chunk_text FROM chunk_index").fetchall())
+        assert "@アリス" in texts
+        assert "<@111>" not in texts
+
 
 # ── _is_noise ───────────────────────────────────────────────────────────────
 
