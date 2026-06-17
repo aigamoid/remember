@@ -82,6 +82,26 @@ sh scripts/install_hooks.sh
 - コミット粒度: **1ファイル単位**
 - **プッシュは人間が手動で行う。Claude Codeはpushコマンドを実行しないこと**
 
+### 複数セッション・並行ブランチ運用（git worktree 必須）
+
+**背景:** 複数の Claude Code セッションが同時に走ることがある。1つの作業ディレクトリで
+`git checkout`/`switch` してブランチを切り替えると、**他セッションの作業ツリーを巻き込んで
+事故る**（実際にコミットが意図しないブランチに乗る事例が発生・2026-06-16）。これを防ぐため、
+**別ブランチの作業は git worktree で物理的に分ける**。
+
+**ルール:**
+- メイン作業ディレクトリ（`~/Desktop/waiwai-oracle`）の**チェックアウト中ブランチを勝手に切り替えない**。
+- 別ブランチで作業するときは新しい worktree を作る（メインを汚さない）:
+  - 既存ブランチ: `git worktree add ../remember-<topic> <branch>`
+  - 新規ブランチ: `git worktree add ../remember-<topic> -b feature/<topic>`
+  - 例: `git worktree add ../remember-oi18 feature/oi18-mention-resolution`
+- 作業前・コミット前に必ず `git branch --show-current` で**今いるブランチを確認**する。
+- **1ブランチ＝1 worktree**（gitが同一ブランチの二重チェックアウトを禁止＝衝突を自動で防ぐ）。
+- 別の worktree へ commit/push する場合は `git -C <worktree-path> ...` を使い、`cd` でメインを離れない。
+- 終わったら `git worktree remove <path>` で撤去（マージ後など）。
+- **他セッションが使用中の worktree/ブランチには触れない。** reset/rebase/force-push 等の履歴書き換えは
+  単独で行わず、関係セッションと足並みを揃えてから実施する（[[グローバル: 同一スコープは単一ライター]]）。
+
 ## 技術スタック
 
 - Python 3.11+
