@@ -7,10 +7,30 @@
 日本語キーワード検索の品質はDify側も怪しかったため一旦純ベクトルで運用し、
 検索精度に不満が出たら Qdrant のスパースベクトル（BM25系）+ リランカー追加を検討する。
 
-## OI-10: 会話履歴（マルチターン）非対応
+## OI-10: 会話履歴（マルチターン）対応 ✅ 実装完了（2026-06-17・feature/oi10-multiturn-history）
 
-自前API化に伴い conversation_id を廃止（DEVLOG 2026-03-25 の「無効化プラン」を実施）。
-現状は1問1答。マルチターンが必要になったら Bot 側で直近の会話を API に渡す設計を検討。
+自前API化に伴い conversation_id を廃止（DEVLOG 2026-03-25 の「無効化プラン」を実施）して
+1問1答だった。**Bot/CLI が呼び出し側で直近会話を保持し、毎回 history として API に渡す**
+ステートレス設計で対応した（旧 conversation_id 方式は復活させない）。
+
+**実装方式:**
+- `src/rag/llm.py`: `complete()` に `history`（古い順 `{"role","content"}` リスト）を追加。
+  messages を `system → history → user` の順で組み立てる。
+- `src/rag/engine.py`: `answer()`/`rewrite()` に `history` を追加。`_prep_history()` で
+  role/content を検証し直近 `rag.history_max_turns` ペアに丸める。**回答LLMだけでなく
+  Query Rewriter にも渡す**ので「それ」「さっきの件」等の指示語解決も効く。
+- `src/api.py`: `ChatRequest.history` を追加し `answer()` へ素通し。
+- `moimoichan_Discordbot/`: `bot.py` が**チャンネル単位** deque で直近やり取りを保持
+  （1チャンネル＝1会話）。`oracle_client.py` が history を送る。
+- `chat_cli.py`: REPL が履歴を保持（`reset` でクリア）。
+- 設定: `rag.history_max_turns`（既定5・0で無効）／ bot config `oracle.history_max_turns`。
+- テスト +12件（計264 PASS）。
+
+**残・要確認(人間):**
+- コスト: history を rewrite/answer 両方に積むため prompt token が増える（OI-16 とトレードオフ）。
+  既定5ペアは控えめ設定。重ければ `history_max_turns` を下げる。
+- 履歴はメモリ上のみ（Bot 再起動で消える・永続化しない）。当面これで十分の想定。
+- 関連: OI-16（コスト）/ OI-20（現在日時注入を同ブランチで同時対応）
 
 ## ~~OI-11: SaaS化ステップ2（マルチテナント自動取り込み）~~ ✅ 実装完了 (2026-06-11)
 
@@ -287,6 +307,23 @@ GCP検証機の取り込み中、worker ログに `RuntimeError: Event loop is c
 - **対応方針**: 急がない。検証が一段落したら根本対応を1コミットで
   （非同期クライアントを明示 `aclose()` する / ループを跨がない作りにする）。
   放置するとログに常駐し本物のエラーを埋もれさせるので、いずれ潰す。
+
+## OI-20: 回答LLMが現在日時を知らず過去ログの日付を「今日」と誤認 ✅ 修正済み（2026-06-17・feature/oi10-multiturn-history）
+
+**症状:** 「今日」を実日付（6/17）でなく過去ログ内の日付（例: 5/6）と誤認して回答していた。
+過去メッセージ「5/6に集合ね！」がヒットし、それを今日の予定として答えるなど。
+
+**原因:** `REWRITER_SYSTEM_PROMPT` には `現在の日時（JST）` が注入されていたが、
+**回答プロンプト `ANSWER_SYSTEM_PROMPT` には現在日時が一切入っていなかった**
+（`src/rag/engine.py` の `answer()` は guild_name と context しか差し込んでいなかった）。
+回答LLMは「今」を知らないまま、日付付きチャンクを読んで過去か現在かを判断できなかった。
+
+**修正:** `ANSWER_SYSTEM_PROMPT` に `## 現在時刻` セクション（`{current_datetime}`）を追加し、
+`engine.answer()` で `_now_str()` を差し込む。あわせて「記憶の断片はすべて過去の記録であり、
+相対表現や予定は記憶内の日付でなく現在時刻を基準に判断する」旨の一文を明記
+（日付を渡すだけでなく過去/現在の前後関係を考えさせる）。テストで現在日時が回答プロンプトに
+入ることを検証。OI-10（会話履歴）と同ブランチで対応。
+- 反映には api 再ビルドが必要（`docker compose up -d --build api`）。
 
 ## OI-3: ThreadCollector 未実装
 現在はTextChannelのみ取得。スレッド対応は将来実装。
