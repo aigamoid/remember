@@ -46,6 +46,17 @@ class RagEngine:
         self.answer_max_tokens: int = rag_cfg.get("answer_max_tokens", 1500)
         # マルチターン会話で渡す直近やり取りの上限（user+assistant のペア数・OI-10）。
         self.history_max_turns: int = rag_cfg.get("history_max_turns", 5)
+        # 履歴の合計文字数バジェット（回答LLM向け）。長い回答が積み重なって
+        # token が膨張するのを防ぐ。超えたら古いメッセージから落とす（0で無制限）。
+        self.history_max_chars: int = rag_cfg.get("history_max_chars", 4000)
+        # Query Rewriter に渡す履歴はさらに絞る（指示語解決には直近少数で十分。
+        # rewriter にも履歴を積むと token が二重に増えるため）。
+        self.rewriter_history_max_turns: int = rag_cfg.get(
+            "rewriter_history_max_turns", 2
+        )
+        self.rewriter_history_max_chars: int = rag_cfg.get(
+            "rewriter_history_max_chars", 1000
+        )
         self.guild_name: str = rag_cfg.get("guild_name", "わいわい")
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
@@ -58,14 +69,18 @@ class RagEngine:
         tz = timezone(timedelta(hours=self.tz_offset))
         return datetime.now(tz).strftime("%Y-%m-%d %H:%M JST")
 
-    def _prep_history(self, history: list[dict] | None) -> list[dict]:
+    def _prep_history(
+        self, history: list[dict] | None, max_turns: int, max_chars: int
+    ) -> list[dict]:
         """呼び出し側から渡された会話履歴を検証して LLM に渡せる形に整える。
 
-        role が user/assistant で content が非空の要素だけ残し、直近
-        history_max_turns ペア（= history_max_turns*2 メッセージ）に丸める。
-        戻り値は古い順の [{"role", "content"}, ...]（OI-10）。
+        role が user/assistant で content が非空の要素だけ残し、(1) 直近
+        max_turns ペア（= max_turns*2 メッセージ）に丸めたうえで、(2) 合計
+        content が max_chars 文字以内に収まるよう古いメッセージから落とす
+        （max_chars<=0 で文字数制限なし）。長い回答の積み重ねによる token 膨張を
+        防ぐ（OI-10）。戻り値は古い順の [{"role", "content"}, ...]。
         """
-        if not history:
+        if not history or max_turns <= 0:
             return []
         cleaned = [
             {"role": h["role"], "content": str(h["content"])}
@@ -74,8 +89,19 @@ class RagEngine:
             and h.get("role") in ("user", "assistant")
             and str(h.get("content") or "").strip()
         ]
-        limit = self.history_max_turns * 2
-        return cleaned[-limit:] if limit > 0 else []
+        cleaned = cleaned[-(max_turns * 2):]
+        if max_chars and max_chars > 0:
+            # 新しい方から積み、バジェットを超えたら打ち切る（最低1件は残す）。
+            kept: list[dict] = []
+            total = 0
+            for m in reversed(cleaned):
+                c = len(m["content"])
+                if kept and total + c > max_chars:
+                    break
+                kept.append(m)
+                total += c
+            cleaned = list(reversed(kept))
+        return cleaned
 
     def _record(
         self,
@@ -155,8 +181,17 @@ class RagEngine:
         クエリ書き換えと回答の両方が会話文脈を踏まえる（マルチターン・OI-10）。
         """
         events: list[dict] = []
-        hist = self._prep_history(history)
-        rewritten = await self.rewrite(query, events, history=hist)
+        # 回答LLM向け（広め）と Query Rewriter 向け（狭め）で別々に整える。
+        # rewriter のペア数は回答側を超えないようにする。
+        hist_ans = self._prep_history(
+            history, self.history_max_turns, self.history_max_chars
+        )
+        hist_rw = self._prep_history(
+            history,
+            min(self.rewriter_history_max_turns, self.history_max_turns),
+            self.rewriter_history_max_chars,
+        )
+        rewritten = await self.rewrite(query, events, history=hist_rw)
 
         vector, emb_tokens = await asyncio.to_thread(
             self.embedder.embed_one_with_usage, rewritten
@@ -176,7 +211,7 @@ class RagEngine:
         comp = await self.llm.complete(
             self.answer_model, system, query,
             temperature=0.7, max_tokens=self.answer_max_tokens,
-            history=hist,
+            history=hist_ans,
         )
         self._record(events, "answer", comp.model, comp.usage)
 
