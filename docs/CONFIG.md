@@ -45,14 +45,20 @@ embedding:
 rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
   answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
-  top_k: 10                                   # 検索で取得するチャンク数
+  top_k: 10                                   # 回答に渡すチャンク数（リランク有効時はリランク後の件数）
   guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト
                                               # （Bot経由のリクエストでは実サーバー名が優先される）
+  reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
+    enabled: false                            # true で有効化（要 .env の JINA_API_KEY）
+    provider: "jina"                          # 現状 jina のみ対応
+    model: "jina-reranker-v2-base-multilingual"
+    top_n: 30                                 # リランク前に dense で取る候補数（→ top_k 件に精選）
 
 pricing:                              # usage_log のコスト推定に使う単価（USD/100万トークン）
   "google/gemini-2.5-flash": {input: 0.30, output: 2.50}
   "moonshotai/kimi-k2-0905": {input: 0.60, output: 2.50}
   "text-embedding-3-small":  {input: 0.02, output: 0.0}
+  "jina-reranker-v2-base-multilingual": {input: 0.02, output: 0.0}  # ※概算・要更新
 
 worker:
   poll_interval_seconds: 10  # ingest_jobs キューの確認間隔（秒）
