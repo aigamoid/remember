@@ -37,6 +37,9 @@ class ChatRequest(BaseModel):
     query: str
     user: Optional[str] = None  # ログ用（"channel_id:user_id" 形式を想定）
     guild_name: Optional[str] = None  # プロンプト用サーバー名（未指定なら config の値）
+    # 直近の会話履歴（マルチターン・OI-10）。{"role": "user"|"assistant",
+    # "content": str} の古い順リスト。呼び出し側（Bot/CLI）が保持して渡す。
+    history: Optional[list[dict]] = None
 
 
 class ChatResponse(BaseModel):
@@ -96,7 +99,7 @@ def create_app(engine: Optional[RagEngine] = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="query が空です")
         result = await app.state.engine.answer(
             req.guild_id, req.query, guild_name=req.guild_name,
-            user_id=_parse_user_id(req.user),
+            user_id=_parse_user_id(req.user), history=req.history,
         )
         return ChatResponse(**result)
 
