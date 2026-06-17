@@ -44,6 +44,8 @@ class RagEngine:
         self.rewriter_max_tokens: int = rag_cfg.get("rewriter_max_tokens", 256)
         # 回答出力の上限（OI-16: completionの暴走を防ぐ安全弁）。
         self.answer_max_tokens: int = rag_cfg.get("answer_max_tokens", 1500)
+        # マルチターン会話で渡す直近やり取りの上限（user+assistant のペア数・OI-10）。
+        self.history_max_turns: int = rag_cfg.get("history_max_turns", 5)
         self.guild_name: str = rag_cfg.get("guild_name", "わいわい")
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
@@ -55,6 +57,25 @@ class RagEngine:
     def _now_str(self) -> str:
         tz = timezone(timedelta(hours=self.tz_offset))
         return datetime.now(tz).strftime("%Y-%m-%d %H:%M JST")
+
+    def _prep_history(self, history: list[dict] | None) -> list[dict]:
+        """呼び出し側から渡された会話履歴を検証して LLM に渡せる形に整える。
+
+        role が user/assistant で content が非空の要素だけ残し、直近
+        history_max_turns ペア（= history_max_turns*2 メッセージ）に丸める。
+        戻り値は古い順の [{"role", "content"}, ...]（OI-10）。
+        """
+        if not history:
+            return []
+        cleaned = [
+            {"role": h["role"], "content": str(h["content"])}
+            for h in history
+            if isinstance(h, dict)
+            and h.get("role") in ("user", "assistant")
+            and str(h.get("content") or "").strip()
+        ]
+        limit = self.history_max_turns * 2
+        return cleaned[-limit:] if limit > 0 else []
 
     def _record(
         self,
@@ -91,8 +112,17 @@ class RagEngine:
         except Exception as e:  # 計測の失敗で回答を落とさない
             print(f"[WARN] usage flush 失敗: {e}")
 
-    async def rewrite(self, query: str, events: list[dict] | None = None) -> str:
-        """検索用クエリに書き換える。失敗・空応答時は元のクエリを返す。"""
+    async def rewrite(
+        self,
+        query: str,
+        events: list[dict] | None = None,
+        history: list[dict] | None = None,
+    ) -> str:
+        """検索用クエリに書き換える。失敗・空応答時は元のクエリを返す。
+
+        history（直近の会話）を渡すと「それ」「さっきの件」などの指示語を
+        会話文脈から具体化できる（REWRITER_SYSTEM_PROMPT のルール2・OI-10）。
+        """
         system = REWRITER_SYSTEM_PROMPT.replace(
             "{current_datetime}", self._now_str()
         )
@@ -100,6 +130,7 @@ class RagEngine:
             comp = await self.llm.complete(
                 self.rewriter_model, system, query,
                 temperature=0.2, max_tokens=self.rewriter_max_tokens,
+                history=history,
             )
         except Exception as e:
             print(f"[WARN] Query Rewriter 失敗（元クエリで検索続行）: {e}")
@@ -113,15 +144,19 @@ class RagEngine:
         query: str,
         guild_name: str | None = None,
         user_id: str | None = None,
+        history: list[dict] | None = None,
     ) -> dict:
         """質問に回答する。戻り値: {answer, rewritten_query, sources}
 
         guild_name はプロンプトに埋め込むサーバー名。
         未指定なら config の rag.guild_name を使う（単一サーバー時代の互換）。
         user_id は usage_log の集計用（任意）。
+        history は直近の会話（{"role","content"} の古い順リスト）。渡すと
+        クエリ書き換えと回答の両方が会話文脈を踏まえる（マルチターン・OI-10）。
         """
         events: list[dict] = []
-        rewritten = await self.rewrite(query, events)
+        hist = self._prep_history(history)
+        rewritten = await self.rewrite(query, events, history=hist)
 
         vector, emb_tokens = await asyncio.to_thread(
             self.embedder.embed_one_with_usage, rewritten
@@ -135,10 +170,13 @@ class RagEngine:
 
         system = ANSWER_SYSTEM_PROMPT.replace(
             "{guild_name}", guild_name or self.guild_name
-        ).replace("{context}", build_context(hits))
+        ).replace("{current_datetime}", self._now_str()).replace(
+            "{context}", build_context(hits)
+        )
         comp = await self.llm.complete(
             self.answer_model, system, query,
             temperature=0.7, max_tokens=self.answer_max_tokens,
+            history=hist,
         )
         self._record(events, "answer", comp.model, comp.usage)
 
