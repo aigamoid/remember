@@ -21,17 +21,27 @@ def check_health(api_url: str, timeout: int = 5) -> bool:
 
 
 def chat_once(
-    api_url: str, guild_id: str, query: str, timeout: int = 120
+    api_url: str,
+    guild_id: str,
+    query: str,
+    timeout: int = 120,
+    history: list[dict] | None = None,
 ) -> dict:
     """1問送信して応答辞書を返す。経過秒数を elapsed キーに追加する。
+
+    history は直近の会話（{"role", "content"} の古い順リスト）。渡すと
+    マルチターン回答になる（OI-10）。
 
     Raises:
         requests.RequestException: 接続失敗・HTTP 4xx/5xx
     """
     started = time.time()
+    payload = {"guild_id": str(guild_id), "query": query, "user": "cli"}
+    if history:
+        payload["history"] = history
     resp = requests.post(
         f"{api_url.rstrip('/')}/chat",
-        json={"guild_id": str(guild_id), "query": query, "user": "cli"},
+        json=payload,
         timeout=timeout,
     )
     resp.raise_for_status()
