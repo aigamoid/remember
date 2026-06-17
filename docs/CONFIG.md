@@ -46,6 +46,8 @@ rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
   answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
   top_k: 10                                   # 検索で取得するチャンク数
+  history_max_turns: 5                        # マルチターン会話で渡す直近やり取りの上限ペア数（OI-10）
+                                              # 0で無効（1問1答に戻す）。大きいほど文脈を保てるがprompt tokenが増える
   guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト
                                               # （Bot経由のリクエストでは実サーバー名が優先される）
 
