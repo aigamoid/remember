@@ -7,7 +7,8 @@
     python bot.py
 
 応答は waiwai-oracle APIサーバ（src/api.py）から取得する。
-APIはステートレスのため会話履歴は保持しない（conversation_id 廃止）。
+APIはステートレスだが、Bot がチャンネルごとに直近の会話を覚えて毎回 history として
+渡すことでマルチターン対応している（OI-10。旧 conversation_id 方式は廃止済み）。
 
 管理者向けスラッシュコマンド（サーバー管理権限が必要）:
     /oracle allow <channel>  チャンネルの読み取りを許可して取り込みを開始（opt-in）
@@ -21,6 +22,7 @@ APIはステートレスのため会話履歴は保持しない（conversation_i
 import asyncio
 import os
 import sys
+from collections import deque
 from pathlib import Path
 
 import discord
@@ -32,6 +34,7 @@ from oracle_client import OracleClient
 from store import Store
 
 _MAX_REPLY_LEN = 2000  # Discord 文字数制限
+_DEFAULT_HISTORY_MAX_TURNS = 5  # チャンネルごとに覚えておく直近やり取り数（OI-10）
 
 _JOB_STATUS_LABEL = {
     "queued": "⏳ 待機中",
@@ -158,6 +161,15 @@ class MoimoichanBot(discord.Client):
         self.store = store
         self.cfg = cfg
         self.tree = app_commands.CommandTree(self)
+        # チャンネルごとの直近会話履歴（マルチターン・OI-10）。
+        # 1チャンネル＝1つの会話として扱う（グループチャットの自然な単位）。
+        # 各要素は {"role": "user"|"assistant", "content": str}。
+        self._history_max_turns = int(
+            cfg.get("oracle", {}).get(
+                "history_max_turns", _DEFAULT_HISTORY_MAX_TURNS
+            )
+        )
+        self._history: dict[int, deque] = {}
 
     async def setup_hook(self) -> None:
         self.tree.add_command(OracleGroup(self.store))
@@ -194,13 +206,17 @@ class MoimoichanBot(discord.Client):
             return
 
         user = f"{message.channel.id}:{message.author.id}"
+        history = self._get_history(message.channel.id)
 
         async with message.channel.typing():
             try:
                 answer = await self.oracle.chat(
                     query, str(message.guild.id), user,
                     guild_name=message.guild.name,
+                    history=history,
                 )
+                # 成功時のみ会話を記憶（このチャンネルの次ターンへ引き継ぐ）。
+                self._remember_turn(message.channel.id, query, answer)
                 reply = answer[:_MAX_REPLY_LEN]
                 await message.reply(reply or "……（うーん、何も思いつかなかったかも〜 😅）")
             except asyncio.TimeoutError:
@@ -217,6 +233,23 @@ class MoimoichanBot(discord.Client):
                     pass
 
     # ---- 内部ヘルパー ----
+
+    def _get_history(self, channel_id: int) -> list[dict]:
+        """このチャンネルの直近会話を古い順で返す（API へ渡す形）。"""
+        buf = self._history.get(channel_id)
+        return list(buf) if buf else []
+
+    def _remember_turn(self, channel_id: int, query: str, answer: str) -> None:
+        """1ターン（ユーザー質問＋Bot回答）を履歴に追記する。
+        maxlen で直近 history_max_turns ペアだけ保持する。"""
+        if self._history_max_turns <= 0:
+            return
+        buf = self._history.get(channel_id)
+        if buf is None:
+            buf = deque(maxlen=self._history_max_turns * 2)
+            self._history[channel_id] = buf
+        buf.append({"role": "user", "content": query})
+        buf.append({"role": "assistant", "content": answer})
 
     def _should_respond(self, message: discord.Message) -> bool:
         dcfg = self.cfg.get("discord", {})

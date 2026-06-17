@@ -15,9 +15,17 @@ class OracleClient:
         self._timeout = aiohttp.ClientTimeout(total=timeout)
 
     async def chat(
-        self, query: str, guild_id: str, user: str, guild_name: str | None = None
+        self,
+        query: str,
+        guild_id: str,
+        user: str,
+        guild_name: str | None = None,
+        history: list[dict] | None = None,
     ) -> str:
         """質問を送り回答テキストを返す。
+
+        history は直近の会話（{"role": "user"|"assistant", "content": str} の
+        古い順リスト）。渡すとマルチターン回答になる（OI-10）。
 
         Raises:
             aiohttp.ClientResponseError: HTTP 4xx/5xx
@@ -26,6 +34,8 @@ class OracleClient:
         payload = {"guild_id": str(guild_id), "query": query, "user": user}
         if guild_name:
             payload["guild_name"] = guild_name
+        if history:
+            payload["history"] = history
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
             async with session.post(f"{self._base}/chat", json=payload) as resp:
                 resp.raise_for_status()

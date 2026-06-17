@@ -4,6 +4,61 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-17 — OI-10/OI-20: マルチターン会話履歴 ＋ 回答プロンプトへの現在日時注入
+
+回答が「今日」を過去ログ内の日付（例: 5/6）と誤認するバグ（OI-20）を直し、ついでに
+ずっと未対応だったマルチターン会話（OI-10）を実装した。同ブランチ
+`feature/oi10-multiturn-history`。
+
+### きっかけ（OI-20 のバグ）
+「今日は何の予定？」的な質問で、過去ログの「5/6に集合ね！」がヒットし、**実日付（6/17）でなく
+5/6 を「今日」として回答**していた。調査すると `REWRITER_SYSTEM_PROMPT` には現在日時が
+注入されていたのに、**回答プロンプト `ANSWER_SYSTEM_PROMPT` には現在日時が一切無かった**
+（`engine.answer()` は guild_name と context しか差し込んでいなかった）。回答LLMは「今」を
+知らず、日付付きチャンクの過去/現在を判断できなかった。
+
+### OI-20 の修正（現在日時注入）
+- `src/rag/prompts.py`: `ANSWER_SYSTEM_PROMPT` に `## 現在時刻`（`{current_datetime}`）を追加。
+  「記憶の断片はすべて過去の記録／相対表現・予定は記憶内の日付でなく現在時刻基準で判断」と明記。
+- `src/rag/engine.py`: `answer()` で `_now_str()` を差し込む。
+
+### OI-10 の実装（マルチターン会話履歴・ステートレス設計）
+APIはステートレスのまま、**呼び出し側（Bot/CLI）が直近会話を保持して毎回 history を渡す**方式。
+- `src/rag/llm.py`: `complete()` に `history` 追加。messages を `system → history → user` で構築。
+- `src/rag/engine.py`: `answer()`/`rewrite()` に `history`。`_prep_history()` で検証＋直近
+  `rag.history_max_turns` ペアに丸める。**Rewriter にも history を渡す**ので「それ」「さっきの件」
+  の指示語解決も効く（Rewriter プロンプトのルール2 が初めて機能する）。
+- `src/api.py`: `ChatRequest.history` を追加し素通し。
+- `moimoichan_Discordbot/bot.py`: **チャンネル単位** deque で直近やり取りを保持（1ch＝1会話）。
+  成功時のみ追記。`oracle_client.py` が history を送信。
+- `chat_cli.py`: REPL が履歴保持（`reset` でクリア）。CLIでマルチターンの動作確認が可能。
+- 設定: `rag.history_max_turns`（既定5・0で無効）／ bot config `oracle.history_max_turns`。
+
+### テスト・反映
+- テスト +14件（会話履歴・現在日時注入・messages組み立て・履歴バジェット）。全 **266 PASS**（Mac・worktree）。
+- 反映には api 再ビルドが必要（`docker compose up -d --build api`）。Bot も再起動。
+- 履歴は非永続（Bot/CLI のメモリ上のみ・再起動で消える）。
+
+### A/B検証（ローカル31チャンク）と本データでのコスト計測（VM 1,100チャンクをローカルへコピー）
+- **精度（OI-20/OI-10）**: 「今日は何日？」→ 旧:答えられない / 新:2026-06-17。「Moltbook制限は今解除？」→
+  旧:2月を"今"と誤認し「まだ停止中かも」/ 新:「現在6/17なのでとっくに解除済み」。指示語「それ」を含む
+  2ターン目 → 旧:全く別話題を回答 / 新:文脈を保持。**報告の日付誤認バグの再現→解消を確認**。
+- **5ペア履歴のコスト（同一質問を履歴0 vs 5ペアで計測・deepseek-v3.2）**:
+  - 履歴0: 入力4,348tok / **$0.00130**　→　履歴5ペア: 入力9,633tok / **$0.00325**（約2.5倍・+$0.00195/問）。
+  - 内訳: answer入力 +2,783tok、**rewrite入力 +2,039tok**（履歴はrewriterにも乗り二重計上）。
+  - 絶対額は安いが、`answer_max_tokens=1500` のため最悪時は履歴だけで~7,500tok×2になり得る。
+
+### 追加対応: 履歴のトークン（文字数）バジェット制御（上記コスト計測を受けて）
+- `_prep_history(history, max_turns, max_chars)` に**文字数バジェット**を追加（ペア数で丸めた後、
+  合計が `history_max_chars` 以内に収まるよう古いメッセージから落とす）。
+- **回答LLM向け（広め）と Query Rewriter 向け（狭め）で別々に整形**。rewriter は
+  `rewriter_history_max_turns`(既定2)・`rewriter_history_max_chars`(既定1000) でさらに絞り、
+  指示語解決に必要な最小限だけ渡して token 二重計上を抑える。
+- 新config: `rag.history_max_chars`(4000) / `rag.rewriter_history_max_turns`(2) /
+  `rag.rewriter_history_max_chars`(1000)。`history_max_turns=0` は両方を完全無効化。
+
+---
+
 ## 2026-06-17 — OI-9 Phase1: リランカー導入（feature/oi9-reranker）
 
 検索品質を上げるため、dense検索の後段に **cross-encoder リランカー**（Jina API）を追加した。

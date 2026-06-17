@@ -8,7 +8,7 @@ import pytest
 from qdrant_client import QdrantClient
 
 from src.rag.engine import RagEngine
-from src.rag.llm import Completion, Usage, strip_think
+from src.rag.llm import ChatLLM, Completion, Usage, strip_think
 from src.rag.prompts import build_context
 from src.rag.reranker import RerankResult
 from src.vectorstore import VectorStore
@@ -24,11 +24,14 @@ class FakeLLM:
         self._responses = list(responses)
         self.calls: list[dict] = []
 
-    async def complete(self, model, system, user, temperature=0.7, max_tokens=None):
+    async def complete(
+        self, model, system, user, temperature=0.7, max_tokens=None, history=None
+    ):
         self.calls.append(
             {
                 "model": model, "system": system, "user": user,
                 "temperature": temperature, "max_tokens": max_tokens,
+                "history": history,
             }
         )
         resp = self._responses.pop(0)
@@ -140,6 +143,61 @@ class TestStripThink:
 
     def test_no_tag_unchanged(self):
         assert strip_think("そのまま") == "そのまま"
+
+
+# ── ChatLLM.complete のメッセージ組み立て ───────────────────────────────────
+
+class _RecordingClient:
+    """OpenAI互換クライアントの最小フェイク。create に渡された messages を記録する。"""
+
+    def __init__(self) -> None:
+        self.captured: dict = {}
+        outer = self
+
+        class _Completions:
+            async def create(self, *, model, messages, temperature, max_tokens):
+                outer.captured = {"model": model, "messages": messages}
+
+                class _Msg:
+                    content = "応答本文"
+
+                class _Choice:
+                    message = _Msg()
+
+                class _Resp:
+                    choices = [_Choice()]
+                    usage = None
+
+                return _Resp()
+
+        class _Chat:
+            completions = _Completions()
+
+        self.chat = _Chat()
+
+
+class TestChatLLMMessages:
+    def test_without_history_system_then_user(self):
+        client = _RecordingClient()
+        llm = ChatLLM(client=client)
+        asyncio.run(llm.complete("m", "システム", "ユーザー"))
+        roles = [m["role"] for m in client.captured["messages"]]
+        assert roles == ["system", "user"]
+
+    def test_history_inserted_between_system_and_user(self):
+        client = _RecordingClient()
+        llm = ChatLLM(client=client)
+        hist = [
+            {"role": "user", "content": "前q"},
+            {"role": "assistant", "content": "前a"},
+        ]
+        asyncio.run(llm.complete("m", "システム", "今のq", history=hist))
+        msgs = client.captured["messages"]
+        assert [m["role"] for m in msgs] == [
+            "system", "user", "assistant", "user"
+        ]
+        assert msgs[1]["content"] == "前q"
+        assert msgs[-1]["content"] == "今のq"
 
 
 # ── build_context ───────────────────────────────────────────────────────────
@@ -265,6 +323,111 @@ class TestAnswer:
         engine = RagEngine(cfg, store, FakeEmbedder(), llm)
         asyncio.run(engine.answer("g1", "query"))
         assert "コンフィグ名" in llm.calls[1]["system"]
+
+    def test_current_datetime_injected_into_answer_prompt(self, store):
+        # OI-20: 回答プロンプトにも現在日時を入れる（過去ログの日付を「今日」と誤認しない）
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(_engine(store, llm).answer("g1", "query"))
+        answer_system = llm.calls[1]["system"]
+        assert "{current_datetime}" not in answer_system
+        assert "今は 20" in answer_system  # _now_str() の "YYYY-..." が埋まっている
+
+
+# ── マルチターン会話履歴（OI-10） ────────────────────────────────────────────
+
+class TestConversationHistory:
+    def test_history_passed_to_both_rewrite_and_answer(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        hist = [
+            {"role": "user", "content": "前の質問"},
+            {"role": "assistant", "content": "前の回答"},
+        ]
+        asyncio.run(_engine(store, llm).answer("g1", "それ詳しく", history=hist))
+        assert llm.calls[0]["history"] == hist  # rewrite
+        assert llm.calls[1]["history"] == hist  # answer
+
+    def test_history_none_passes_empty_list(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(_engine(store, llm).answer("g1", "query"))
+        assert llm.calls[0]["history"] == []
+        assert llm.calls[1]["history"] == []
+
+    def test_history_capped_to_max_turns(self, store):
+        _seed(store)
+        cfg = {"rag": {"top_k": 5, "history_max_turns": 2}}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm)
+        # 4ペア(8件)渡しても直近2ペア(4件)に丸められる
+        hist = []
+        for i in range(4):
+            hist.append({"role": "user", "content": f"q{i}"})
+            hist.append({"role": "assistant", "content": f"a{i}"})
+        asyncio.run(engine.answer("g1", "query", history=hist))
+        sent = llm.calls[1]["history"]
+        assert len(sent) == 4
+        assert sent[0]["content"] == "q2"
+
+    def test_prep_history_drops_invalid_entries(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        hist = [
+            {"role": "system", "content": "捨てられる"},   # role不正
+            {"role": "user", "content": "   "},            # 空内容
+            {"role": "assistant", "content": "残る"},
+            {"foo": "bar"},                                # 不正な形
+        ]
+        asyncio.run(_engine(store, llm).answer("g1", "query", history=hist))
+        sent = llm.calls[1]["history"]
+        assert sent == [{"role": "assistant", "content": "残る"}]
+
+    def test_history_max_turns_zero_disables(self, store):
+        _seed(store)
+        cfg = {"rag": {"top_k": 5, "history_max_turns": 0}}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm)
+        hist = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+        asyncio.run(engine.answer("g1", "query", history=hist))
+        assert llm.calls[1]["history"] == []  # answer
+        assert llm.calls[0]["history"] == []  # rewrite も無効
+
+    def test_history_char_budget_drops_oldest(self, store):
+        # 文字数バジェットを超えたら古いメッセージから落とし、最新を残す
+        _seed(store)
+        cfg = {"rag": {"top_k": 5, "history_max_turns": 10, "history_max_chars": 50}}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm)
+        hist = [
+            {"role": "user", "content": "A" * 40},
+            {"role": "assistant", "content": "B" * 40},
+            {"role": "user", "content": "C" * 40},
+            {"role": "assistant", "content": "D" * 40},  # 最新
+        ]
+        asyncio.run(engine.answer("g1", "query", history=hist))
+        sent = llm.calls[1]["history"]  # answer
+        assert sent == [{"role": "assistant", "content": "D" * 40}]
+
+    def test_rewriter_history_is_narrower_than_answer(self, store):
+        # rewriter には回答側より少ないペアだけ渡す（token 二重計上を抑える）
+        _seed(store)
+        cfg = {"rag": {
+            "top_k": 5, "history_max_turns": 5, "history_max_chars": 10000,
+            "rewriter_history_max_turns": 1, "rewriter_history_max_chars": 10000,
+        }}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm)
+        hist = []
+        for i in range(3):
+            hist.append({"role": "user", "content": f"q{i}"})
+            hist.append({"role": "assistant", "content": f"a{i}"})
+        asyncio.run(engine.answer("g1", "query", history=hist))
+        rw = llm.calls[0]["history"]   # rewrite
+        ans = llm.calls[1]["history"]  # answer
+        assert len(ans) == 6           # 3ペア全部
+        assert len(rw) == 2            # 直近1ペアのみ
+        assert rw[0]["content"] == "q2"
 
 
 # ── usage 計測（usage_recorder） ─────────────────────────────────────────────
