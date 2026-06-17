@@ -171,9 +171,12 @@ VM `remember-vm`(100.98.83.15) で6サービス本番稼働、取り込み→@�
   - 感情モデル・ENTJ/ENTP等の強いキャラ属性を削除
   - `config.yml.example` の `guild_name` デフォルトを「わいわい」→「みんなのサーバー」に変更
   - 履歴として `prompts/v3_remi_rebrand.md` を追加し、`prompts/README.md` 更新
-- 反映: プロンプト変更後は **api コンテナを再ビルド**（`docker compose up -d --build api`）。
+  - `moimoichan_Discordbot/bot.py` の各種応答メッセージもれみちゃん口調に統一
+  - `README.md`/`docker-compose.yml`/`docs/ARCHITECTURE.md`/`docs/DIAGRAMS.md` も併記更新
+- 反映: プロンプト・Bot 口調の変更後は **api / bot コンテナを再ビルド**（`docker compose up -d --build api bot`）。
   プロンプトは `prompts/` でのバージョン管理運用（DEVLOG 2026-03-23）に倣うと履歴が追える。
 - 関連: OI-14（パブリック化） / 名称検討（codename remember） / OI-16（プロンプト圧縮）
+- 検証: テスト 253件 PASS（2026-06-17）
 
 ## OI-16: 回答1メッセージのコスト最適化（実測が高い）
 
