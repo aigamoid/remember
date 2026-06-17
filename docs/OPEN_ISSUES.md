@@ -24,12 +24,15 @@
   （1チャンネル＝1会話）。`oracle_client.py` が history を送る。
 - `chat_cli.py`: REPL が履歴を保持（`reset` でクリア）。
 - 設定: `rag.history_max_turns`（既定5・0で無効）／ bot config `oracle.history_max_turns`。
-- テスト +12件（計264 PASS）。
+- **コスト制御**: 履歴は rewrite/answer 両方に乗るため token が二重計上される（VM本データで実測:
+  5ペアで1問あたり約2.5倍 $0.00130→$0.00325）。対策として `_prep_history` に**文字数バジェット**を追加し、
+  rewriter には別枠でさらに少なく渡す。新config: `rag.history_max_chars`(4000) /
+  `rag.rewriter_history_max_turns`(2) / `rag.rewriter_history_max_chars`(1000)。
+- テスト +14件（計266 PASS）。
 
 **残・要確認(人間):**
-- コスト: history を rewrite/answer 両方に積むため prompt token が増える（OI-16 とトレードオフ）。
-  既定5ペアは控えめ設定。重ければ `history_max_turns` を下げる。
 - 履歴はメモリ上のみ（Bot 再起動で消える・永続化しない）。当面これで十分の想定。
+- バジェット既定値（4000字等）は実運用のコスト/品質を見て調整余地あり。
 - 関連: OI-16（コスト）/ OI-20（現在日時注入を同ブランチで同時対応）
 
 ## ~~OI-11: SaaS化ステップ2（マルチテナント自動取り込み）~~ ✅ 実装完了 (2026-06-11)
