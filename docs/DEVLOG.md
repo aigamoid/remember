@@ -4,6 +4,33 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-17 — OI-16: 回答1メッセージのコスト最適化（Mac＋GCP検証機に反映）
+
+1問あたり実測 ≈ $0.016 だった回答コストを、品質を保ったまま **約1/5（$0.0032）** まで削減した。
+
+### 変更（バランス案）
+- `config.yml rag.top_k` 10→5（回答 context をほぼ半減・最大のレバー）。
+- `config.yml rag.answer_max_tokens: 1500` 新設＋`src/rag/engine.py` の answer 呼び出しに `max_tokens` を渡す
+  （completion の暴走を防ぐ安全弁）。
+- `config.yml rag.answer_model` を Kimi K2 → **DeepSeek V3.2** に変更。`pricing` も OpenRouter 実価格へ更新。
+- `scripts/ab_cost_test.py` 追加（同一質問・同一検索結果で複数モデルのコスト/回答を並べて比較する手動計測）。
+
+### A/B計測（同一context・top_k=5・2問）
+- Kimi K2: $0.0058 / $0.0094（平均 ≈ $0.0076/問）
+- DeepSeek V3.2: $0.0017 / $0.0029（平均 ≈ $0.0023/問・約1/3）。
+  キャラ語尾「！っ」・絵文字・Markdown構造も維持で品質劣化なし。
+
+### GCP検証機への反映・実機検証
+- `config.yml` は gitignore のため、Mac版 `config.yml`＋`src/rag/engine.py` を VM(`remember-vm`) へ scp 転送し
+  `docker compose up -d --build`（転送前に VM の config.yml と diff し差分が今回の4点のみ＝VM固有値なしを確認）。
+- VM の `usage_log` で before/after を実証: **kimi-k2 $0.01625（25,915 tok）→ deepseek-v3.2 $0.00315（12,572 tok）＝約1/5**。
+- 別サーバー（9,728メッセージ）の取り込みテストも実施し、全ジョブ done・chunk_index=Qdrantベクトル数が一致＝整合OK。
+
+### 副産物
+- `わいわい本番Discordサーバーは検証でも使用禁止・データは検証用に残置OK` という方針を確認（メモリ記録）。
+- worker に無害な `RuntimeError: Event loop is closed`（httpx 後始末ログ）が散発 → **OI-19** として既知事項に記録。
+  根本対応（非同期クライアント明示クローズ）は検証一段落後に。
+
 ## 2026-06-15 — GCP移行（lift-and-shift・検証機/ステージング）完了
 
 OI-14 E。オンプレ（Mac）から GCP の単一VMへ lift-and-shift で移行。**初心者向け・セキュア
