@@ -1,6 +1,7 @@
 oracle:
   api_url: "http://localhost:8000"  # waiwai-oracle APIサーバ（環境変数 ORACLE_API_URL が優先）
   chat_timeout: 90                   # Chat API タイムアウト（秒）
+  history_max_turns: 5               # チャンネルごとに覚える直近やり取りの上限ペア数（0で無効・OI-10）
 
 discord:
   mention_only: true   # true = @メンション時のみ応答 / false = 全メッセージに応答
