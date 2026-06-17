@@ -158,25 +158,20 @@ VM `remember-vm`(100.98.83.15) で6サービス本番稼働、取り込み→@�
 - 検索精度向上（OI-9: ハイブリッド検索+リランカー）は有料プランの差別化要素になり得る。
 - マルチターン会話（OI-10）も有料機能の候補。
 
-## ~~OI-15: 回答LLMのシステムプロンプト（キャラ/口調）を見直したい~~ ✅ 対応済み（2026-06-17・feature/oi15-prompt-rebrand）
+## OI-15: 回答LLMのシステムプロンプト（キャラ/口調）を見直したい
 
-やがて回答プロンプトを変えたい（2026-06-17・対応済み）。コードネーム `remember` への
+やがて回答プロンプトを変えたい（2026-06-15・未着手）。コードネーム `remember` への
 リブランド（脱waiwai）と連動する。
 
-- 対象: `src/rag/prompts.py` の `ANSWER_SYSTEM_PROMPT`（35行目、キャラ名「れみちゃん」に変更）。
-- 変更内容:
-  - キャラ名を「わいわいちゃん」から「れみちゃん」に変更
-  - 口調・人格を「ゆるゆるふわふわのアシスタント、記憶力があんまりないのんびり屋さん」に刷新
-  - AIっぽさ・学術的説明を抑え、友達と雑談するような自然な文章を指定
-  - 感情モデル・ENTJ/ENTP等の強いキャラ属性を削除
-  - `config.yml.example` の `guild_name` デフォルトを「わいわい」→「みんなのサーバー」に変更
-  - 履歴として `prompts/v3_remi_rebrand.md` を追加し、`prompts/README.md` 更新
-  - `moimoichan_Discordbot/bot.py` の各種応答メッセージもれみちゃん口調に統一
-  - `README.md`/`docker-compose.yml`/`docs/ARCHITECTURE.md`/`docs/DIAGRAMS.md` も併記更新
-- 反映: プロンプト・Bot 口調の変更後は **api / bot コンテナを再ビルド**（`docker compose up -d --build api bot`）。
+- 対象: `src/rag/prompts.py` の `ANSWER_SYSTEM_PROMPT`（Kimi K2用・35行目「わいわいちゃん」、
+  語尾「！っ」、感情モデル等）。`REWRITER_SYSTEM_PROMPT` は検索用なので原則そのまま。
+- 動機: キャラ名「わいわいちゃん」がwaiwai由来でリブランド対象。パブリック化（OI-14）に向け、
+  特定サーバー色の薄い汎用的な人格／口調も検討余地あり。
+- 反映: プロンプト変更後は **api コンテナを再ビルド**（`docker compose up -d --build api`）。
   プロンプトは `prompts/` でのバージョン管理運用（DEVLOG 2026-03-23）に倣うと履歴が追える。
-- 関連: OI-14（パブリック化） / 名称検討（codename remember） / OI-16（プロンプト圧縮）
-- 検証: テスト 253件 PASS（2026-06-17）
+- **要確認(人間)**: 新キャラ名・口調の方向性（現状の天真爛漫キャラを継続か刷新か）、
+  guild_name デフォルト `"わいわい"`（config）の扱い。正式名称（[[project-rename-initiative]]）確定後に着手が無難。
+- 関連: OI-14（パブリック化）/ 名称検討（codename remember）
 
 ## OI-16: 回答1メッセージのコスト最適化（実測が高い）
 

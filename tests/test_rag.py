@@ -207,9 +207,9 @@ class TestRewrite:
 class TestAnswer:
     def test_full_flow(self, store):
         _seed(store)
-        llm = FakeLLM(["書き換えクエリ", "れみちゃんの答えだよ〜"])
+        llm = FakeLLM(["書き換えクエリ", "わいわいちゃんの答え！っ"])
         result = asyncio.run(_engine(store, llm).answer("g1", "飲み会どうだった？"))
-        assert result["answer"] == "れみちゃんの答えだよ〜"
+        assert result["answer"] == "わいわいちゃんの答え！っ"
         assert result["rewritten_query"] == "書き換えクエリ"
         assert result["sources"][0]["channel_name"] == "general"
 

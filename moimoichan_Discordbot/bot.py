@@ -41,11 +41,11 @@ _JOB_STATUS_LABEL = {
 }
 
 _WELCOME = (
-    "はじめまして、れみちゃんだよ〜 🌸\n"
-    "このサーバーの過去ログをぼんやり覚えて、質問に答えられるようになるかも。\n"
-    "**許可されたチャンネルしか読まない**から、安心してね。\n"
+    "はじめまして、わいわいちゃんだよ！っ 🎤\n"
+    "このサーバーの過去ログを覚えて質問に答えられるようになるけど、"
+    "**許可されたチャンネルしか読まない**から安心してね。\n"
     "サーバー管理権限を持つ人が `/oracle allow #チャンネル` で読んでいい"
-    "チャンネルを教えてくれたら、取り込みを始めるね〜"
+    "チャンネルを教えてくれたら、取り込みを始めるよ！っ"
 )
 
 
@@ -83,12 +83,12 @@ class OracleGroup(app_commands.Group):
             guild_id, str(channel.id), channel.name, str(interaction.user.id)
         )
         note = (
-            "取り込みを始めるね。終わったら質問できるよ〜。"
+            "取り込みを始めるね！終わったら質問できるよ。"
             if job_id is not None
-            else "取り込みはもう予約済みだから、そのまま待っててね〜。"
+            else "取り込みはもう予約済みだから、そのまま待っててね。"
         )
         await interaction.followup.send(
-            f"✅ {channel.mention} の読み取りを許可したよ。{note}", ephemeral=True
+            f"✅ {channel.mention} の読み取りを許可したよ！っ {note}", ephemeral=True
         )
 
     @app_commands.command(name="deny", description="チャンネルの許可を取り消し、取り込み済みデータを削除する")
@@ -106,7 +106,7 @@ class OracleGroup(app_commands.Group):
             else f"{channel.mention} は許可されてなかったよ。"
         )
         await interaction.followup.send(
-            f"{head} 取り込み済みデータの削除も予約したからね〜。", ephemeral=True
+            f"{head} 取り込み済みデータの削除も予約したからね！っ", ephemeral=True
         )
 
     @app_commands.command(name="sync", description="許可チャンネルの新着メッセージを今すぐ取り込む")
@@ -116,15 +116,15 @@ class OracleGroup(app_commands.Group):
         status = await self.store.status(guild_id)
         if not status["allowed"]:
             await interaction.followup.send(
-                "まだ許可されたチャンネルがないよ。まず `/oracle allow` で教えてね〜。",
+                "まだ許可されたチャンネルがないよ。まず `/oracle allow` で教えてね！っ",
                 ephemeral=True,
             )
             return
         job_id = await self.store.enqueue_sync(guild_id, str(interaction.user.id))
         msg = (
-            "🔄 差分取り込みを予約したよ〜。"
+            "🔄 差分取り込みを予約したよ！っ"
             if job_id is not None
-            else "取り込みはもう予約済みだよ。順番に処理するから待っててね〜。"
+            else "取り込みはもう予約済みだよ。順番に処理するから待っててね！っ"
         )
         await interaction.followup.send(msg, ephemeral=True)
 
@@ -190,7 +190,7 @@ class MoimoichanBot(discord.Client):
 
         query = self._extract_query(message)
         if not query:
-            await message.reply("何か聞いてみてね〜 🌸")
+            await message.reply("何か聞いてみてね！っ 🎤")
             return
 
         user = f"{message.channel.id}:{message.author.id}"
@@ -202,17 +202,17 @@ class MoimoichanBot(discord.Client):
                     guild_name=message.guild.name,
                 )
                 reply = answer[:_MAX_REPLY_LEN]
-                await message.reply(reply or "……（うーん、何も思いつかなかったかも〜 😅）")
+                await message.reply(reply or "……（何も思いつかなかった！っ 😅）")
             except asyncio.TimeoutError:
                 print(f"[TIMEOUT] channel={message.channel.id} user={message.author.id}")
                 try:
-                    await message.reply("⏱️ 応答がタイムアウトしちゃった。もう一度試してみてね〜。")
+                    await message.reply("⏱️ 応答がタイムアウトしました。もう一度試してみてください！っ")
                 except Exception:
                     pass
             except Exception as e:
                 print(f"[ERROR] {type(e).__name__}: {e}")
                 try:
-                    await message.reply("⚠️ エラーが発生しちゃった。もう一度試してみてね〜。")
+                    await message.reply("⚠️ エラーが発生しました。もう一度試してみてね！っ")
                 except Exception:
                     pass
 

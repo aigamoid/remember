@@ -80,7 +80,7 @@ services:
       - postgres
       - qdrant
 
-  # Discord Bot（れみちゃん）
+  # Discord Bot（わいわいちゃん）
   bot:
     build:
       context: .

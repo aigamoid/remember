@@ -32,7 +32,7 @@ rag:
   answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
   top_k: 10                                   # 回答に渡すチャンク数（リランク有効時はリランク後の件数）
   rewriter_max_tokens: 256                    # 書き換え出力の上限（過大なtoken要求で残高不足になるのを防ぐ）
-  guild_name: "みんなのサーバー"                  # プロンプト用サーバー名のデフォルト（Bot経由なら実サーバー名が優先）
+  guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト（Bot経由なら実サーバー名が優先）
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（APIキー JINA_API_KEY が必要）
     provider: "jina"                          # 現状 jina のみ対応
