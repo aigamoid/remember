@@ -10,12 +10,16 @@ from src.api import create_app
 
 class FakeEngine:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, str | None]] = []
+        self.calls: list[tuple[str, str, str | None, str | None]] = []
 
     async def answer(
-        self, guild_id: str, query: str, guild_name: str | None = None
+        self,
+        guild_id: str,
+        query: str,
+        guild_name: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
-        self.calls.append((guild_id, query, guild_name))
+        self.calls.append((guild_id, query, guild_name, user_id))
         return {
             "answer": "テスト回答！っ",
             "rewritten_query": "書き換え済み",
@@ -50,7 +54,7 @@ class TestChat:
         engine = FakeEngine()
         client = TestClient(create_app(engine=engine))
         client.post("/chat", json={"guild_id": "g99", "query": "質問"})
-        assert engine.calls == [("g99", "質問", None)]
+        assert engine.calls == [("g99", "質問", None, None)]
 
     def test_chat_passes_guild_name(self):
         engine = FakeEngine()
@@ -59,7 +63,16 @@ class TestChat:
             "/chat",
             json={"guild_id": "g99", "query": "質問", "guild_name": "テストサーバー"},
         )
-        assert engine.calls == [("g99", "質問", "テストサーバー")]
+        assert engine.calls == [("g99", "質問", "テストサーバー", None)]
+
+    def test_chat_parses_user_id_from_user_field(self):
+        engine = FakeEngine()
+        client = TestClient(create_app(engine=engine))
+        client.post(
+            "/chat",
+            json={"guild_id": "g99", "query": "質問", "user": "ch1:u42"},
+        )
+        assert engine.calls == [("g99", "質問", None, "u42")]
 
     def test_empty_query_rejected(self, client):
         resp = client.post("/chat", json={"guild_id": "g1", "query": "   "})

@@ -1,5 +1,13 @@
 # waiwai-oracle
 
+> **コードネーム: remember**（このプロダクトの正式呼称）。
+> 段階的に `waiwai-oracle` → `remember` へ改名していく方針。
+> 2026-06-15 時点では**管理ポータル（src/admin）の表示名のみ** `remember` に統一済み。
+> リポジトリ名・compose・Qdrantコレクション名（`waiwai_chunks`）等の全体改名は未実施
+> （Qdrantコレクション名はデータ移行が絡むため別途要相談）。
+> なお「わいわい」はテナントのDiscordサーバー名・「わいわいちゃん」はBotの回答キャラ名であり、
+> プロダクト名 `remember` とは別物（改名対象外）。
+
 Discordサーバーの過去ログをRAG化し、チャットボットで回答するPOCプロジェクト。
 マルチテナント対応済み（サーバーごとに opt-in 取り込み・guild_id でデータ分離）。
 
@@ -26,7 +34,11 @@ Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎
 - フロントエンドは2モード（両方維持する）:
   - Discord Bot（`moimoichan_Discordbot/`）
   - CLI（`chat_cli.py` ※動作確認用、`python chat_cli.py` で対話）
-- 起動: `docker compose up -d postgres qdrant api worker`（Botは `bot` サービス）
+- 回答時に各 LLM/embedding の利用量を `usage_log` に記録する（`src/usage.py`・OI-14 C）。
+  コストは config.yml の `pricing`（USD/100万トークン）から推定。記録失敗は回答を止めない。
+- 管理ポータル `src/admin/`（FastAPI+Jinja2・別サービス `admin`・ポート8001）で
+  サーバー/ジョブ/利用量・コストを閲覧できる。認証は `.env` の `ADMIN_PASSWORD`。
+- 起動: `docker compose up -d postgres qdrant api admin worker`（Botは `bot` サービス）
 - テスト: `docker compose up -d postgres` してから `pytest tests/`
   （DB系テストは実Postgresの oracle_test DBを使う。未起動ならskip）
 
@@ -77,7 +89,7 @@ sh scripts/install_hooks.sh
 - Postgres（メタデータ・ジョブキュー / psycopg） + Qdrant（ベクトルDB・セルフホスト）
 - FastAPI（RAG回答API）
 - OpenAI API（embedding: text-embedding-3-small / `contextualizer.py` の context_text 生成）
-- OpenRouter（Query Rewriter: Gemini 2.5 Flash / 回答LLM: Kimi K2）
+- OpenRouter（Query Rewriter: Gemini 2.5 Flash / 回答LLM: DeepSeek V3.2 ※OI-16でKimi K2から変更）
 - ※Dify は廃止済み（`dify/waiwai-oracle.yml` は移行元プロンプトの記録として保持）
 - ※SQLite は廃止済み（`data/messages.db` は移行元データとして保持。
   `scripts/migrate_sqlite_to_pg.py` で Postgres へ移行済み）

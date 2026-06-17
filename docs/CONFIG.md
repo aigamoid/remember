@@ -49,10 +49,18 @@ rag:
   guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト
                                               # （Bot経由のリクエストでは実サーバー名が優先される）
 
+pricing:                              # usage_log のコスト推定に使う単価（USD/100万トークン）
+  "google/gemini-2.5-flash": {input: 0.30, output: 2.50}
+  "moonshotai/kimi-k2-0905": {input: 0.60, output: 2.50}
+  "text-embedding-3-small":  {input: 0.02, output: 0.0}
+
 worker:
   poll_interval_seconds: 10  # ingest_jobs キューの確認間隔（秒）
   sync_interval_hours: 24    # 定期syncの間隔（最後の取り込み完了からの経過時間）
 ```
+
+> `pricing` は推定コスト算出用（`src/usage.py`）。価格は変動するので最新値に各自で更新する。
+> 掲載が無いモデルはコスト0で計上される（トークン数の記録は残る）。
 
 > Dify / Ollama 関連のセクションは廃止した（2026-06-11）。
 > 旧設定は git 履歴と `dify/waiwai-oracle.yml`（移行元プロンプトの記録）を参照。
@@ -68,6 +76,8 @@ DATABASE_URL=postgresql://oracle:oracle@localhost:5432/oracle  # ホストから
 # ORACLE_API_URL=http://localhost:8000  # Bot → APIサーバ接続先（composeでは自動設定）
 # QDRANT_URL=http://qdrant:6333         # Qdrant接続先オーバーライド（composeでは自動設定）
 # TEST_DATABASE_URL=...                 # pytest用DB接続先（デフォルト: localhost:5432/oracle_test）
+ADMIN_PASSWORD=change-me              # 管理ポータル（src/admin）のログインパスワード（未設定だとログイン不可）
+# ADMIN_SESSION_SECRET=...             # セッション署名鍵（任意・未設定なら ADMIN_PASSWORD から導出）
 ```
 
 > コンテナ内の `DATABASE_URL` は docker-compose.yml の `environment` で

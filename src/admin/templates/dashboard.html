@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}ダッシュボード — remember 管理{% endblock %}
+{% block body %}
+{% set jpy = 150 %}  {# USD→JPY 概算レート（表示用） #}
+{% macro usd(x) %}${{ "%.4f"|format(x) }}<span class="muted"> / ¥{{ "%.1f"|format(x * jpy) }}</span>{% endmacro %}
+
+<nav><a href="/">更新</a> <a href="/logout">ログアウト</a></nav>
+<h1>remember 管理ダッシュボード</h1>
+<p class="muted">利用量・コストは今月（{{ summary.month_start[:10] }} 〜）の集計。¥は概算（×{{ jpy }}）。</p>
+
+<div class="cards">
+  <div class="card"><div class="muted">今月の推定コスト</div>
+    <div class="big">{{ usd(summary.total_cost_usd) }}</div></div>
+  <div class="card"><div class="muted">今月のトークン</div>
+    <div class="big">{{ "{:,}".format(summary.total_tokens) }}</div></div>
+  <div class="card"><div class="muted">今月の呼び出し回数</div>
+    <div class="big">{{ "{:,}".format(summary.total_calls) }}</div></div>
+  <div class="card"><div class="muted">在籍サーバー</div>
+    <div class="big">{{ guilds | selectattr("left_at", "none") | list | length }}</div></div>
+</div>
+
+<h2>サーバー一覧</h2>
+<table>
+  <tr><th>サーバー</th><th>状態</th><th class="num">許可ch</th>
+      <th class="num">メッセージ</th><th class="num">チャンク</th>
+      <th class="num">今月コスト</th></tr>
+  {% for g in guilds %}
+  <tr>
+    <td>{{ g.guild_name or g.guild_id }}<br><span class="muted">{{ g.guild_id }}</span></td>
+    <td>{% if g.left_at %}<span class="left">退出済</span>{% else %}在籍{% endif %}</td>
+    <td class="num">{{ g.allowed_count }}</td>
+    <td class="num">{{ "{:,}".format(g.message_count) }}</td>
+    <td class="num">{{ "{:,}".format(g.chunk_count) }}</td>
+    <td class="num">{{ usd(g.cost_usd_this_month) }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">サーバーがありません</td></tr>
+  {% endfor %}
+</table>
+
+<h2>利用量の内訳（今月）</h2>
+<table>
+  <tr><th>種別</th><th class="num">呼び出し</th><th class="num">トークン</th><th class="num">コスト</th></tr>
+  {% for k in summary.by_kind %}
+  <tr><td>{{ k.kind }}</td><td class="num">{{ "{:,}".format(k.calls) }}</td>
+      <td class="num">{{ "{:,}".format(k.tokens) }}</td><td class="num">{{ usd(k.cost_usd) }}</td></tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">記録がありません</td></tr>
+  {% endfor %}
+</table>
+
+<h2>取り込みジョブ（最近50件）</h2>
+<table>
+  <tr><th class="num">ID</th><th>サーバー</th><th>種別</th><th>状態</th>
+      <th>作成</th><th>完了</th><th>結果 / エラー</th></tr>
+  {% for j in jobs %}
+  <tr>
+    <td class="num">{{ j.id }}</td>
+    <td>{{ j.guild_name or j.guild_id }}</td>
+    <td>{{ j.kind }}</td>
+    <td><span class="pill s-{{ j.status }}">{{ j.status }}</span></td>
+    <td class="muted">{{ (j.created_at or "")[:19] }}</td>
+    <td class="muted">{{ (j.finished_at or "")[:19] }}</td>
+    <td>{{ j.error_message or j.result or "" }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7" class="muted">ジョブがありません</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

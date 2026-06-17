@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}ログイン — remember 管理{% endblock %}
+{% block body %}
+<form class="login" method="post" action="/login">
+  <h1>remember 管理</h1>
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+  <input type="password" name="password" placeholder="管理パスワード" autofocus>
+  <button type="submit">ログイン</button>
+</form>
+{% endblock %}

@@ -11,6 +11,8 @@ waiwai-oracle/
 │   ├── DIAGRAMS.md
 │   ├── SCHEMA.md
 │   ├── CONFIG.md
+│   ├── GCP_MIGRATION.md  # GCP移行runbook（OI-14 E・初心者向け/セキュア）
+│   ├── DEVLOG.md
 │   └── OPEN_ISSUES.md
 ├── src/
 │   ├── config.py          # config.yml ロード
@@ -29,8 +31,13 @@ waiwai-oracle/
 │   ├── worker.py          # 取り込みワーカー（ingest_jobsキュー処理・定期sync）
 │   ├── rag/
 │   │   ├── prompts.py     # Query Rewriter・わいわいちゃんプロンプト（Difyから移植）
-│   │   ├── llm.py         # OpenRouterチャットLLMラッパー
-│   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成）
+│   │   ├── llm.py         # OpenRouterチャットLLMラッパー（Completion=本文+usage を返す）
+│   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成・usage計測）
+│   ├── usage.py           # 利用量コスト算出 + UsageRecorder（usage_log書き込み）
+│   ├── admin/             # 管理者向けポータル（FastAPI + Jinja2・パスワード認証）
+│   │   ├── app.py         # ダッシュボード（サーバー/ジョブ/利用量の閲覧）
+│   │   ├── auth.py        # 簡易パスワード認証（HMAC署名トークン）
+│   │   └── templates/     # base/login/dashboard/error.html
 │   ├── api.py             # FastAPI APIサーバ（POST /chat, GET /health）
 │   └── cli.py             # CLIチャットロジック（/chat クライアント）
 ├── moimoichan_Discordbot/
@@ -41,6 +48,7 @@ waiwai-oracle/
 ├── scripts/
 │   ├── check_docs.py      # ドキュメント内 .py 参照の検証（pre-commit hook）
 │   ├── install_hooks.sh
+│   ├── vm_setup.sh        # GCP VM初期セットアップ（Docker+compose+swap・Phase3）
 │   └── migrate_sqlite_to_pg.py # 旧SQLiteデータのPostgres移行（1回だけ実行）
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
 ├── crawler.py             # Phase 1 エントリポイント（手動実行用）
@@ -54,7 +62,7 @@ waiwai-oracle/
 ├── config.yml.example
 ├── .env.example
 ├── Dockerfile
-├── docker-compose.yml     # postgres / oracle / qdrant / api / worker / bot の6サービス
+├── docker-compose.yml     # postgres / oracle / qdrant / api / admin / worker / bot の7サービス
 └── data/                  # Dockerボリュームマウント先（.gitignore）
     ├── messages.db        # 旧SQLite（移行済み・テスト用に保持）
     ├── postgres/          # Postgres永続化データ
@@ -100,8 +108,24 @@ src/rag/engine.py
     1. Query Rewriter（Gemini 2.5 Flash・現在日時注入）
     2. embedding → Qdrant 検索（guild_id フィルタ必須・top_k=10）
     3. 回答生成（Kimi K2・わいわいちゃんプロンプト・guild_name を埋め込み）
+    4. 各 LLM/embedding の usage を usage_log に記録（src/usage.py・コスト計測）
     ↓
 回答 JSON → Bot が Discord に返信
+```
+
+### 管理ポータル（運用閲覧・OI-14 C）
+
+`src/admin/`（FastAPI + Jinja2・別 compose サービス `admin`・既定ポート8001）が
+管理者向けダッシュボードを提供する。`ADMIN_PASSWORD` による簡易パスワード認証。
+
+```
+管理者ブラウザ → /login（ADMIN_PASSWORD）→ Cookie（HMAC署名トークン）
+    ↓ GET /
+src/admin/app.py
+    ↓ src/db.py の集計関数（読み取り専用）
+    - fetch_guilds_overview: サーバー別の許可ch数/msg数/chunk数/今月コスト
+    - fetch_recent_jobs:     取り込みジョブの状況（処理中/完了/エラー）
+    - fetch_usage_summary:   今月の利用量（合計・種別別・サーバー別）
 ```
 
 ## 設計方針

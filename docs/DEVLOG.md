@@ -4,6 +4,131 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-17 — OI-16: 回答1メッセージのコスト最適化（Mac＋GCP検証機に反映）
+
+1問あたり実測 ≈ $0.016 だった回答コストを、品質を保ったまま **約1/5（$0.0032）** まで削減した。
+
+### 変更（バランス案）
+- `config.yml rag.top_k` 10→5（回答 context をほぼ半減・最大のレバー）。
+- `config.yml rag.answer_max_tokens: 1500` 新設＋`src/rag/engine.py` の answer 呼び出しに `max_tokens` を渡す
+  （completion の暴走を防ぐ安全弁）。
+- `config.yml rag.answer_model` を Kimi K2 → **DeepSeek V3.2** に変更。`pricing` も OpenRouter 実価格へ更新。
+- `scripts/ab_cost_test.py` 追加（同一質問・同一検索結果で複数モデルのコスト/回答を並べて比較する手動計測）。
+
+### A/B計測（同一context・top_k=5・2問）
+- Kimi K2: $0.0058 / $0.0094（平均 ≈ $0.0076/問）
+- DeepSeek V3.2: $0.0017 / $0.0029（平均 ≈ $0.0023/問・約1/3）。
+  キャラ語尾「！っ」・絵文字・Markdown構造も維持で品質劣化なし。
+
+### GCP検証機への反映・実機検証
+- `config.yml` は gitignore のため、Mac版 `config.yml`＋`src/rag/engine.py` を VM(`remember-vm`) へ scp 転送し
+  `docker compose up -d --build`（転送前に VM の config.yml と diff し差分が今回の4点のみ＝VM固有値なしを確認）。
+- VM の `usage_log` で before/after を実証: **kimi-k2 $0.01625（25,915 tok）→ deepseek-v3.2 $0.00315（12,572 tok）＝約1/5**。
+- 別サーバー（9,728メッセージ）の取り込みテストも実施し、全ジョブ done・chunk_index=Qdrantベクトル数が一致＝整合OK。
+
+### 副産物
+- `わいわい本番Discordサーバーは検証でも使用禁止・データは検証用に残置OK` という方針を確認（メモリ記録）。
+- worker に無害な `RuntimeError: Event loop is closed`（httpx 後始末ログ）が散発 → **OI-19** として既知事項に記録。
+  根本対応（非同期クライアント明示クローズ）は検証一段落後に。
+
+## 2026-06-15 — GCP移行（lift-and-shift・検証機/ステージング）完了
+
+OI-14 E。オンプレ（Mac）から GCP の単一VMへ lift-and-shift で移行。**初心者向け・セキュア
+（Tailscale経由・公開インバウンド0）**を方針に、Phase 0〜3 を完走し**6サービス本番稼働＋
+RAGエンドツーエンド動作**を実機確認。このVMは現状ステージング、後に本番化予定。
+
+### 実施内容（Phase別）
+
+| Phase | 内容 |
+|---|---|
+| 0 | gcloud CLI導入・認証 / プロジェクト `remember-beta-2606812` 作成・請求紐付け / **予算アラート¥3,000(≈$20)** |
+| 1 | VM `remember-vm`（e2-small/asia-northeast1-a/Debian12/30GB）作成 / 自動停止スケジュール JST 2,9,17時 |
+| 2 | Tailscale参加（VM=100.98.83.15）/ 公開SSH(22)を**IAP範囲限定**・RDP削除＝**公開インバウンド0** |
+| 3 | Docker+compose+swap2G（`scripts/vm_setup.sh`）/ コードをtarball転送(Private repoのため) / 設定3ファイル転送(.env 600) / **6サービス起動** |
+
+### 決定事項
+- 構成: **単一VM(lift-and-shift)**。Postgres/Qdrant分離は予算超過のため見送り、コードは
+  `DATABASE_URL`/`QDRANT_URL` で疎結合なので後から剥離可能（Phase 6）。
+- アクセス2系統: **あなた=Tailscale SSH** / **自動操作=IAP**（`gcloud ... --tunnel-through-iap`）。
+- データは移行せず**新規取り込みで開始**（waiwai旧データは不使用方針）。
+- 自動停止は**残す**（コスト保険・使う時だけ起動）。Bot稼働はVM1箇所のみ（Mac側は停止維持）。
+- 開発はMacローカル、GCPは検証機→後に本番（[[feedback-dev-on-mac]] 相当をメモリ化）。
+
+### 実行結果（実機・GCP上）
+- 取り込み: テストサーバーで `/oracle allow` → job done（crawled=241 / chunks=9 / contexts=9 / indexed=9）。
+  Postgres 241msg・indexed 9・Qdrant points 9 で三者整合。
+- 回答: @メンション質問 → `POST /chat 200` ×2、`usage_log` に rewrite/embedding/answer を実user_id付きで記録。
+- **実測コスト: 1問 ≈ $0.016（≈¥2.5）**・answer約26kトークンが支配的 → 概算の3〜16倍。**OI-16** に最適化課題を記録。
+
+### ハマりポイント
+- 予算作成が `INVALID_ARGUMENT` → 請求アカウントが**JPY建て**のため `20USD`不可。`3000JPY`で解決。
+- VM作成前に **Compute Engine API有効化**が必要 / 自動停止は**サービスエージェントへのIAM付与**が無いと実行されない（runbookに反映済み）。
+- Private repo のため git clone せず Mac→VM へ tarball 転送（data/.git/.venv除外、設定ファイルは同梱）。
+
+### 次のステップ
+- OI-16: 1問コスト最適化（まず `top_k` 10→5 を usage_log で before/after 計測）。
+- Phase 5: バックアップ(スナップショット)自動化・監視 / `.env`→Secret Manager。
+- 後に本番機へ移行（現状ステージング）。Phase 6 マネージド化(Cloud SQL/Run)。
+
+## 2026-06-15 — 利用量計測(OI-14 C-1) ＋ 管理ポータル(codename: remember)
+
+収益化ロードマップ OI-14 の **C-1（利用量計測）** と、追加要望の **管理ポータル** を
+`feature/usage-metering-portal` で実装し PR #7 を作成（base: feature/multitenant-ingest）。
+回答の挙動は不変（計測は副作用なし・DB障害でも /chat は止まらない設計）。
+
+### 変更ファイル
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/db.py` | `usage_log` テーブル新設・`insert_usage`・ポータル用集計（`fetch_guilds_overview`/`fetch_recent_jobs`/`fetch_usage_summary`） |
+| 2 | `config.yml(.example)` | `pricing` 単価表（USD/100万トークン）追加 |
+| 3 | `src/usage.py`（新規） | コスト算出 `compute_cost` ＋ `UsageRecorder`（記録失敗は握りつぶす） |
+| 4 | `src/rag/llm.py` | `complete()` が `Completion`（本文＋usage）を返すよう変更 |
+| 5 | `src/embedder.py` | `embed_one_with_usage` 追加（クエリembeddingのトークン取得） |
+| 6 | `src/rag/engine.py` | rewrite/embedding/answer の usage を集約して recorder へ・`user_id` 対応 |
+| 7 | `src/api.py` | recorder 配線・`user`→user_id 抽出・起動時スキーマ初期化 |
+| 8 | `src/admin/`（新規） | FastAPI+Jinja2 ポータル（`app.py`/`auth.py`/templates 4枚） |
+| 9 | `docker-compose.yml` | `admin` サービス追加(8001)・`api` に DATABASE_URL/depends 追加 |
+| 10 | `requirements.txt` | `jinja2`・`python-multipart` 追加 |
+| 11 | `.env.example` | `ADMIN_PASSWORD`・`ADMIN_SESSION_SECRET` 追加 |
+| 12 | `scripts/check_docs.py` | 探索ディレクトリに `src/admin` 追加 |
+| 13 | tests/（6ファイル） | usage計測・admin認証/ログイン・DB集計・embedder のテスト追加/更新 |
+| 14 | docs/・CLAUDE.md | SCHEMA/ARCHITECTURE/CONFIG/OPEN_ISSUES/CLAUDE を更新 |
+| 15 | `src/admin/*`・CLAUDE.md | ポータル表示名を codename **remember** に統一 |
+
+### 決定事項
+
+- **認証**: 管理ポータルは簡易パスワード（`ADMIN_PASSWORD`・HMAC署名Cookie・stdlibのみ）。
+- **公開面**: 公開API(/chat)と分離した別 compose サービス `admin`（ポート8001）。
+- **集計単位**: guild_id に加え **user_id も記録**（将来のユーザー別分析に備える）。
+- **改名スコープ**: 今回は**ポータル表示名のみ** `waiwai-oracle`→`remember`。全体改名は段階実施
+  （Qdrantコレクション `waiwai_chunks` はデータ移行が絡むため別途）。「わいわい」(テナント名)・
+  「わいわいちゃん」(Botキャラ)は別概念で改名対象外。CLAUDE.md 冒頭に明記。
+
+### 実行結果
+
+- pytest **240件 PASS** / `scripts/check_docs.py` 問題なし。
+- 実機: `docker compose up -d --build` → ログイン(301301)→ダッシュボード描画OK。
+  テストサーバーへ `/chat` 1回で `usage_log` に rewrite/embedding/answer の3行が記録
+  （user_id=u999・answer ≈ $0.0012）。**わいわいサーバーは不使用**。
+- データ補正: 移行由来で `left_at` が NULL のままだった「わいわい」guilds行を退出済みに更新
+  （ポータルで在籍誤表示していたため。チャンク8,364件は保持・purgeなし）。
+
+### ハマりポイント
+
+- `complete()` の戻り値型変更がテストのフェイクに波及 → `Completion` を返すフェイクに更新して吸収。
+- ポータルの「在籍中」は `guilds.left_at IS NULL` のみで判定。移行・手動投入の行は実態とズレ得る
+  （真の在籍は Discord ゲートウェイ）。将来 bot.guilds との突き合わせ補正を検討。
+
+### 次のステップ
+
+- C-2（quota/上限）: C-1 のデータを見て料金プラン決定後に着手。
+- pricing 単価を最新の OpenRouter/OpenAI 価格に更新。
+- プロジェクト全体の `remember` 改名（compose/Qdrant等）。
+- ポータルの公開可否（VPN内限定 or 公開＋HTTPS/認証強化）。
+
+---
+
 ## 2026-06-15 — 実機E2E完走（OI-12）＋ Query Rewriter修正
 
 ステップ2（feature/multitenant-ingest）の実機E2Eを、テスト用Discordサーバー

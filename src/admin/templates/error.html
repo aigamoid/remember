@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}エラー — remember 管理{% endblock %}
+{% block body %}
+<nav><a href="/">再読み込み</a> <a href="/logout">ログアウト</a></nav>
+<h1>データベースに接続できません</h1>
+<p class="err">{{ message }}</p>
+<p class="muted">Postgres が起動しているか確認してください。</p>
+{% endblock %}

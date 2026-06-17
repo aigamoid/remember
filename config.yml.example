@@ -41,6 +41,14 @@ contextualizer:
   retry_delay: 1.0        # リトライ間隔（秒）
   concurrency: 10         # 同時実行数（--concurrency 引数で上書き可）
 
+# usage_log のコスト推定に使う単価（USD / 100万トークン）。
+# ※価格は変動するので最新値に各自で更新すること（未掲載モデルはコスト0で計上）。
+pricing:
+  "google/gemini-2.5-flash": {input: 0.30, output: 2.50}
+  "moonshotai/kimi-k2-0905": {input: 0.60, output: 2.50}
+  "gpt-4.1-nano":            {input: 0.10, output: 0.40}
+  "text-embedding-3-small":  {input: 0.02, output: 0.0}
+
 worker:
   poll_interval_seconds: 10  # ジョブキューの確認間隔（秒）
   sync_interval_hours: 24    # 定期syncの間隔（最後の取り込み完了からの経過時間）
