@@ -60,6 +60,16 @@ feature/multitenant-ingest で実装。
 ### A. 法務（最優先・任意ではない）
 メッセージ本文を保存し第三者LLM（OpenAI/OpenRouter）へ送信するため、公開・有料化には規約明示が事実上必須。
 Discordのbot審査でも提出を求められる。
+
+**進捗（2026-06-17・ブランチ `feature/legal-docs`・develop基点）:**
+- ✅ ドラフト作成済み: `docs/legal/privacy_policy.md` / `docs/legal/terms_of_service.md`
+  （取得情報・外部送信先[OpenAI/OpenRouter/GCP東京/Discord]・退出=全削除・無償ベータ無保証・準拠法=日本）。
+  サービス名は `remember`（仮）で記載。法律家レビュー前の雛形。
+- ⬜ **未確定プレースホルダ（保留中・公開前に要記入）**:
+  `{{運営者ハンドル名}}` / 連絡先（サポートDiscord招待URL ＋ 連絡用メール）/ `{{管轄裁判所}}`（住所開示/有料化時に確定）。
+- ⬜ 公開先（ホスティング）未定（GitHub Pages公開repo or Cloudflare Pages）。Markdown→静的HTML化はその時に。
+- ⬜ PR は未作成（プレースホルダ確定後に develop へPR予定）。worktree: `~/Desktop/remember-legal`。
+
 - **アイデア**: プライバシーポリシー / 利用規約 を作成し、GitHub Pages 等の静的ページで公開。
 - **アイデア**: `/oracle allow` 実行時に「このチャンネルの過去ログを外部LLMに送信して学習・回答に利用する」旨の
   同意文を Bot が表示し、管理者の明示同意を取る（同意ログを Postgres に残すと監査に強い）。
