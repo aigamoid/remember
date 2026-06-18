@@ -1,0 +1,48 @@
+name: tests
+
+# いつ走らせるか
+on:
+  pull_request:               # PR を作成・更新したとき
+  push:
+    branches: [main, develop] # main / develop に push したとき
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    # テスト用 Postgres を CI が自動で起動する
+    # （手元で `docker compose up -d postgres` している代わり）
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: oracle
+          POSTGRES_PASSWORD: oracle
+          POSTGRES_DB: oracle_test
+        ports:
+          - 5432:5432
+        # Postgres が応答可能になるまで待つヘルスチェック
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # conftest.py がこの環境変数を読んで接続先を切り替える
+    env:
+      TEST_DATABASE_URL: postgresql://oracle:oracle@localhost:5432/oracle_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python 3.11 を用意
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 依存パッケージをインストール
+        run: pip install -r requirements.txt
+
+      - name: pytest を実行
+        run: python -m pytest -q
