@@ -4,7 +4,7 @@
 {% set jpy = 150 %}  {# USD→JPY 概算レート（表示用） #}
 {% macro usd(x) %}${{ "%.4f"|format(x) }}<span class="muted"> / ¥{{ "%.1f"|format(x * jpy) }}</span>{% endmacro %}
 
-<nav><a href="/">更新</a> <a href="/logout">ログアウト</a></nav>
+<nav><a href="/">更新</a> <a href="/billing">課金</a> <a href="/logout">ログアウト</a></nav>
 <h1>remember 管理ダッシュボード</h1>
 <p class="muted">利用量・コストは今月（{{ summary.month_start[:10] }} 〜）の集計。¥は概算（×{{ jpy }}）。</p>
 

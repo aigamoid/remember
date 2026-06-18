@@ -34,11 +34,12 @@ waiwai-oracle/
 │   │   ├── llm.py         # OpenRouterチャットLLMラッパー（Completion=本文+usage を返す）
 │   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成・usage計測）
 │   ├── usage.py           # 利用量コスト算出 + UsageRecorder（usage_log書き込み）
+│   ├── quota.py           # プラン上限の判定・JST日次境界・案内文（純ロジック・OI-14 C-2）
 │   ├── admin/             # 管理者向けポータル（FastAPI + Jinja2・パスワード認証）
-│   │   ├── app.py         # ダッシュボード（サーバー/ジョブ/利用量の閲覧）
+│   │   ├── app.py         # ダッシュボード + /billing（プラン管理）
 │   │   ├── auth.py        # 簡易パスワード認証（HMAC署名トークン）
-│   │   └── templates/     # base/login/dashboard/error.html
-│   ├── api.py             # FastAPI APIサーバ（POST /chat, GET /health）
+│   │   └── templates/     # base/login/dashboard/error/billing.html
+│   ├── api.py             # FastAPI APIサーバ（POST /chat[quota判定], GET /health）
 │   └── cli.py             # CLIチャットロジック（/chat クライアント）
 ├── moimoichan_Discordbot/
 │   ├── bot.py             # Discord Bot エントリポイント（/oracleコマンド・guildイベント）
@@ -103,6 +104,8 @@ src/worker.py
 Discord ユーザー（@メンション） or CLI入力
     ↓ POST /chat {guild_id, query, guild_name}
 src/api.py（FastAPI）
+    0. プラン上限チェック（src/quota.py）: 本日(JST)の質問数 ≧ プラン日次上限なら
+       回答せず案内文を返す（コスト発生なし・OI-14 C-2）。上限内のみ↓へ
     ↓
 src/rag/engine.py
     1. Query Rewriter（Gemini 2.5 Flash・現在日時注入）
@@ -127,6 +130,10 @@ src/admin/app.py
     - fetch_recent_jobs:     取り込みジョブの状況（処理中/完了/エラー）
     - fetch_usage_summary:   今月の利用量（合計・種別別・サーバー別）
 ```
+
+`/billing`（OI-14 C-2）: プラン定義（上限・価格）の編集と、サーバーごとのプラン割当・
+本日の消化状況を表示・変更する（`fetch_plan_defs` / `update_plan_def` /
+`fetch_billing_overview` / `set_guild_plan`）。プラン切替は現状手動。
 
 ## 設計方針
 
