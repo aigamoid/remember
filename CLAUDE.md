@@ -82,6 +82,9 @@ sh scripts/install_hooks.sh
 - 初回ブランチ: `feature/waiwai-oracle`
 - コミット粒度: **1ファイル単位**
 - **プッシュは人間が手動で行う。Claude Codeはpushコマンドを実行しないこと**
+- **PRのマージは必ず人間が行う。Claude CodeはPRの作成（`gh pr create`）まで。
+  マージ（`gh pr merge`）はしないこと**（2026-06-18 追加）。
+  「マージまでやって」と言われても最終マージは人間に渡し、勝手に `gh pr merge` しない。
 
 ### 複数セッション・並行ブランチ運用（git worktree 必須）
 
