@@ -4,6 +4,50 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-18 — OI-14 C-2: プラン上限(quota) ＋ プラン管理 ＋ 課金ポータル（PR #15）
+
+収益化の青天井を止める **C-2** を `feature/oi14-c2-quota` で実装、develop へマージ済み（PR #15）。
+プラン定義はDB管理でポータルから編集可能。回答挙動は上限内では不変。
+
+### 料金プラン（確定）
+| プラン | 月額 | 取り込みch | 質問/日 |
+|---|---|---|---|
+| Free | ¥0 | 1 | 20 |
+| Pro | ¥700 | 10 | 80 |
+| MAX | ¥1500 | 無制限 | 200 |
+
+超過時は全プラン **ハードストップ＋翌日(JST 0時)リセット＋アップグレード案内**。
+実測コスト≈¥0.2/問(OI-16後)なので満杯でも赤字にならない。相場($5〜$20/サーバー)内。
+
+### 変更ファイル
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/db.py` | `plan_defs`/`guild_plans` テーブル・`seed_plans`・CRUD・quota集計（`count_questions_since` 等） |
+| 2 | `src/quota.py`(新) | JST日次境界・上限判定・案内文（純ロジック） |
+| 3 | `src/api.py` | `/chat` 入口で日次質問上限を判定→超過は回答せず案内（コスト0）・DB障害はfail-open |
+| 4 | `moimoichan_Discordbot/store.py`・`bot.py` | `/oracle allow` でチャンネル数上限を強制 |
+| 5 | `src/admin/app.py`＋`billing.html` | `/billing`: プラン定義編集＋サーバー割当＋本日の消化 |
+| 6 | tests（quota/db_plans/api）＋conftest | 新規37件。フルスイート **282 PASS** |
+| 7 | docs(SCHEMA/ARCHITECTURE/OPEN_ISSUES) | C-2反映 |
+
+### 決定事項
+- **プラン定義はハードコードせずDB(`plan_defs`)管理**＝ポータルから即時変更（再デプロイ不要）。
+- サーバー割当 `guild_plans`（無い=free）。**Stripe列を予約**し、プラン自動切替は OI-14 D で接続。
+- 上限超過の挙動は**全プランA（ハードストップ＋翌日リセット＋案内）**。
+- 質問上限＝API入口・チャンネル上限＝Bot allow。日次境界は **JST 0時**。
+
+### ハマりポイント（環境・C-2とは別件）
+- ローカル colima/virtiofs 上の compose postgres で pytest が
+  `InsufficientPrivilege: could not open file ... Permission denied` を非決定的に頻発
+  （**変更なしのベースラインでも86エラー**＝virtiofsでPostgresがファイルを開く際の権限揺らぎ）。
+- 対処: **tmpfsの使い捨てPostgres(5433)** でテスト → 安定して 282 PASS・約4倍速(2-3秒)。
+  committed compose は変更せず（GCP/Linuxは問題なし）。手順はメモリ `feedback_test_db_tmpfs` に記録。
+
+### 次のステップ
+- OI-14 D（Stripe課金）: 入金→Webhookで `guild_plans` 自動更新（C-2のフラグ手動運用を自動化）。
+- A（法務）仕上げ（プレースホルダ確定・公開先決定）。
+- develop → main のリリース整理（main は別ルートの空のため要対応）。
+
 ## 2026-06-17 — OI-10/OI-20: マルチターン会話履歴 ＋ 回答プロンプトへの現在日時注入
 
 回答が「今日」を過去ログ内の日付（例: 5/6）と誤認するバグ（OI-20）を直し、ついでに
