@@ -43,6 +43,20 @@ Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎
 - テスト: `docker compose up -d postgres` してから `pytest tests/`
   （DB系テストは実Postgresの oracle_test DBを使う。未起動ならskip）
 
+### CI（自動テスト・GitHub Actions）
+
+- **PR作成/更新時・`main`/`develop` への push 時に `pytest` が自動実行される**
+  （定義: [.github/workflows/tests.yml](.github/workflows/tests.yml)・2026-06-18 導入 / PR #14）。
+  手動で `pytest` する代わりにGitHubが回し、PR画面に ✅/❌ を表示する。
+- CI内では Postgres を**サービスコンテナ**（`postgres:16`）で起動し、
+  `TEST_DATABASE_URL` で接続先を指定する（conftest.py がこの環境変数を読む）。
+- APIキー・config.yml はテストで参照しないため、**GitHub側のシークレット登録は不要**。
+- CD（自動デプロイ）は**未導入**。GCP VM への反映は引き続き手動。
+- 注意: ローカルでは `test_indexer` の一部がインメモリQdrant共有で稀に揺れるが、
+  CI（クリーン環境）では再現せずパスする。コードのバグではない。
+- `.github/workflows/` 配下を push するには gh トークンに `workflow` スコープが必要
+  （無い場合 `gh auth refresh -h github.com -s workflow` でブラウザ認可）。
+
 ## 詳細ドキュメント
 
 - アーキテクチャ・ファイル構成 → `docs/ARCHITECTURE.md`
