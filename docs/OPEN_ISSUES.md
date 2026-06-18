@@ -1,16 +1,49 @@
 # 未解決事項・TODO
 
-## OI-9: ハイブリッド検索・リランキング未実装（Dify比で検索構成が簡素化）
+## OI-9: 検索品質（リランキング / ハイブリッド）
 
-旧Difyフローはキーワード0.6/ベクトル0.4のハイブリッド検索 + Jinaリランカーだったが、
-自前RAGエンジン（2026-06-11移行）はベクトル検索のみ（top_k=10）。
-日本語キーワード検索の品質はDify側も怪しかったため一旦純ベクトルで運用し、
-検索精度に不満が出たら Qdrant のスパースベクトル（BM25系）+ リランカー追加を検討する。
+旧Difyフローはキーワード0.6/ベクトル0.4のハイブリッド検索 + Jinaリランカーだった。
 
-## OI-10: 会話履歴（マルチターン）非対応
+### ✅ Phase 1: リランカー実装済み（2026-06-17・feature/oi9-reranker）
+方式は「dense で多めに取って cross-encoder で精選」（Direction A）。日本語に強く・既存データの
+再インデックス不要・OI-16のコスト方針（多く取って絞る）と整合するため、BM25ハイブリッドより先に採用。
+- `src/rag/reranker.py`: Jina Reranker クライアント（`jina-reranker-v2-base-multilingual`）。
+- `src/rag/engine.py`: `rag.reranker.enabled` の時のみ、dense `top_n`(既定30) → リランクで `top_k` に精選。
+  失敗・キー未設定時は dense 順にフォールバック（回答は止めない）。usage_log に `rerank` を記録。
+- **既定オフ**（`enabled: false`）。有効化には `.env` の `JINA_API_KEY` ＋ `config.yml rag.reranker.enabled: true`。
+- 残: 実データでの品質A/B（top_n・top_k の調整）、pricing単価の実値更新、本番有効化の判断。
 
-自前API化に伴い conversation_id を廃止（DEVLOG 2026-03-25 の「無効化プラン」を実施）。
-現状は1問1答。マルチターンが必要になったら Bot 側で直近の会話を API に渡す設計を検討。
+### ⬜ Phase 2: スパース(BM25)ハイブリッドは見送り中
+Qdrant native の sparse+dense 融合(RRF)は追加API課金ゼロだが、**日本語のBM25分かち書きが弱い**・
+全チャンク**再インデックス**が必要。Phase 1 のリランクで品質が足りなければ再検討する。
+
+## OI-10: 会話履歴（マルチターン）対応 ✅ 実装完了（2026-06-17・feature/oi10-multiturn-history）
+
+自前API化に伴い conversation_id を廃止（DEVLOG 2026-03-25 の「無効化プラン」を実施）して
+1問1答だった。**Bot/CLI が呼び出し側で直近会話を保持し、毎回 history として API に渡す**
+ステートレス設計で対応した（旧 conversation_id 方式は復活させない）。
+
+**実装方式:**
+- `src/rag/llm.py`: `complete()` に `history`（古い順 `{"role","content"}` リスト）を追加。
+  messages を `system → history → user` の順で組み立てる。
+- `src/rag/engine.py`: `answer()`/`rewrite()` に `history` を追加。`_prep_history()` で
+  role/content を検証し直近 `rag.history_max_turns` ペアに丸める。**回答LLMだけでなく
+  Query Rewriter にも渡す**ので「それ」「さっきの件」等の指示語解決も効く。
+- `src/api.py`: `ChatRequest.history` を追加し `answer()` へ素通し。
+- `moimoichan_Discordbot/`: `bot.py` が**チャンネル単位** deque で直近やり取りを保持
+  （1チャンネル＝1会話）。`oracle_client.py` が history を送る。
+- `chat_cli.py`: REPL が履歴を保持（`reset` でクリア）。
+- 設定: `rag.history_max_turns`（既定5・0で無効）／ bot config `oracle.history_max_turns`。
+- **コスト制御**: 履歴は rewrite/answer 両方に乗るため token が二重計上される（VM本データで実測:
+  5ペアで1問あたり約2.5倍 $0.00130→$0.00325）。対策として `_prep_history` に**文字数バジェット**を追加し、
+  rewriter には別枠でさらに少なく渡す。新config: `rag.history_max_chars`(4000) /
+  `rag.rewriter_history_max_turns`(2) / `rag.rewriter_history_max_chars`(1000)。
+- テスト +14件（計266 PASS）。
+
+**残・要確認(人間):**
+- 履歴はメモリ上のみ（Bot 再起動で消える・永続化しない）。当面これで十分の想定。
+- バジェット既定値（4000字等）は実運用のコスト/品質を見て調整余地あり。
+- 関連: OI-16（コスト）/ OI-20（現在日時注入を同ブランチで同時対応）
 
 ## ~~OI-11: SaaS化ステップ2（マルチテナント自動取り込み）~~ ✅ 実装完了 (2026-06-11)
 
@@ -158,20 +191,25 @@ VM `remember-vm`(100.98.83.15) で6サービス本番稼働、取り込み→@�
 - 検索精度向上（OI-9: ハイブリッド検索+リランカー）は有料プランの差別化要素になり得る。
 - マルチターン会話（OI-10）も有料機能の候補。
 
-## OI-15: 回答LLMのシステムプロンプト（キャラ/口調）を見直したい
+## ~~OI-15: 回答LLMのシステムプロンプト（キャラ/口調）を見直したい~~ ✅ 対応済み（2026-06-17・feature/oi15-prompt-rebrand）
 
-やがて回答プロンプトを変えたい（2026-06-15・未着手）。コードネーム `remember` への
+やがて回答プロンプトを変えたい（2026-06-17・対応済み）。コードネーム `remember` への
 リブランド（脱waiwai）と連動する。
 
-- 対象: `src/rag/prompts.py` の `ANSWER_SYSTEM_PROMPT`（Kimi K2用・35行目「わいわいちゃん」、
-  語尾「！っ」、感情モデル等）。`REWRITER_SYSTEM_PROMPT` は検索用なので原則そのまま。
-- 動機: キャラ名「わいわいちゃん」がwaiwai由来でリブランド対象。パブリック化（OI-14）に向け、
-  特定サーバー色の薄い汎用的な人格／口調も検討余地あり。
-- 反映: プロンプト変更後は **api コンテナを再ビルド**（`docker compose up -d --build api`）。
+- 対象: `src/rag/prompts.py` の `ANSWER_SYSTEM_PROMPT`（35行目、キャラ名「れみちゃん」に変更）。
+- 変更内容:
+  - キャラ名を「わいわいちゃん」から「れみちゃん」に変更
+  - 口調・人格を「ゆるゆるふわふわのアシスタント、記憶力があんまりないのんびり屋さん」に刷新
+  - AIっぽさ・学術的説明を抑え、友達と雑談するような自然な文章を指定
+  - 感情モデル・ENTJ/ENTP等の強いキャラ属性を削除
+  - `config.yml.example` の `guild_name` デフォルトを「わいわい」→「みんなのサーバー」に変更
+  - 履歴として `prompts/v3_remi_rebrand.md` を追加し、`prompts/README.md` 更新
+  - `moimoichan_Discordbot/bot.py` の各種応答メッセージもれみちゃん口調に統一
+  - `README.md`/`docker-compose.yml`/`docs/ARCHITECTURE.md`/`docs/DIAGRAMS.md` も併記更新
+- 反映: プロンプト・Bot 口調の変更後は **api / bot コンテナを再ビルド**（`docker compose up -d --build api bot`）。
   プロンプトは `prompts/` でのバージョン管理運用（DEVLOG 2026-03-23）に倣うと履歴が追える。
-- **要確認(人間)**: 新キャラ名・口調の方向性（現状の天真爛漫キャラを継続か刷新か）、
-  guild_name デフォルト `"わいわい"`（config）の扱い。正式名称（[[project-rename-initiative]]）確定後に着手が無難。
-- 関連: OI-14（パブリック化）/ 名称検討（codename remember）
+- 関連: OI-14（パブリック化） / 名称検討（codename remember） / OI-16（プロンプト圧縮）
+- 検証: テスト 253件 PASS（2026-06-17）
 
 ## OI-16: 回答1メッセージのコスト最適化（実測が高い）
 
@@ -297,6 +335,23 @@ GCP検証機の取り込み中、worker ログに `RuntimeError: Event loop is c
 - **対応方針**: 急がない。検証が一段落したら根本対応を1コミットで
   （非同期クライアントを明示 `aclose()` する / ループを跨がない作りにする）。
   放置するとログに常駐し本物のエラーを埋もれさせるので、いずれ潰す。
+
+## OI-20: 回答LLMが現在日時を知らず過去ログの日付を「今日」と誤認 ✅ 修正済み（2026-06-17・feature/oi10-multiturn-history）
+
+**症状:** 「今日」を実日付（6/17）でなく過去ログ内の日付（例: 5/6）と誤認して回答していた。
+過去メッセージ「5/6に集合ね！」がヒットし、それを今日の予定として答えるなど。
+
+**原因:** `REWRITER_SYSTEM_PROMPT` には `現在の日時（JST）` が注入されていたが、
+**回答プロンプト `ANSWER_SYSTEM_PROMPT` には現在日時が一切入っていなかった**
+（`src/rag/engine.py` の `answer()` は guild_name と context しか差し込んでいなかった）。
+回答LLMは「今」を知らないまま、日付付きチャンクを読んで過去か現在かを判断できなかった。
+
+**修正:** `ANSWER_SYSTEM_PROMPT` に `## 現在時刻` セクション（`{current_datetime}`）を追加し、
+`engine.answer()` で `_now_str()` を差し込む。あわせて「記憶の断片はすべて過去の記録であり、
+相対表現や予定は記憶内の日付でなく現在時刻を基準に判断する」旨の一文を明記
+（日付を渡すだけでなく過去/現在の前後関係を考えさせる）。テストで現在日時が回答プロンプトに
+入ることを検証。OI-10（会話履歴）と同ブランチで対応。
+- 反映には api 再ビルドが必要（`docker compose up -d --build api`）。
 
 ## OI-3: ThreadCollector 未実装
 現在はTextChannelのみ取得。スレッド対応は将来実装。

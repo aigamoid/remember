@@ -22,6 +22,7 @@ from src.config import load_config
 from src.embedder import Embedder
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM
+from src.rag.reranker import Reranker
 from src.usage import UsageRecorder
 from src.vectorstore import VectorStore
 
@@ -77,6 +78,9 @@ class ChatRequest(BaseModel):
     query: str
     user: Optional[str] = None  # ログ用（"channel_id:user_id" 形式を想定）
     guild_name: Optional[str] = None  # プロンプト用サーバー名（未指定なら config の値）
+    # 直近の会話履歴（マルチターン・OI-10）。{"role": "user"|"assistant",
+    # "content": str} の古い順リスト。呼び出し側（Bot/CLI）が保持して渡す。
+    history: Optional[list[dict]] = None
 
 
 class ChatResponse(BaseModel):
@@ -106,7 +110,18 @@ def build_engine(cfg: dict) -> RagEngine:
         api_key=openai_cfg.get("api_key") or os.environ.get("OPENROUTER_API_KEY"),
         base_url=openai_cfg.get("base_url", "https://openrouter.ai/api/v1"),
     )
-    return RagEngine(cfg, store, embedder, llm, usage_recorder=UsageRecorder())
+    # リランカー（OI-9）: 設定で有効な場合のみ生成。APIキーは JINA_API_KEY。
+    rerank_cfg = cfg.get("rag", {}).get("reranker", {})
+    reranker = None
+    if rerank_cfg.get("enabled", False):
+        reranker = Reranker(
+            api_key=os.environ.get("JINA_API_KEY"),
+            model=rerank_cfg.get("model", "jina-reranker-v2-base-multilingual"),
+        )
+    return RagEngine(
+        cfg, store, embedder, llm,
+        usage_recorder=UsageRecorder(), reranker=reranker,
+    )
 
 
 def create_app(
@@ -152,7 +167,7 @@ def create_app(
                 return ChatResponse(answer=message, rewritten_query="", sources=[])
         result = await app.state.engine.answer(
             req.guild_id, req.query, guild_name=req.guild_name,
-            user_id=_parse_user_id(req.user),
+            user_id=_parse_user_id(req.user), history=req.history,
         )
         return ChatResponse(**result)
 

@@ -30,7 +30,7 @@ waiwai-oracle/
 │   ├── indexer.py         # チャンク → embedding → Qdrant 登録（Phase 4）
 │   ├── worker.py          # 取り込みワーカー（ingest_jobsキュー処理・定期sync）
 │   ├── rag/
-│   │   ├── prompts.py     # Query Rewriter・わいわいちゃんプロンプト（Difyから移植）
+│   │   ├── prompts.py     # Query Rewriter・れみちゃん回答プロンプト（Difyから移植・OI-15でリブランド）
 │   │   ├── llm.py         # OpenRouterチャットLLMラッパー（Completion=本文+usage を返す）
 │   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成・usage計測）
 │   ├── usage.py           # 利用量コスト算出 + UsageRecorder（usage_log書き込み）
@@ -110,7 +110,7 @@ src/api.py（FastAPI）
 src/rag/engine.py
     1. Query Rewriter（Gemini 2.5 Flash・現在日時注入）
     2. embedding → Qdrant 検索（guild_id フィルタ必須・top_k=10）
-    3. 回答生成（Kimi K2・わいわいちゃんプロンプト・guild_name を埋め込み）
+    3. 回答生成（DeepSeek V3.2・れみちゃんプロンプト・guild_name を埋め込み）
     4. 各 LLM/embedding の usage を usage_log に記録（src/usage.py・コスト計測）
     ↓
 回答 JSON → Bot が Discord に返信

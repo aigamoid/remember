@@ -45,14 +45,26 @@ embedding:
 rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
   answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
-  top_k: 10                                   # 検索で取得するチャンク数
+  top_k: 10                                   # 回答に渡すチャンク数（リランク有効時はリランク後の件数）
+  history_max_turns: 5                        # マルチターン会話で渡す直近やり取りの上限ペア数（OI-10）
+                                              # 0で無効（1問1答に戻す）。大きいほど文脈を保てるがprompt tokenが増える
+  history_max_chars: 4000                      # 履歴の合計文字数バジェット（回答LLM向け・超過分は古い方から落とす）
+                                              # 長い回答が積み重なってtokenが膨張するのを防ぐ安全弁（0で無制限）
+  rewriter_history_max_turns: 2               # Query Rewriterに渡す履歴のペア数（指示語解決には少数で十分）
+  rewriter_history_max_chars: 1000            # 同・文字数バジェット。履歴はrewriterにも乗るため別途絞ってtoken二重計上を抑制
   guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト
                                               # （Bot経由のリクエストでは実サーバー名が優先される）
+  reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
+    enabled: false                            # true で有効化（要 .env の JINA_API_KEY）
+    provider: "jina"                          # 現状 jina のみ対応
+    model: "jina-reranker-v2-base-multilingual"
+    top_n: 30                                 # リランク前に dense で取る候補数（→ top_k 件に精選）
 
 pricing:                              # usage_log のコスト推定に使う単価（USD/100万トークン）
   "google/gemini-2.5-flash": {input: 0.30, output: 2.50}
   "moonshotai/kimi-k2-0905": {input: 0.60, output: 2.50}
   "text-embedding-3-small":  {input: 0.02, output: 0.0}
+  "jina-reranker-v2-base-multilingual": {input: 0.02, output: 0.0}  # ※概算・要更新
 
 worker:
   poll_interval_seconds: 10  # ingest_jobs キューの確認間隔（秒）

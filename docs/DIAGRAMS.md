@@ -115,7 +115,7 @@ sequenceDiagram
     O-->>E: 1536次元ベクトル
     E->>Q: ③ 類似検索<br>guild_idフィルタ必須・top_k=10
     Q-->>E: チャンク10件（記憶の断片）
-    E->>K: ④ わいわいちゃんプロンプト<br>＋記憶の断片＋元の質問（temp 0.7）
+    E->>K: ④ れみちゃんプロンプト<br>＋記憶の断片＋元の質問（temp 0.7）
     K-->>E: 回答（<think>タグは除去）
     E-->>A: answer + rewritten_query + sources
     A-->>U: 回答表示（25〜37秒）
