@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}課金 — remember 管理{% endblock %}
+{% block body %}
+<nav><a href="/">ダッシュボード</a> <a href="/billing">課金</a> <a href="/logout">ログアウト</a></nav>
+<h1>課金・プラン管理</h1>
+
+<h2>プラン定義（上限・価格はここで変更）</h2>
+<p class="muted">変更すると即時に全サーバーへ反映されます（コード/再デプロイ不要）。チャンネル上限は空欄＝無制限。</p>
+<table>
+  <tr><th>キー</th><th>表示名</th><th>チャンネル上限</th><th>質問/日</th><th class="num">月額(¥)</th><th></th></tr>
+  {% for p in plans %}
+  <tr>
+    <form method="post" action="/billing/plan">
+      <td>{{ p.plan_key }}<input type="hidden" name="plan_key" value="{{ p.plan_key }}"></td>
+      <td><input name="display_name" value="{{ p.display_name }}" size="8"></td>
+      <td><input name="channel_limit" value="{{ p.channel_limit if p.channel_limit is not none else '' }}"
+                 placeholder="無制限" size="6"></td>
+      <td><input name="daily_question_limit" type="number" value="{{ p.daily_question_limit }}" size="6"></td>
+      <td class="num"><input name="price_jpy" type="number" value="{{ p.price_jpy }}" size="6"></td>
+      <td><button type="submit">保存</button></td>
+    </form>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>サーバーごとのプラン・本日の消化</h2>
+<table>
+  <tr><th>サーバー</th><th>プラン</th><th class="num">本日の質問</th>
+      <th class="num">チャンネル</th><th>status</th><th>変更</th></tr>
+  {% for g in guilds %}
+  <tr>
+    <td>{{ g.guild_name or g.guild_id }}<br><span class="muted">{{ g.guild_id }}</span></td>
+    <td><span class="pill">{{ g.plan_key }}</span></td>
+    <td class="num {% if g.used_today >= g.daily_question_limit %}left{% endif %}">
+        {{ g.used_today }} / {{ g.daily_question_limit }}</td>
+    <td class="num">{{ g.channel_count }} / {{ g.channel_limit if g.channel_limit is not none else '∞' }}</td>
+    <td>{{ g.status }}</td>
+    <td>
+      <form method="post" action="/billing/guild" style="display:flex; gap:0.3rem;">
+        <input type="hidden" name="guild_id" value="{{ g.guild_id }}">
+        <select name="plan_key">
+          {% for p in plans %}
+          <option value="{{ p.plan_key }}" {% if p.plan_key == g.plan_key %}selected{% endif %}>{{ p.display_name }}</option>
+          {% endfor %}
+        </select>
+        <input name="note" placeholder="メモ(任意)" size="10">
+        <button type="submit">適用</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">サーバーがありません</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}
