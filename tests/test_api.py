@@ -102,3 +102,38 @@ class TestChat:
             json={"guild_id": "g1", "query": "質問", "user": "ch1:u1"},
         )
         assert resp.status_code == 200
+
+
+class TestQuota:
+    def test_over_quota_returns_message_without_calling_engine(self):
+        engine = FakeEngine()
+        client = TestClient(create_app(
+            engine=engine,
+            quota_checker=lambda gid: "本日の上限に達しました🙏",
+        ))
+        resp = client.post("/chat", json={"guild_id": "g1", "query": "質問"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["answer"] == "本日の上限に達しました🙏"
+        assert body["sources"] == []
+        assert engine.calls == []  # 回答LLMを呼ばない＝コスト発生なし
+
+    def test_under_quota_calls_engine(self):
+        engine = FakeEngine()
+        client = TestClient(create_app(
+            engine=engine,
+            quota_checker=lambda gid: None,  # 上限内
+        ))
+        resp = client.post("/chat", json={"guild_id": "g1", "query": "質問"})
+        assert resp.status_code == 200
+        assert resp.json()["answer"] == "テスト回答！っ"
+        assert engine.calls == [("g1", "質問", None, None)]
+
+    def test_quota_checker_receives_guild_id(self):
+        seen = []
+        client = TestClient(create_app(
+            engine=FakeEngine(),
+            quota_checker=lambda gid: seen.append(gid) or None,
+        ))
+        client.post("/chat", json={"guild_id": "g42", "query": "質問"})
+        assert seen == ["g42"]

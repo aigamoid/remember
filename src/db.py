@@ -133,6 +133,29 @@ CREATE INDEX IF NOT EXISTS idx_usage_guild_created
     ON usage_log (guild_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_created
     ON usage_log (created_at);
+
+-- プラン定義（上限・価格のマスタ。ポータルから編集可能・OI-14 C-2）
+CREATE TABLE IF NOT EXISTS plan_defs (
+    plan_key             TEXT PRIMARY KEY,        -- 'free'|'pro'|'max'（追加可）
+    display_name         TEXT NOT NULL,
+    channel_limit        INTEGER,                 -- NULL = 無制限
+    daily_question_limit INTEGER NOT NULL,        -- 1日あたりの質問上限
+    price_jpy            INTEGER NOT NULL DEFAULT 0,
+    sort_order           INTEGER NOT NULL DEFAULT 0,
+    updated_at           TEXT
+);
+
+-- サーバーごとのプラン割当（無い場合は free 扱い・OI-14 C-2）
+CREATE TABLE IF NOT EXISTS guild_plans (
+    guild_id               TEXT PRIMARY KEY,
+    plan_key               TEXT NOT NULL DEFAULT 'free',
+    status                 TEXT NOT NULL DEFAULT 'active',  -- active|past_due|canceled
+    note                   TEXT,                            -- 手動変更メモ
+    updated_at             TEXT,
+    stripe_customer_id     TEXT,                            -- 以下 D(Stripe)用に予約・現状NULL
+    stripe_subscription_id TEXT,
+    current_period_end     TEXT
+);
 """
 
 # ingest_jobs.kind の取りうる値
@@ -154,9 +177,30 @@ def get_connection(dsn: str | None = None, init: bool = True) -> psycopg.Connect
     return conn
 
 
+_SEED_PLANS = """
+INSERT INTO plan_defs
+    (plan_key, display_name, channel_limit, daily_question_limit, price_jpy, sort_order)
+VALUES
+    ('free', 'Free', 1,    20,     0, 1),
+    ('pro',  'Pro',  10,   80,   700, 2),
+    ('max',  'MAX',  NULL, 200,  1500, 3)
+ON CONFLICT (plan_key) DO NOTHING;
+"""
+
+
 def init_schema(conn: psycopg.Connection) -> None:
-    """テーブル・インデックスを作成する（冪等）。"""
+    """テーブル・インデックスを作成し、初期プランを seed する（冪等）。"""
     conn.execute(_DDL)
+    conn.commit()
+    seed_plans(conn)
+
+
+def seed_plans(conn: psycopg.Connection) -> None:
+    """初期プラン（free/pro/max）を投入する（存在すれば何もしない）。
+
+    テストの teardown では全DDL再実行を避けてこれだけ呼ぶ（DDL多重実行による
+    ファイルI/O負荷を抑えるため）。"""
+    conn.execute(_SEED_PLANS)
     conn.commit()
 
 
@@ -810,3 +854,156 @@ def fetch_usage_summary(conn: psycopg.Connection) -> dict:
             for r in by_guild
         ],
     }
+
+
+# ---- plan_defs / guild_plans（プラン管理・OI-14 C-2。内部で commit する）----
+
+def fetch_plan_defs(conn: psycopg.Connection) -> list[dict]:
+    """全プラン定義を sort_order 順で返す（ポータルのプラン編集・quota判定が使用）。"""
+    rows = conn.execute(
+        "SELECT plan_key, display_name, channel_limit, daily_question_limit, "
+        "price_jpy, sort_order FROM plan_defs ORDER BY sort_order, plan_key"
+    ).fetchall()
+    return [
+        {
+            "plan_key": r[0], "display_name": r[1], "channel_limit": r[2],
+            "daily_question_limit": r[3], "price_jpy": r[4], "sort_order": r[5],
+        }
+        for r in rows
+    ]
+
+
+def get_plan_def(conn: psycopg.Connection, plan_key: str) -> dict | None:
+    row = conn.execute(
+        "SELECT plan_key, display_name, channel_limit, daily_question_limit, "
+        "price_jpy, sort_order FROM plan_defs WHERE plan_key = %s",
+        (plan_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "plan_key": row[0], "display_name": row[1], "channel_limit": row[2],
+        "daily_question_limit": row[3], "price_jpy": row[4], "sort_order": row[5],
+    }
+
+
+def update_plan_def(
+    conn: psycopg.Connection,
+    plan_key: str,
+    display_name: str,
+    channel_limit: int | None,
+    daily_question_limit: int,
+    price_jpy: int,
+) -> None:
+    """プラン定義の上限・価格を更新する（ポータルから・内部で commit）。"""
+    conn.execute(
+        "UPDATE plan_defs SET display_name=%s, channel_limit=%s, "
+        "daily_question_limit=%s, price_jpy=%s, updated_at=%s WHERE plan_key=%s",
+        (display_name, channel_limit, daily_question_limit, price_jpy,
+         _now(), plan_key),
+    )
+    conn.commit()
+
+
+def get_guild_plan(conn: psycopg.Connection, guild_id: str) -> dict:
+    """サーバーの実効プラン（定義の上限を含む）を返す。割当が無ければ free 既定。
+
+    戻り値: {plan_key, display_name, channel_limit, daily_question_limit,
+             price_jpy, status}
+    """
+    row = conn.execute(
+        """
+        SELECT COALESCE(gp.plan_key, 'free') AS plan_key,
+               COALESCE(gp.status, 'active') AS status,
+               pd.display_name, pd.channel_limit, pd.daily_question_limit, pd.price_jpy
+        FROM (SELECT %s AS guild_id) x
+        LEFT JOIN guild_plans gp ON gp.guild_id = x.guild_id
+        JOIN plan_defs pd
+             ON pd.plan_key = COALESCE(gp.plan_key, 'free')
+        """,
+        (str(guild_id),),
+    ).fetchone()
+    if row is None:
+        # plan_defs に free が無い等の異常時フォールバック（安全側）
+        return {
+            "plan_key": "free", "status": "active", "display_name": "Free",
+            "channel_limit": 1, "daily_question_limit": 20, "price_jpy": 0,
+        }
+    return {
+        "plan_key": row[0], "status": row[1], "display_name": row[2],
+        "channel_limit": row[3], "daily_question_limit": row[4], "price_jpy": row[5],
+    }
+
+
+def set_guild_plan(
+    conn: psycopg.Connection,
+    guild_id: str,
+    plan_key: str,
+    note: str | None = None,
+    status: str = "active",
+) -> None:
+    """サーバーのプランを設定する（手動切替・将来はStripe Webhookも使用。内部で commit）。"""
+    conn.execute(
+        """
+        INSERT INTO guild_plans (guild_id, plan_key, status, note, updated_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET
+            plan_key   = EXCLUDED.plan_key,
+            status     = EXCLUDED.status,
+            note       = EXCLUDED.note,
+            updated_at = EXCLUDED.updated_at
+        """,
+        (str(guild_id), plan_key, status, note, _now()),
+    )
+    conn.commit()
+
+
+def count_questions_since(
+    conn: psycopg.Connection, guild_id: str, since_iso: str
+) -> int:
+    """指定時刻以降の回答（質問）件数を返す（quota判定用・usage_log の answer）。"""
+    row = conn.execute(
+        "SELECT count(*) FROM usage_log "
+        "WHERE guild_id = %s AND kind = 'answer' AND created_at >= %s",
+        (str(guild_id), since_iso),
+    ).fetchone()
+    return row[0]
+
+
+def count_allowed_channels(conn: psycopg.Connection, guild_id: str) -> int:
+    row = conn.execute(
+        "SELECT count(*) FROM allowed_channels WHERE guild_id = %s",
+        (str(guild_id),),
+    ).fetchone()
+    return row[0]
+
+
+def fetch_billing_overview(
+    conn: psycopg.Connection, since_iso: str
+) -> list[dict]:
+    """管理ポータル用: サーバーごとのプラン・本日の消化・ch数・status。"""
+    rows = conn.execute(
+        """
+        SELECT g.guild_id, g.guild_name,
+               COALESCE(gp.plan_key, 'free') AS plan_key,
+               COALESCE(gp.status, 'active') AS status,
+               pd.daily_question_limit, pd.channel_limit,
+               (SELECT count(*) FROM allowed_channels a WHERE a.guild_id = g.guild_id),
+               (SELECT count(*) FROM usage_log u
+                  WHERE u.guild_id = g.guild_id AND u.kind = 'answer'
+                    AND u.created_at >= %s)
+        FROM guilds g
+        LEFT JOIN guild_plans gp ON gp.guild_id = g.guild_id
+        JOIN plan_defs pd ON pd.plan_key = COALESCE(gp.plan_key, 'free')
+        ORDER BY (g.left_at IS NULL) DESC, g.guild_name
+        """,
+        (since_iso,),
+    ).fetchall()
+    return [
+        {
+            "guild_id": r[0], "guild_name": r[1], "plan_key": r[2], "status": r[3],
+            "daily_question_limit": r[4], "channel_limit": r[5],
+            "channel_count": r[6], "used_today": r[7],
+        }
+        for r in rows
+    ]

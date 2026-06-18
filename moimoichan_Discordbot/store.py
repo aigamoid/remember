@@ -15,7 +15,19 @@ from pathlib import Path
 # コンテナでは /app/src に配置されるため、この insert は無害。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import db  # noqa: E402
+from src import db, quota  # noqa: E402
+
+
+def _next_channel_plan(conn, current: dict) -> dict | None:
+    """現プランより多く（または無制限に）チャンネルを取り込める最安プラン（案内用）。"""
+    cur_limit = current["channel_limit"]
+    if cur_limit is None:
+        return None  # 既に無制限
+    for d in db.fetch_plan_defs(conn):  # sort_order 昇順＝最安側から
+        cl = d["channel_limit"]
+        if cl is None or cl > cur_limit:
+            return d
+    return None
 
 
 class Store:
@@ -49,13 +61,31 @@ class Store:
 
     async def allow_channel(
         self, guild_id: str, channel_id: str, channel_name: str, allowed_by: str
-    ) -> int | None:
-        """チャンネルを許可し、取り込みジョブを投入する。戻り値はジョブID（重複時 None）。"""
+    ) -> dict:
+        """チャンネルを許可し取り込みジョブを投入する。
+
+        プランのチャンネル数上限を超える新規許可は拒否する（OI-14 C-2）。
+        戻り値:
+          {"ok": True, "job_id": int|None}       … 許可OK（job_id None=取り込み重複）
+          {"ok": False, "message": str}          … 上限超過で拒否（案内文つき）
+        """
         def run(conn):
+            existing = dict(db.fetch_allowed_channels(conn, guild_id))
+            if channel_id not in existing:  # 新規許可のみ上限を見る（再許可は更新）
+                plan = db.get_guild_plan(conn, guild_id)
+                count = db.count_allowed_channels(conn, guild_id)
+                if quota.channel_limit_exceeded(count, plan["channel_limit"]):
+                    return {
+                        "ok": False,
+                        "message": quota.channel_limit_message(
+                            plan["channel_limit"], _next_channel_plan(conn, plan)
+                        ),
+                    }
             db.allow_channel(conn, guild_id, channel_id, channel_name, allowed_by)
-            return db.enqueue_job(
+            job_id = db.enqueue_job(
                 conn, guild_id, db.JOB_INGEST, requested_by=allowed_by
             )
+            return {"ok": True, "job_id": job_id}
 
         return await self._call(run)
 

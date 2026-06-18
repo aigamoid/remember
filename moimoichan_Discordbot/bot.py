@@ -82,9 +82,14 @@ class OracleGroup(app_commands.Group):
         await interaction.response.defer(ephemeral=True)
         guild_id = str(interaction.guild_id)
         await self.store.register_guild(guild_id, interaction.guild.name)
-        job_id = await self.store.allow_channel(
+        result = await self.store.allow_channel(
             guild_id, str(channel.id), channel.name, str(interaction.user.id)
         )
+        if not result["ok"]:  # プランのチャンネル数上限に達した
+            await interaction.followup.send(
+                f"⚠️ {result['message']}", ephemeral=True
+            )
+            return
         note = (
             "取り込みを始めるね。終わったら質問できるよ〜。"
             if job_id is not None

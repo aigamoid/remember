@@ -173,6 +173,47 @@ CREATE INDEX idx_usage_created       ON usage_log (created_at);
 > 記録失敗は回答処理を止めない（DB障害時でも `/chat` は動く設計）。
 > 管理ポータル（`src/admin/`）が `fetch_usage_summary` / `fetch_guilds_overview` で集計表示する。
 
+### plan_defs（プラン定義マスタ・OI-14 C-2）
+
+```sql
+CREATE TABLE plan_defs (
+    plan_key             TEXT PRIMARY KEY,        -- 'free'|'pro'|'max'（追加可）
+    display_name         TEXT NOT NULL,
+    channel_limit        INTEGER,                 -- NULL = 無制限
+    daily_question_limit INTEGER NOT NULL,        -- 1日あたりの質問上限
+    price_jpy            INTEGER NOT NULL DEFAULT 0,
+    sort_order           INTEGER NOT NULL DEFAULT 0,
+    updated_at           TEXT
+);
+```
+
+> 上限・価格の**マスタ**。`init_schema` が初期3プラン（free:1ch/20問, pro:10ch/80問/¥700,
+> max:無制限/200問/¥1500）を seed する（`seed_plans`・`ON CONFLICT DO NOTHING` ＝既存値は壊さない）。
+> 値は**管理ポータル `/billing` から編集可能**（コード/再デプロイ不要）。`src/db.py` の
+> `fetch_plan_defs` / `get_plan_def` / `update_plan_def` が読み書きする。
+
+### guild_plans（サーバーごとのプラン割当・OI-14 C-2）
+
+```sql
+CREATE TABLE guild_plans (
+    guild_id               TEXT PRIMARY KEY,
+    plan_key               TEXT NOT NULL DEFAULT 'free',
+    status                 TEXT NOT NULL DEFAULT 'active',  -- active|past_due|canceled
+    note                   TEXT,                            -- 手動変更メモ
+    updated_at             TEXT,
+    stripe_customer_id     TEXT,   -- 以下 OI-14 D(Stripe)用に予約・現状NULL
+    stripe_subscription_id TEXT,
+    current_period_end     TEXT
+);
+```
+
+> 行が無いサーバーは **free 扱い**（`get_guild_plan` が plan_defs と結合して実効上限を返す）。
+> プランは現状**手動切替**（ポータル `/billing` の `set_guild_plan`）。OI-14 D で Stripe Webhook が
+> `stripe_*` / `status` を自動更新する想定。
+> **上限の強制**: 質問の日次上限は `src/api.py` の `/chat` 入口で（`src/quota.py` 判定・超過時は
+> 回答せず案内＝コスト0）、チャンネル数上限は Bot の `/oracle allow` で（`store.py`）。
+> 日次集計は `count_questions_since`（JST 0時境界は `quota.jst_day_start_utc_iso`）。
+
 ## Qdrant ペイロード仕様
 
 コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`・全guild共有）
