@@ -4,6 +4,36 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-18 — OI-15 れみちゃんリブランド引き継ぎ ＋ PRマージ運用ルール
+
+OpenCodeが実装した OI-15（回答キャラのリブランド）を Claude Code が引き継いでマージし、
+あわせて「PRのマージは人間が行う」運用ルールを整備した。
+
+### 変更ファイル
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/rag/prompts.py` ほか | OI-15: 回答キャラ「わいわいちゃん→れみちゃん」（ゆるふわ・友達口調）。OpenCode実装 |
+| 2 | `config.yml.example` | OI-15: `guild_name` デフォルト→「みんなのサーバー」（OI-9 rerankerブロックと両立解決） |
+| 3 | `prompts/v3_remi_rebrand.md` ほか | プロンプト履歴 v3 追加・README/docs併記更新 |
+| 4 | `CLAUDE.md` | **PRのマージは人間が行う（Claude CodeはPR作成まで・`gh pr merge`しない）** を明記（PR #16） |
+
+### 決定事項
+- **PRのマージは必ず人間**（push と同じ精神）。「マージまでやって」でも最終マージは人間に渡す。
+  メモリ `feedback_pr_merge_policy.md` ＋ CLAUDE.md に記録。
+- 旧develop基点のブランチは**最新developへrebase**してから出す（OI-15は衝突1件=config.yml.exampleを両立解決）。
+
+### ハマりポイント
+- OI-15を一度誤って `gh pr merge` → develop から **revert** → 新コミットでPR再作成 → ユーザーがレビューしてマージ。
+  この反省から上記ルールを策定。
+- 並行セッション（Claude Code/OpenCode）が同一 develop に短時間で複数マージ → revert が後続マージで打ち消される等、
+  混線が起きやすい。worktree分離＋人間マージで収束。
+
+### 次のステップ
+- VM復元後に**リランク品質A/B（大データ）**→本番有効化判断（OI-9）。
+- 脱waiwaiの残リネーム（リポジトリ名 / `/oracle` / `waiwai_chunks` / `moimoichan_Discordbot/`）。
+
+---
+
 ## 2026-06-18 — OI-14 C-2: プラン上限(quota) ＋ プラン管理 ＋ 課金ポータル（PR #15）
 
 収益化の青天井を止める **C-2** を `feature/oi14-c2-quota` で実装、develop へマージ済み（PR #15）。
