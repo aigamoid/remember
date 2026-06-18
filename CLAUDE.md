@@ -56,6 +56,12 @@ Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎
   CI（クリーン環境）では再現せずパスする。コードのバグではない。
 - `.github/workflows/` 配下を push するには gh トークンに `workflow` スコープが必要
   （無い場合 `gh auth refresh -h github.com -s workflow` でブラウザ認可）。
+- **教訓: semantic conflict に注意**（2026-06-18・CI導入初日に検知）。
+  派生元が古い feature ブランチが、共有関数のシグネチャ変更後の develop にマージされると、
+  **テキスト衝突は起きないのにテストが壊れる**ことがある（例: `engine.answer` に
+  `history` 引数が追加され5要素タプル化されたが、先に分岐していた oi14 のテストが
+  4要素のままマージされ CI が赤化 / PR #18 で修正）。古いブランチをマージする前に
+  `git merge develop` で最新を取り込み、ローカルで `pytest` を通すこと。
 
 ## 詳細ドキュメント
 
@@ -99,6 +105,12 @@ sh scripts/install_hooks.sh
 - **PRのマージは必ず人間が行う。Claude CodeはPRの作成（`gh pr create`）まで。
   マージ（`gh pr merge`）はしないこと**（2026-06-18 追加）。
   「マージまでやって」と言われても最終マージは人間に渡し、勝手に `gh pr merge` しない。
+- **ドキュメントは PR 不要・develop へ直接コミット可**（2026-06-18 追加）。
+  対象: `CLAUDE.md` / `docs/DEVLOG.md` など**コードを含まないドキュメント類**。
+  これらは CI もレビューも不要なため、feature ブランチ／PR を作らず
+  develop の worktree で直接コミットしてよい（push は従来どおり人間が行う）。
+  ※コード（`.py` 等）の変更は引き続き feature ブランチ＋PR を経由すること。
+  ※gitignore はしない（全セッション・GCP VM で共有される必要があるため）。
 
 ### 複数セッション・並行ブランチ運用（git worktree 必須）
 
