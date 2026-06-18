@@ -127,7 +127,7 @@ class TestQuota:
         resp = client.post("/chat", json={"guild_id": "g1", "query": "質問"})
         assert resp.status_code == 200
         assert resp.json()["answer"] == "テスト回答！っ"
-        assert engine.calls == [("g1", "質問", None, None)]
+        assert engine.calls == [("g1", "質問", None, None, None)]
 
     def test_quota_checker_receives_guild_id(self):
         seen = []
