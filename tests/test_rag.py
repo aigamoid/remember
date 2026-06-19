@@ -9,7 +9,12 @@ from qdrant_client import QdrantClient
 
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM, Completion, Usage, strip_think
-from src.rag.prompts import NO_SEARCH_SENTINEL, SKIP_CONTEXT, build_context
+from src.rag.prompts import (
+    NO_SEARCH_SENTINEL,
+    SKIP_CONTEXT,
+    build_context,
+    build_memories,
+)
 from src.rag.reranker import RerankResult
 from src.vectorstore import VectorStore
 
@@ -361,6 +366,158 @@ class TestAnswer:
         llm = FakeLLM(["q", "答え"])
         asyncio.run(_engine(store, llm).answer("g1", "query", speaker_name="   "))
         assert "いま話しかけてくれている人" not in llm.calls[1]["system"]
+
+
+# ── 明示メモリ build_memories（OI-24） ───────────────────────────────────────
+
+class TestBuildMemories:
+    def test_empty_returns_empty_string(self):
+        assert build_memories([]) == ""
+
+    def test_content_only(self):
+        out = build_memories([{"content": "ケーキが好き"}])
+        assert out == "- ケーキが好き"
+
+    def test_with_subject(self):
+        out = build_memories([{"subject": "かにじる", "content": "ケーキが好き"}])
+        assert out == "- 〔かにじる〕ケーキが好き"
+
+    def test_skips_blank_content(self):
+        out = build_memories(
+            [{"content": "  "}, {"subject": "x", "content": "残る"}]
+        )
+        assert out == "- 〔x〕残る"
+
+    def test_multiple_lines(self):
+        out = build_memories(
+            [{"content": "A"}, {"subject": "B", "content": "C"}]
+        )
+        assert out == "- A\n- 〔B〕C"
+
+
+# ── 明示メモリの回答プロンプト注入（OI-24） ──────────────────────────────────
+
+def _engine_mem(store, llm, provider, enabled=True) -> RagEngine:
+    cfg = {"rag": {"top_k": 5, "memory_enabled": enabled}}
+    return RagEngine(cfg, store, FakeEmbedder(), llm, memory_provider=provider)
+
+
+class TestMemoryInjection:
+    def test_memories_injected_when_enabled(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        provider = lambda gid: [{"subject": "かにじる", "content": "ケーキが好き"}]
+        asyncio.run(_engine_mem(store, llm, provider).answer("g1", "query"))
+        system = llm.calls[1]["system"]
+        assert "{taught_memories}" not in system
+        assert "{memories}" not in system
+        assert "みんなから教わって覚えていること" in system
+        assert "〔かにじる〕ケーキが好き" in system
+
+    def test_provider_receives_guild_id(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        seen = []
+        provider = lambda gid: seen.append(gid) or [{"content": "x"}]
+        asyncio.run(_engine_mem(store, llm, provider).answer("g1", "query"))
+        assert seen == ["g1"]
+
+    def test_not_injected_when_disabled(self, store):
+        # memory_enabled=false なら provider があっても注入しない（ブロックも消える）
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        provider = lambda gid: [{"content": "教わった事実"}]
+        asyncio.run(
+            _engine_mem(store, llm, provider, enabled=False).answer("g1", "query")
+        )
+        system = llm.calls[1]["system"]
+        assert "{taught_memories}" not in system
+        assert "みんなから教わって覚えていること" not in system
+
+    def test_section_removed_when_no_memories(self, store):
+        # enabled でも 0 件ならブロックごと消える（プレースホルダも残らない）
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(_engine_mem(store, llm, lambda gid: []).answer("g1", "query"))
+        system = llm.calls[1]["system"]
+        assert "{taught_memories}" not in system
+        assert "みんなから教わって覚えていること" not in system
+
+    def test_provider_failure_does_not_break_answer(self, store):
+        # 取得失敗（例外）でもメモリ無しで回答を続行する
+        _seed(store)
+        llm = FakeLLM(["q", "答えだよ"])
+
+        def boom(gid):
+            raise RuntimeError("DB down")
+
+        result = asyncio.run(
+            _engine_mem(store, llm, boom).answer("g1", "query")
+        )
+        assert result["answer"] == "答えだよ"
+        assert "みんなから教わって覚えていること" not in llm.calls[1]["system"]
+
+
+# ── 「覚えておいて」抽出 extract_memory（OI-24・書き込み） ────────────────────
+
+class TestExtractMemory:
+    def test_extracts_subject_and_content(self, store):
+        llm = FakeLLM(['{"subject":"かにじる","content":"ケーキが好き"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        res = asyncio.run(eng.extract_memory("g1", "かにじるはケーキ好き、覚えて"))
+        assert res == {"subject": "かにじる", "content": "ケーキが好き"}
+
+    def test_null_content_returns_none(self, store):
+        # 覚えるべき事実が無い発話は content=null → 保存しない（None）
+        llm = FakeLLM(['{"subject":null,"content":null}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.extract_memory("g1", "この曲いいね覚えて")) is None
+
+    def test_null_subject_kept(self, store):
+        llm = FakeLLM(['{"subject":null,"content":"毎週日曜にゲーム会"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        res = asyncio.run(eng.extract_memory("g1", "ゲーム会覚えて"))
+        assert res == {"subject": None, "content": "毎週日曜にゲーム会"}
+
+    def test_code_fence_stripped(self, store):
+        llm = FakeLLM(['```json\n{"subject":"x","content":"y"}\n```'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.extract_memory("g1", "xはy覚えて")) == {
+            "subject": "x", "content": "y"
+        }
+
+    def test_broken_json_returns_none(self, store):
+        llm = FakeLLM(["これはJSONじゃないよ"])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.extract_memory("g1", "なにか")) is None
+
+    def test_llm_error_returns_none(self, store):
+        llm = FakeLLM([RuntimeError("API down")])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.extract_memory("g1", "なにか")) is None
+
+    def test_speaker_injected_into_prompt(self, store):
+        llm = FakeLLM(['{"subject":"まめぽん","content":"誕生日は3月25日"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        res = asyncio.run(
+            eng.extract_memory("g1", "わたしの誕生日3/25覚えて", speaker_name="まめぽん")
+        )
+        assert res["subject"] == "まめぽん"
+        system = llm.calls[0]["system"]
+        assert "まめぽん" in system
+        assert "{speaker_line}" not in system
+
+    def test_no_speaker_removes_placeholder(self, store):
+        llm = FakeLLM(['{"subject":null,"content":"x"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        asyncio.run(eng.extract_memory("g1", "x覚えて"))
+        assert "{speaker_line}" not in llm.calls[0]["system"]
+
+    def test_uses_low_temperature(self, store):
+        llm = FakeLLM(['{"subject":null,"content":"x"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        asyncio.run(eng.extract_memory("g1", "x覚えて"))
+        assert llm.calls[0]["temperature"] == 0.1
 
 
 # ── マルチターン会話履歴（OI-10） ────────────────────────────────────────────

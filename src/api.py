@@ -20,6 +20,7 @@ load_dotenv()  # uvicorn 直接起動でも .env を読み込む
 from src import db, quota
 from src.config import load_config
 from src.embedder import Embedder
+from src.memory import MemoryProvider
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM
 from src.rag.reranker import Reranker
@@ -74,6 +75,35 @@ def default_quota_checker(guild_id: str) -> Optional[str]:
         conn.close()
 
 
+def default_memory_saver(
+    guild_id: str,
+    content: str,
+    subject: Optional[str] = None,
+    created_by: Optional[str] = None,
+    source_channel_id: Optional[str] = None,
+) -> bool:
+    """教わった事実を memories に保存する（OI-24・書き込み）。成功で True。
+
+    接続・保存に失敗しても例外を投げず False を返す（呼び出し側は saved=false にする）。
+    """
+    try:
+        conn = db.get_connection(init=False)
+    except Exception as e:
+        print(f"[WARN] メモリ保存スキップ（接続失敗）: {e}")
+        return False
+    try:
+        db.insert_memory(
+            conn, guild_id, content, subject=subject,
+            created_by=created_by, source_channel_id=source_channel_id,
+        )
+        return True
+    except Exception as e:
+        print(f"[WARN] メモリ保存失敗: {e}")
+        return False
+    finally:
+        conn.close()
+
+
 class ChatRequest(BaseModel):
     guild_id: str
     query: str
@@ -90,6 +120,20 @@ class ChatResponse(BaseModel):
     answer: str
     rewritten_query: str
     sources: list
+
+
+class RememberRequest(BaseModel):
+    guild_id: str
+    text: str  # 「覚えておいて」を含むユーザー発話そのもの
+    speaker: Optional[str] = None  # 話者の表示名（本人参照の解決用・OI-24）
+    user: Optional[str] = None  # ログ用（"channel_id:user_id" 形式）
+    channel_id: Optional[str] = None  # 教わったチャンネル（任意）
+
+
+class RememberResponse(BaseModel):
+    saved: bool
+    subject: Optional[str] = None
+    content: Optional[str] = None
 
 
 def build_engine(cfg: dict) -> RagEngine:
@@ -126,25 +170,33 @@ def build_engine(cfg: dict) -> RagEngine:
     trace_recorder = None
     if cfg.get("rag", {}).get("debug_trace", False):
         trace_recorder = TraceRecorder()
+    # 明示メモリ（OI-24）: rag.memory_enabled=true のときだけ provider を渡す。
+    # engine 側も同フラグを見るので二重ガード（既定OFF）。
+    memory_provider = None
+    if cfg.get("rag", {}).get("memory_enabled", False):
+        memory_provider = MemoryProvider()
     return RagEngine(
         cfg, store, embedder, llm,
         usage_recorder=UsageRecorder(), reranker=reranker,
-        trace_recorder=trace_recorder,
+        trace_recorder=trace_recorder, memory_provider=memory_provider,
     )
 
 
 def create_app(
     engine: Optional[RagEngine] = None,
     quota_checker: Optional[Callable[[str], Optional[str]]] = None,
+    memory_saver: Optional[Callable[..., bool]] = None,
 ) -> FastAPI:
-    """アプリを生成する。engine / quota_checker を渡すとテスト用に差し替えられる。
+    """アプリを生成する。engine / quota_checker / memory_saver を渡すとテスト用に差し替えられる。
 
     quota_checker(guild_id) -> 案内文 or None。本番では startup で DB 版を設定。
-    engine 注入時（テスト）は quota_checker 未指定なら quota チェックを行わない。
+    memory_saver(guild_id, content, subject, created_by, source_channel_id) -> bool。
+    engine 注入時（テスト）は quota_checker / memory_saver 未指定ならそのチェック/保存を行わない。
     """
     app = FastAPI(title="remember API")
     app.state.engine = engine
     app.state.quota_checker = quota_checker
+    app.state.memory_saver = memory_saver
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -153,6 +205,8 @@ def create_app(
         app.state.engine = build_engine(load_config())
         if app.state.quota_checker is None:
             app.state.quota_checker = default_quota_checker
+        if app.state.memory_saver is None:
+            app.state.memory_saver = default_memory_saver
         # 各テーブルを用意（DB未起動でも /chat は動くので失敗は無視）
         try:
             conn = db.get_connection(init=True)
@@ -180,6 +234,37 @@ def create_app(
             speaker_name=req.speaker,
         )
         return ChatResponse(**result)
+
+    @app.post("/remember", response_model=RememberResponse)
+    async def remember(req: RememberRequest) -> RememberResponse:
+        """「覚えておいて」発話から事実を抽出して memories に保存する（OI-24・書き込み）。
+
+        rag.memory_enabled が OFF、覚えるべき事実が無い、保存失敗のいずれも saved=false を返す
+        （回答系と同じく「機能の失敗で例外を投げない」流儀）。
+        """
+        if not req.text.strip():
+            raise HTTPException(status_code=422, detail="text が空です")
+        engine = app.state.engine
+        if not getattr(engine, "memory_enabled", False):
+            return RememberResponse(saved=False)
+        user_id = _parse_user_id(req.user)
+        extracted = await engine.extract_memory(
+            req.guild_id, req.text, speaker_name=req.speaker, user_id=user_id
+        )
+        if not extracted:
+            return RememberResponse(saved=False)
+        saver = app.state.memory_saver
+        if saver is None:
+            return RememberResponse(saved=False)
+        ok = await asyncio.to_thread(
+            saver, req.guild_id, extracted["content"], extracted["subject"],
+            user_id, req.channel_id,
+        )
+        if not ok:
+            return RememberResponse(saved=False)
+        return RememberResponse(
+            saved=True, subject=extracted["subject"], content=extracted["content"]
+        )
 
     return app
 

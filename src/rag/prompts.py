@@ -35,6 +35,33 @@ Discordサーバーの過去チャットログ。形式: [YYYY-MM-DD HH:MM] 発�
 「1たす1は？」 → [NO_SEARCH]
 """
 
+# 「覚えておいて」と頼まれた発話から、長期保存すべき事実を1つ抽出するプロンプト（OI-24・書き込み）。
+# engine.extract_memory() が {speaker_line} に話者名を差し込んで使う。出力はJSONのみ。
+# 覚えるべき事実が無い（感想・冗談・伝聞など）ときは content を null にさせ、保存しない。
+MEMORY_EXTRACT_PROMPT = """\
+あなたは、ユーザーがチャットボット「れみ」に『覚えておいて』と頼んだ発話から、
+長期的に覚えておくべき事実を1つだけ抽出します。出力はJSONのみ。
+
+{speaker_line}
+## 出力（JSONのみ・前後に説明やコードブロック ``` を付けない）
+{"subject": <誰/何についての事実か。人物・物なら名前、本人のことなら話者名、不明ならnull>,
+ "content": <覚えておくべき事実を簡潔な平叙文で。覚えるべき事実が無ければ null>}
+
+## ルール
+- 「覚えておいて」「覚えといて」などの依頼表現そのものは content に含めない（中身だけ残す）。
+- 「◯◯は△△」「◯◯が好き」「誕生日は…」のような**永続的な事実**を抽出する。
+- 「わたし」「ぼく」「自分」など話者本人を指す場合、subject は話者名にする。
+- 一時的な依頼・感想・冗談・伝聞（「さっき覚えておいてって言われた」等）で覚えるべき事実が
+  無いときは content を null にする（無理に作らない）。
+- content は40字以内の簡潔な平叙文。
+
+## 例
+「かにじるはケーキが好きだよ！覚えておいて！」 → {"subject":"かにじる","content":"ケーキが好き"}
+「わたしの誕生日3月25日だから覚えておいてね」（話者: まめぽん） → {"subject":"まめぽん","content":"誕生日は3月25日"}
+「毎週日曜の夜にゲーム会やってるの覚えといて」 → {"subject":null,"content":"毎週日曜の夜にゲーム会をやっている"}
+「この曲いいから覚えておいてね〜」 → {"subject":null,"content":null}
+"""
+
 # 検索ゲート（OI-23）。Query Rewriter が検索不要と判断したときに返す合図。
 # engine.answer() はこの語が出力に含まれたら埋め込み・検索・リランクをスキップする。
 NO_SEARCH_SENTINEL = "[NO_SEARCH]"
@@ -50,6 +77,21 @@ SPEAKER_SECTION = """\
 「わたし」「自分」「ぼく」など本人を指す言葉や、自分のことを聞かれていそうなときは、
 この「{speaker}」のことだと考えて自然に応じてね。
 親しみを込めて名前で呼びかけてもいいけど、毎回むりに名前を呼ばなくても大丈夫。
+"""
+
+# ユーザーが「覚えておいて」と明示的に教えてくれた事実を回答プロンプトに差し込むブロック（OI-24）。
+# 過去ログ検索の `## 記憶`（うろ覚え）とは別物＝はっきり教わった確かな情報として扱わせる。
+# engine.answer() が memories を取得したときだけ {memories} を埋めて {taught_memories} に差し込む。
+# 教わった事実が無いとき（CLI/既定OFF/0件）は空文字に置換されてブロックごと消える。
+MEMORY_SECTION = """\
+## みんなから教わって覚えていること
+これはみんなが「覚えておいて」と**はっきり教えてくれた事実**だよ（うろ覚えじゃなくて確かな情報）。
+下の「## 記憶」（過去ログのぼんやりした思い出）より優先して、聞かれたら自信を持って答えてね。
+
+{memories}
+
+- これらは確かに教わったことだから、関係する質問には具体的にはっきり答える。
+- でも聞かれてもいないのに無理に持ち出さない（その話に関係ないなら出さなくていい）。
 """
 
 ANSWER_SYSTEM_PROMPT = """\
@@ -98,6 +140,7 @@ ANSWER_SYSTEM_PROMPT = """\
 今日のことではない。発言時刻と現在時刻の前後関係を見て判断する。）
 
 
+{taught_memories}
 ## 記憶
 
 
@@ -139,3 +182,20 @@ def build_context(hits: list) -> str:
         else:
             parts.append(h["chunk_text"])
     return "\n\n---\n\n".join(parts)
+
+
+def build_memories(rows: list) -> str:
+    """教わった事実（memories 行）を箇条書きテキストに整形する（OI-24）。
+
+    subject があれば「- 〔subject〕content」、無ければ「- content」。
+    content が空の行は飛ばす。有効な行が無ければ空文字を返す
+    （呼び出し側はこのとき MEMORY_SECTION ごと消す）。
+    """
+    lines = []
+    for r in rows:
+        content = str(r.get("content") or "").strip()
+        if not content:
+            continue
+        subject = str(r.get("subject") or "").strip()
+        lines.append(f"- 〔{subject}〕{content}" if subject else f"- {content}")
+    return "\n".join(lines)

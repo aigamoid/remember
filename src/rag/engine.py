@@ -8,6 +8,7 @@ usage_log に記録する（コスト計測用・OI-14 C）。記録失敗は回
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -16,11 +17,14 @@ from src.embedder import Embedder
 from src.rag.llm import ChatLLM, Usage
 from src.rag.prompts import (
     ANSWER_SYSTEM_PROMPT,
+    MEMORY_EXTRACT_PROMPT,
+    MEMORY_SECTION,
     NO_SEARCH_SENTINEL,
     REWRITER_SYSTEM_PROMPT,
     SKIP_CONTEXT,
     SPEAKER_SECTION,
     build_context,
+    build_memories,
 )
 from src.rag.reranker import Reranker
 from src.usage import compute_cost
@@ -37,6 +41,7 @@ class RagEngine:
         usage_recorder: Callable[[list[dict]], None] | None = None,
         reranker: Reranker | None = None,
         trace_recorder: Callable[[dict], None] | None = None,
+        memory_provider: Callable[[str], list[dict]] | None = None,
     ) -> None:
         rag_cfg = cfg.get("rag", {})
         self.rewriter_model: str = rag_cfg.get(
@@ -77,6 +82,9 @@ class RagEngine:
         # デバッグトレース（OI-21）。enabled かつ trace_recorder が渡された時のみ記録。
         # 質問・ヒットチャンク・回答を残すためプライバシー上の既定はオフ。
         self.trace_enabled: bool = bool(rag_cfg.get("debug_trace", False))
+        # 明示メモリ（OI-24）。enabled かつ memory_provider が渡された時のみ、
+        # guild の「教わった事実」を回答プロンプトに全件注入する（既定オフ）。
+        self.memory_enabled: bool = bool(rag_cfg.get("memory_enabled", False))
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
         self.store = store
@@ -85,6 +93,7 @@ class RagEngine:
         self.usage_recorder = usage_recorder
         self.reranker = reranker
         self.trace_recorder = trace_recorder
+        self.memory_provider = memory_provider
 
     def _now_str(self) -> str:
         tz = timezone(timedelta(hours=self.tz_offset))
@@ -195,6 +204,61 @@ class RagEngine:
         return comp.text.strip() or query
 
     @staticmethod
+    def _parse_memory_json(text: str) -> dict | None:
+        """抽出LLMの出力からJSONオブジェクトを取り出す。崩れていれば None。"""
+        t = text.strip()
+        if t.startswith("```"):
+            t = t.strip("`")
+            t = t[t.find("{"):]
+        i, j = t.find("{"), t.rfind("}")
+        if i < 0 or j < 0:
+            return None
+        try:
+            return json.loads(t[i:j + 1])
+        except Exception:
+            return None
+
+    async def extract_memory(
+        self,
+        guild_id: str,
+        text: str,
+        speaker_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict | None:
+        """「覚えておいて」発話から保存すべき事実を抽出する（OI-24・書き込み）。
+
+        戻り値: {"subject": str|None, "content": str}、または覚えるべき事実が無ければ None。
+        rewriter_model（安価）で抽出し usage を記録する。LLM失敗・JSON崩れ・content空は
+        None（保存しない＝誤爆の二重ガード）。speaker_name があれば本人参照を解決する。
+        """
+        speaker_line = (
+            f"話者（いまの発話者）の名前: {speaker_name}\n"
+            if speaker_name and speaker_name.strip() else ""
+        )
+        system = MEMORY_EXTRACT_PROMPT.replace("{speaker_line}", speaker_line)
+        events: list[dict] = []
+        try:
+            comp = await self.llm.complete(
+                self.rewriter_model, system, text,
+                temperature=0.1, max_tokens=self.rewriter_max_tokens,
+            )
+        except Exception as e:
+            print(f"[WARN] メモリ抽出失敗（保存しない）: {e}")
+            return None
+        self._record(events, "memory_extract", comp.model, comp.usage)
+        await self._flush(events, guild_id, user_id)
+        data = self._parse_memory_json(comp.text)
+        if not data:
+            return None
+        content = str(data.get("content") or "").strip()
+        if not content or content.lower() == "null":
+            return None
+        subject = str(data.get("subject") or "").strip() or None
+        if subject and subject.lower() == "null":
+            subject = None
+        return {"subject": subject, "content": content}
+
+    @staticmethod
     def _doc_for_rerank(hit: dict) -> str:
         """リランカーに渡すドキュメント文字列。context があれば前置きする。"""
         ctx = hit.get("context_text")
@@ -288,10 +352,27 @@ class RagEngine:
             if speaker_name and speaker_name.strip()
             else ""
         )
+        # 明示メモリ（OI-24）。有効時のみ guild の「教わった事実」を全件取得して注入する。
+        # 取得失敗・0件・無効ならブロックごと消す（回答は止めない）。
+        memory_section = ""
+        if self.memory_enabled and self.memory_provider:
+            try:
+                mem_rows = await asyncio.to_thread(
+                    self.memory_provider, str(guild_id)
+                )
+            except Exception as e:
+                print(f"[WARN] メモリ取得失敗（メモリ無しで続行）: {e}")
+                mem_rows = []
+            memories_text = build_memories(mem_rows or [])
+            if memories_text:
+                memory_section = MEMORY_SECTION.replace("{memories}", memories_text)
+
         system = ANSWER_SYSTEM_PROMPT.replace(
             "{guild_name}", guild_name or self.guild_name
         ).replace("{current_datetime}", self._now_str()).replace(
             "{speaker_section}", speaker_section
+        ).replace(
+            "{taught_memories}", memory_section
         ).replace(
             "{context}", context
         )

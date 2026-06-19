@@ -182,6 +182,21 @@ CREATE INDEX IF NOT EXISTS idx_trace_guild_created
     ON chat_trace (guild_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_trace_created
     ON chat_trace (created_at);
+
+-- ユーザーが明示的に教えた事実（「覚えておいて」）。Discord過去ログ（chunk_index）とは
+-- 別の記憶領域で、回答時に guild 単位で全件をプロンプトへ注入する（少数前提・OI-24）。
+CREATE TABLE IF NOT EXISTS memories (
+    id                BIGSERIAL PRIMARY KEY,
+    guild_id          TEXT NOT NULL,
+    subject           TEXT,              -- 誰/何についての事実か（例: かにじる／本人。任意）
+    content           TEXT NOT NULL,     -- 覚えておく事実本文（例: ケーキが好き）
+    created_by        TEXT,              -- 教えたユーザーID（任意）
+    source_channel_id TEXT,              -- 教わったチャンネルID（任意）
+    created_at        TEXT NOT NULL      -- ISO8601 (UTC)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_guild
+    ON memories (guild_id);
 """
 
 # ingest_jobs.kind の取りうる値
@@ -805,6 +820,71 @@ def insert_trace(
          answer_model, rerank_enabled, prompt_tokens,
          completion_tokens, total_tokens, cost_usd, latency_ms),
     )
+
+
+# ---- memories（ユーザーが明示的に教えた事実。「覚えておいて」・OI-24）----
+
+def insert_memory(
+    conn: psycopg.Connection,
+    guild_id: str,
+    content: str,
+    subject: str | None = None,
+    created_by: str | None = None,
+    source_channel_id: str | None = None,
+) -> int:
+    """教わった事実を1件保存し、その id を返す（書き込み系なので内部で commit）。"""
+    row = conn.execute(
+        """
+        INSERT INTO memories
+            (guild_id, subject, content, created_by, source_channel_id, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s)
+        RETURNING id
+        """,
+        (guild_id, subject, content, created_by, source_channel_id, _now()),
+    ).fetchone()
+    conn.commit()
+    return row[0]
+
+
+def fetch_memories(conn: psycopg.Connection, guild_id: str) -> list[dict]:
+    """guild の教わった事実を全件返す（新しい順）。回答時のプロンプト注入に使う。"""
+    rows = conn.execute(
+        """
+        SELECT id, guild_id, subject, content, created_by, source_channel_id, created_at
+        FROM memories WHERE guild_id = %s ORDER BY created_at DESC, id DESC
+        """,
+        (guild_id,),
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "guild_id": r[1],
+            "subject": r[2],
+            "content": r[3],
+            "created_by": r[4],
+            "source_channel_id": r[5],
+            "created_at": r[6],
+        }
+        for r in rows
+    ]
+
+
+def delete_memory(conn: psycopg.Connection, guild_id: str, memory_id: int) -> bool:
+    """1件削除する（guild 内のみ）。削除できたら True（書き込み系なので内部で commit）。"""
+    cur = conn.execute(
+        "DELETE FROM memories WHERE guild_id = %s AND id = %s",
+        (guild_id, memory_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def count_memories(conn: psycopg.Connection, guild_id: str) -> int:
+    """guild の memories 件数を返す。"""
+    row = conn.execute(
+        "SELECT count(*) FROM memories WHERE guild_id = %s", (guild_id,)
+    ).fetchone()
+    return row[0]
 
 
 def _month_start_iso() -> str:
