@@ -20,6 +20,7 @@ load_dotenv()  # uvicorn 直接起動でも .env を読み込む
 from src import db, quota
 from src.config import load_config
 from src.embedder import Embedder
+from src.memory import MemoryProvider
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM
 from src.rag.reranker import Reranker
@@ -126,10 +127,15 @@ def build_engine(cfg: dict) -> RagEngine:
     trace_recorder = None
     if cfg.get("rag", {}).get("debug_trace", False):
         trace_recorder = TraceRecorder()
+    # 明示メモリ（OI-24）: rag.memory_enabled=true のときだけ provider を渡す。
+    # engine 側も同フラグを見るので二重ガード（既定OFF）。
+    memory_provider = None
+    if cfg.get("rag", {}).get("memory_enabled", False):
+        memory_provider = MemoryProvider()
     return RagEngine(
         cfg, store, embedder, llm,
         usage_recorder=UsageRecorder(), reranker=reranker,
-        trace_recorder=trace_recorder,
+        trace_recorder=trace_recorder, memory_provider=memory_provider,
     )
 
 
