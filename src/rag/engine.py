@@ -16,9 +16,11 @@ from src.embedder import Embedder
 from src.rag.llm import ChatLLM, Usage
 from src.rag.prompts import (
     ANSWER_SYSTEM_PROMPT,
+    MEMORY_SECTION,
     REWRITER_SYSTEM_PROMPT,
     SPEAKER_SECTION,
     build_context,
+    build_memories,
 )
 from src.rag.reranker import Reranker
 from src.usage import compute_cost
@@ -35,6 +37,7 @@ class RagEngine:
         usage_recorder: Callable[[list[dict]], None] | None = None,
         reranker: Reranker | None = None,
         trace_recorder: Callable[[dict], None] | None = None,
+        memory_provider: Callable[[str], list[dict]] | None = None,
     ) -> None:
         rag_cfg = cfg.get("rag", {})
         self.rewriter_model: str = rag_cfg.get(
@@ -71,6 +74,9 @@ class RagEngine:
         # デバッグトレース（OI-21）。enabled かつ trace_recorder が渡された時のみ記録。
         # 質問・ヒットチャンク・回答を残すためプライバシー上の既定はオフ。
         self.trace_enabled: bool = bool(rag_cfg.get("debug_trace", False))
+        # 明示メモリ（OI-24）。enabled かつ memory_provider が渡された時のみ、
+        # guild の「教わった事実」を回答プロンプトに全件注入する（既定オフ）。
+        self.memory_enabled: bool = bool(rag_cfg.get("memory_enabled", False))
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
         self.store = store
@@ -79,6 +85,7 @@ class RagEngine:
         self.usage_recorder = usage_recorder
         self.reranker = reranker
         self.trace_recorder = trace_recorder
+        self.memory_provider = memory_provider
 
     def _now_str(self) -> str:
         tz = timezone(timedelta(hours=self.tz_offset))
@@ -268,10 +275,27 @@ class RagEngine:
             if speaker_name and speaker_name.strip()
             else ""
         )
+        # 明示メモリ（OI-24）。有効時のみ guild の「教わった事実」を全件取得して注入する。
+        # 取得失敗・0件・無効ならブロックごと消す（回答は止めない）。
+        memory_section = ""
+        if self.memory_enabled and self.memory_provider:
+            try:
+                mem_rows = await asyncio.to_thread(
+                    self.memory_provider, str(guild_id)
+                )
+            except Exception as e:
+                print(f"[WARN] メモリ取得失敗（メモリ無しで続行）: {e}")
+                mem_rows = []
+            memories_text = build_memories(mem_rows or [])
+            if memories_text:
+                memory_section = MEMORY_SECTION.replace("{memories}", memories_text)
+
         system = ANSWER_SYSTEM_PROMPT.replace(
             "{guild_name}", guild_name or self.guild_name
         ).replace("{current_datetime}", self._now_str()).replace(
             "{speaker_section}", speaker_section
+        ).replace(
+            "{taught_memories}", memory_section
         ).replace(
             "{context}", build_context(hits)
         )
