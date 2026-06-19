@@ -214,6 +214,38 @@ CREATE TABLE guild_plans (
 > 回答せず案内＝コスト0）、チャンネル数上限は Bot の `/oracle allow` で（`store.py`）。
 > 日次集計は `count_questions_since`（JST 0時境界は `quota.jst_day_start_utc_iso`）。
 
+### chat_trace（回答デバッグトレース・OI-21）
+
+```sql
+CREATE TABLE chat_trace (
+    id                BIGSERIAL PRIMARY KEY,
+    guild_id          TEXT NOT NULL,
+    user_id           TEXT,                  -- 質問したユーザーID（任意）
+    created_at        TEXT NOT NULL,         -- ISO8601 (UTC)
+    question          TEXT NOT NULL,         -- ユーザーの元の質問
+    rewritten_query   TEXT,                  -- Query Rewriter の出力（検索に使った文）
+    answer            TEXT,                  -- 最終回答
+    sources           JSONB,                 -- ヒットしたチャンク（channel/anchor/score/chunk_text 等）
+    answer_model      TEXT,
+    rerank_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでリランクが効いたか
+    prompt_tokens     INTEGER DEFAULT 0,     -- 回答LLMの入力トークン
+    completion_tokens INTEGER DEFAULT 0,     -- 回答LLMの出力トークン
+    total_tokens      INTEGER DEFAULT 0,     -- 全LLM/embeddingの合計トークン
+    cost_usd          NUMERIC DEFAULT 0,     -- 1リクエストの推定総コスト（全段の合計）
+    latency_ms        INTEGER                -- answer() 全体の所要時間（ミリ秒）
+);
+
+CREATE INDEX idx_trace_guild_created ON chat_trace (guild_id, created_at);
+CREATE INDEX idx_trace_created       ON chat_trace (created_at);
+```
+
+> **デバッグ/開発用**。1回の `/chat` の中身（質問・書き換え後クエリ・ヒットチャンク本文・回答・
+> トークン/コスト/レイテンシ）を1行で残す。検索品質やプロンプトの A/B、回答が外した原因の追跡に使う。
+> `src/rag/engine.py` の `answer()` が `src/trace.py` の `TraceRecorder` 経由で記録する
+> （`src/db.py` の `insert_trace`）。usage_log 同様、記録失敗は回答を止めない。
+> **既定オフ**。`config.yml` の `rag.debug_trace: true` のときだけ記録する（質問・回答本文を
+> 保存するため、本番ではプライバシー上 false 運用が前提）。
+
 ## Qdrant ペイロード仕様
 
 コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`・全guild共有）

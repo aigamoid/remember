@@ -54,6 +54,8 @@ rag:
   rewriter_history_max_chars: 1000            # 同・文字数バジェット。履歴はrewriterにも乗るため別途絞ってtoken二重計上を抑制
   guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト
                                               # （Bot経由のリクエストでは実サーバー名が優先される）
+  debug_trace: false                          # OI-21: 質問/ヒットチャンク/回答を chat_trace に保存（デバッグ用）
+                                              # 既定OFF。質問・回答本文を残すため本番はプライバシー上 false 運用が前提
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（要 .env の JINA_API_KEY）
     provider: "jina"                          # 現状 jina のみ対応

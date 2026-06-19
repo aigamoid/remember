@@ -35,8 +35,9 @@ waiwai-oracle/
 │   ├── rag/
 │   │   ├── prompts.py     # Query Rewriter・れみちゃん回答プロンプト（Difyから移植・OI-15でリブランド）
 │   │   ├── llm.py         # OpenRouterチャットLLMラッパー（Completion=本文+usage を返す）
-│   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成・usage計測）
+│   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成・usage計測・traceデバッグ記録）
 │   ├── usage.py           # 利用量コスト算出 + UsageRecorder（usage_log書き込み）
+│   ├── trace.py           # 回答デバッグトレース TraceRecorder（chat_trace書き込み・既定OFF・OI-21）
 │   ├── quota.py           # プラン上限の判定・JST日次境界・案内文（純ロジック・OI-14 C-2）
 │   ├── admin/             # 管理者向けポータル（FastAPI + Jinja2・パスワード認証）
 │   │   ├── app.py         # ダッシュボード + /billing（プラン管理）

@@ -553,3 +553,83 @@ class TestRerank:
         rerank_ev = next(e for e in captured if e["kind"] == "rerank")
         assert rerank_ev["total_tokens"] == 11
         assert rerank_ev["model"] == "fake-reranker"
+
+
+# ── デバッグトレース（OI-21）────────────────────────────────────────────────
+def _engine_trace(store, llm, recorder, enabled=True):
+    """debug_trace を切り替えた engine を作る。recorder は dict を1件受ける callable。"""
+    cfg = {"rag": {"top_k": 5, "debug_trace": enabled}}
+    return RagEngine(cfg, store, FakeEmbedder(), llm, trace_recorder=recorder)
+
+
+class TestDebugTrace:
+    def test_records_when_enabled(self, store):
+        _seed(store, chunk_text="渋谷で飲み会をした", context_text="文脈")
+        captured: list[dict] = []
+        llm = FakeLLM(["書き換えクエリ", "れみの答え"])
+        engine = _engine_trace(store, llm, captured.append, enabled=True)
+        asyncio.run(engine.answer("g1", "飲み会どうだった？", user_id="u1"))
+        assert len(captured) == 1
+        row = captured[0]
+        assert row["guild_id"] == "g1"
+        assert row["user_id"] == "u1"
+        assert row["question"] == "飲み会どうだった？"
+        assert row["rewritten_query"] == "書き換えクエリ"
+        assert row["answer"] == "れみの答え"
+        assert row["rerank_enabled"] is False
+        # ヒットチャンクは本文・文脈・スコアまで残す（デバッグ用）
+        assert row["sources"][0]["chunk_text"] == "渋谷で飲み会をした"
+        assert row["sources"][0]["context_text"] == "文脈"
+        assert "score" in row["sources"][0]
+        # トークン/コスト/レイテンシが入る
+        assert row["total_tokens"] > 0
+        assert row["latency_ms"] >= 0
+
+    def test_not_recorded_when_disabled(self, store):
+        _seed(store)
+        captured: list[dict] = []
+        llm = FakeLLM(["q", "答え"])
+        engine = _engine_trace(store, llm, captured.append, enabled=False)
+        result = asyncio.run(engine.answer("g1", "質問"))
+        assert captured == []
+        assert result["answer"] == "答え"
+
+    def test_not_recorded_without_recorder(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        # enabled でも recorder 未注入なら何も起きない（クラッシュしない）
+        cfg = {"rag": {"top_k": 5, "debug_trace": True}}
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm, trace_recorder=None)
+        result = asyncio.run(engine.answer("g1", "質問"))
+        assert result["answer"] == "答え"
+
+    def test_recorder_failure_does_not_break_answer(self, store):
+        _seed(store)
+
+        def boom(_row):
+            raise RuntimeError("DB down")
+
+        llm = FakeLLM(["q", "答え"])
+        engine = _engine_trace(store, llm, boom, enabled=True)
+        result = asyncio.run(engine.answer("g1", "質問"))
+        # トレース記録が失敗しても回答は返る
+        assert result["answer"] == "答え"
+
+    def test_rerank_flag_true_when_reranking(self, store):
+        _seed_many(store, _RR_VECS)
+        captured: list[dict] = []
+        reranker = FakeReranker(order=[2, 0, 1], tokens=5)
+        llm = FakeLLM(["q", "答え"])
+        cfg = {
+            "rag": {
+                "top_k": 2,
+                "debug_trace": True,
+                "reranker": {"enabled": True, "top_n": 30},
+            }
+        }
+        engine = RagEngine(
+            cfg, store, FakeEmbedder(), llm,
+            reranker=reranker, trace_recorder=captured.append,
+        )
+        asyncio.run(engine.answer("g1", "質問"))
+        assert captured[0]["rerank_enabled"] is True

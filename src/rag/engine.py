@@ -8,6 +8,7 @@ usage_log に記録する（コスト計測用・OI-14 C）。記録失敗は回
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -32,6 +33,7 @@ class RagEngine:
         llm: ChatLLM,
         usage_recorder: Callable[[list[dict]], None] | None = None,
         reranker: Reranker | None = None,
+        trace_recorder: Callable[[dict], None] | None = None,
     ) -> None:
         rag_cfg = cfg.get("rag", {})
         self.rewriter_model: str = rag_cfg.get(
@@ -65,6 +67,9 @@ class RagEngine:
         rerank_cfg = rag_cfg.get("reranker", {})
         self.rerank_enabled: bool = bool(rerank_cfg.get("enabled", False))
         self.rerank_top_n: int = rerank_cfg.get("top_n", 30)
+        # デバッグトレース（OI-21）。enabled かつ trace_recorder が渡された時のみ記録。
+        # 質問・ヒットチャンク・回答を残すためプライバシー上の既定はオフ。
+        self.trace_enabled: bool = bool(rag_cfg.get("debug_trace", False))
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
         self.store = store
@@ -72,6 +77,7 @@ class RagEngine:
         self.llm = llm
         self.usage_recorder = usage_recorder
         self.reranker = reranker
+        self.trace_recorder = trace_recorder
 
     def _now_str(self) -> str:
         tz = timezone(timedelta(hours=self.tz_offset))
@@ -146,6 +152,15 @@ class RagEngine:
         except Exception as e:  # 計測の失敗で回答を落とさない
             print(f"[WARN] usage flush 失敗: {e}")
 
+    async def _flush_trace(self, row: dict) -> None:
+        """1リクエスト分のトレースを recorder に渡して記録する。失敗しても無視。"""
+        if not (self.trace_enabled and self.trace_recorder):
+            return
+        try:
+            await asyncio.to_thread(self.trace_recorder, row)
+        except Exception as e:  # トレースの失敗で回答を落とさない
+            print(f"[WARN] trace flush 失敗: {e}")
+
     async def rewrite(
         self,
         query: str,
@@ -213,6 +228,7 @@ class RagEngine:
         history は直近の会話（{"role","content"} の古い順リスト）。渡すと
         クエリ書き換えと回答の両方が会話文脈を踏まえる（マルチターン・OI-10）。
         """
+        t0 = time.perf_counter()
         events: list[dict] = []
         # 回答LLM向け（広め）と Query Rewriter 向け（狭め）で別々に整える。
         # rewriter のペア数は回答側を超えないようにする。
@@ -263,6 +279,35 @@ class RagEngine:
             }
             for h in hits
         ]
+
+        # デバッグトレース（OI-21）。有効時のみ、質問・ヒットチャンク本文・回答を
+        # まとめて chat_trace に残す（記録失敗は回答を止めない）。
+        if self.trace_enabled and self.trace_recorder:
+            await self._flush_trace({
+                "guild_id": str(guild_id),
+                "user_id": user_id,
+                "question": query,
+                "rewritten_query": rewritten,
+                "answer": comp.text,
+                "sources": [
+                    {
+                        "channel_name": h.get("channel_name"),
+                        "anchor_timestamp": h.get("anchor_timestamp"),
+                        "score": h.get("score"),
+                        "chunk_text": h.get("chunk_text"),
+                        "context_text": h.get("context_text"),
+                    }
+                    for h in hits
+                ],
+                "answer_model": comp.model,
+                "rerank_enabled": bool(use_rerank),
+                "prompt_tokens": comp.usage.prompt_tokens,
+                "completion_tokens": comp.usage.completion_tokens,
+                "total_tokens": sum(e.get("total_tokens", 0) for e in events),
+                "cost_usd": sum(e.get("cost_usd", 0.0) for e in events),
+                "latency_ms": int((time.perf_counter() - t0) * 1000),
+            })
+
         return {
             "answer": comp.text,
             "rewritten_query": rewritten,

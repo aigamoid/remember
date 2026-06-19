@@ -23,6 +23,7 @@ from src.embedder import Embedder
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM
 from src.rag.reranker import Reranker
+from src.trace import TraceRecorder
 from src.usage import UsageRecorder
 from src.vectorstore import VectorStore
 
@@ -118,9 +119,15 @@ def build_engine(cfg: dict) -> RagEngine:
             api_key=os.environ.get("JINA_API_KEY"),
             model=rerank_cfg.get("model", "jina-reranker-v2-base-multilingual"),
         )
+    # デバッグトレース（OI-21）: rag.debug_trace=true のときだけ recorder を渡す。
+    # engine 側も同フラグを見るので二重ガード（既定OFF・プライバシー）。
+    trace_recorder = None
+    if cfg.get("rag", {}).get("debug_trace", False):
+        trace_recorder = TraceRecorder()
     return RagEngine(
         cfg, store, embedder, llm,
         usage_recorder=UsageRecorder(), reranker=reranker,
+        trace_recorder=trace_recorder,
     )
 
 

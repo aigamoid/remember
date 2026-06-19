@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+from psycopg.types.json import Json
 
 from src.models import RawAttachment, RawMessage
 
@@ -156,6 +157,31 @@ CREATE TABLE IF NOT EXISTS guild_plans (
     stripe_subscription_id TEXT,
     current_period_end     TEXT
 );
+
+-- 回答1リクエストのデバッグ用トレース（質問・書き換え・ヒットチャンク・回答を1行に保存）。
+-- プライバシー上、本番は config の rag.debug_trace=false で無効化する（既定OFF・OI-21）。
+CREATE TABLE IF NOT EXISTS chat_trace (
+    id                BIGSERIAL PRIMARY KEY,
+    guild_id          TEXT NOT NULL,
+    user_id           TEXT,                  -- 質問したユーザーID（任意）
+    created_at        TEXT NOT NULL,         -- ISO8601 (UTC)
+    question          TEXT NOT NULL,         -- ユーザーの元の質問
+    rewritten_query   TEXT,                  -- Query Rewriter の出力（検索に使った文）
+    answer            TEXT,                  -- 最終回答
+    sources           JSONB,                 -- ヒットしたチャンク（channel/anchor/score/chunk_text 等）
+    answer_model      TEXT,
+    rerank_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでリランクが効いたか
+    prompt_tokens     INTEGER DEFAULT 0,     -- 回答LLMの入力トークン
+    completion_tokens INTEGER DEFAULT 0,     -- 回答LLMの出力トークン
+    total_tokens      INTEGER DEFAULT 0,     -- 全LLM/embeddingの合計トークン
+    cost_usd          NUMERIC DEFAULT 0,     -- 1リクエストの推定総コスト（全段の合計）
+    latency_ms        INTEGER                -- answer() 全体の所要時間（ミリ秒）
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_guild_created
+    ON chat_trace (guild_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_trace_created
+    ON chat_trace (created_at);
 """
 
 # ingest_jobs.kind の取りうる値
@@ -744,6 +770,40 @@ def insert_usage(
         """,
         (guild_id, user_id, _now(), kind, model,
          prompt_tokens, completion_tokens, total_tokens, cost_usd),
+    )
+
+
+# ---- chat_trace（回答1リクエストのデバッグトレース。recorder が commit を管理する）----
+
+def insert_trace(
+    conn: psycopg.Connection,
+    guild_id: str,
+    question: str,
+    rewritten_query: str | None = None,
+    answer: str | None = None,
+    sources: list[dict] | None = None,
+    answer_model: str | None = None,
+    rerank_enabled: bool = False,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: float = 0.0,
+    latency_ms: int | None = None,
+    user_id: str | None = None,
+) -> None:
+    """回答1リクエスト分のトレースを記録する（commit は呼び出し元が行う）。"""
+    conn.execute(
+        """
+        INSERT INTO chat_trace
+            (guild_id, user_id, created_at, question, rewritten_query, answer,
+             sources, answer_model, rerank_enabled, prompt_tokens,
+             completion_tokens, total_tokens, cost_usd, latency_ms)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (guild_id, user_id, _now(), question, rewritten_query, answer,
+         Json(sources) if sources is not None else None,
+         answer_model, rerank_enabled, prompt_tokens,
+         completion_tokens, total_tokens, cost_usd, latency_ms),
     )
 
 

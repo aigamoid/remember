@@ -17,6 +17,28 @@
 Qdrant native の sparse+dense 融合(RRF)は追加API課金ゼロだが、**日本語のBM25分かち書きが弱い**・
 全チャンク**再インデックス**が必要。Phase 1 のリランクで品質が足りなければ再検討する。
 
+## OI-21: 回答のデバッグトレース（質問・ヒットチャンク・回答のログ）✅ 実装完了（2026-06-19・feature/chat-trace-logging）
+
+**背景:** 検索品質や回答の A/B、回答が外した原因の追跡をしたくても、**実際に投げた質問・
+検索でヒットしたチャンク・出力した回答が一切残っていなかった**（usage_log はトークン/コストの
+メトリクスのみ・APIログはアクセスログのみ・Bot履歴はメモリ揮発）。OI-9 リランカー A/B の
+質問セットを実チャンクから推測する羽目になり、観測性の欠如が顕在化した。
+
+**実装方式（usage_log と同じ流儀・既定OFF）:**
+- `chat_trace` テーブル新設（question / rewritten_query / answer / sources(JSONB・本文含む) /
+  model / rerank_enabled / tokens / cost_usd / latency_ms）。詳細は `docs/SCHEMA.md`。
+- `src/trace.py` の `TraceRecorder`（`UsageRecorder` の双子）が `src/db.py insert_trace` で書き込み。
+  `src/rag/engine.py answer()` が1リクエスト分を `asyncio.to_thread` 経由で記録。
+- **既定オフ**。`config.yml rag.debug_trace: true` のときだけ記録（`build_engine` と engine の二重ガード）。
+  記録失敗は回答を止めない（DB障害時でも /chat は動く）。
+- テスト +10件（engine 5 / db 2 / api 3・全315 PASS）。
+
+**残・要確認(人間):**
+- **プライバシー**: 質問・回答本文・チャンク本文を平文保存する。公開/本番では false 運用が前提
+  （規約・OI-14 A と整合させる）。将来 guild 単位 DB トグル（plan_defs 流）や保持期間・自動purgeも検討。
+- 管理ポータル `src/admin/` への閲覧画面は未実装（今は SQL で参照）。必要になれば追加。
+- 関連: OI-9（リランカー A/B）/ OI-16（コスト）/ OI-14 A（法務）
+
 ## OI-10: 会話履歴（マルチターン）対応 ✅ 実装完了（2026-06-17・feature/oi10-multiturn-history）
 
 自前API化に伴い conversation_id を廃止（DEVLOG 2026-03-25 の「無効化プラン」を実施）して
