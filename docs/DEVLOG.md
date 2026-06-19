@@ -4,6 +4,35 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-19 — CI（GitHub Actions）導入・docs直接コミット運用・メインdir develop化
+
+PR作成時の自動テストが無く手動 `pytest` だった状態を解消し、CI を導入。
+あわせて運用ルール（ドキュメントのコミット方法・worktree整理）を整備した。
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `.github/workflows/tests.yml` | **新規**。PR/push(main,develop)時に pytest 自動実行。Postgresはサービスコンテナ(`postgres:16`)・`TEST_DATABASE_URL`で接続。Python 3.11（PR #14でdevelopにマージ） |
+| 2 | `tests/test_api.py` | TestQuotaの期待タプルを4→5要素に修正（`engine.answer`のhistory引数追加に追従・develop赤を解消／PR #18） |
+| 3 | `CLAUDE.md` | CIセクション追記＋「docsはPR不要でdevelop直接コミット可」「semantic conflict注意」を明文化（PR #17・以降はdevelop直接） |
+| 4 | `docs/ARCHITECTURE.md` | ディレクトリ構成に `.github/workflows/tests.yml` を追記 |
+| 5 | `docs/DEVLOG.md` | remember-vmデプロイ記録の取り込み＋本エントリ |
+
+### ハマりポイント
+- **semantic conflict**: 古いfeatureブランチ(oi14)が、共有関数のシグネチャ変更後のdevelopにマージされ、**テキスト衝突なしにテストが壊れた**。CI導入初日に検知できたのが収穫。
+- `.github/workflows/` のpushには gh トークンの `workflow` スコープが必要（`gh auth refresh -s workflow` でブラウザ認可）。
+- PR CIは「head＋最新developのマージ結果」で走るため、developが赤いと無関係なdocs PRも赤くなる（developを先に直すのが正解）。
+- `~/Desktop` 配下のiCloud同期が worktree に「 2」複製ゴミ（`.git 2`等）を量産。worktree運用と相性が悪く要注意。
+
+### 決定事項
+- **ドキュメント（CLAUDE.md/DEVLOG等）はPR不要でdevelopへ直接コミット**（gitignoreはしない＝共有維持）。コードは従来どおりfeatureブランチ＋PR。
+- **PRのマージは人間が行う**（Claude CodeはPR作成まで）。
+- **メイン作業dirは develop に固定**（クリーンな統合基点・他セッションの方針に合わせた）。別ブランチ作業はworktreeで分離。
+- 未コミットだったREADME書き直しは develop(`b78f623`)で対応済み＝重複のため不採用、AGENTS.md(旧コピー)は有害につき破棄。
+
+### 次のステップ
+- `~/Desktop` をクラウド同期対象から外す等、worktree運用の安全化を検討。
+- 将来CD（GCP VMへの自動デプロイ）の検討（今回はCIのみ）。
+
 ## 2026-06-18 — develop (`d2274a8`) を remember-vm に反映
 
 OI-18 マージ済みの `origin/develop` を GCP 検証機 `remember-vm` にデプロイ。  

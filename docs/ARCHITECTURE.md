@@ -6,6 +6,9 @@
 waiwai-oracle/
 ├── README.md
 ├── CLAUDE.md
+├── .github/
+│   └── workflows/
+│       └── tests.yml     # CI: PR/push時にpytestを自動実行（Postgresサービスコンテナ）
 ├── docs/
 │   ├── ARCHITECTURE.md   (このファイル)
 │   ├── DIAGRAMS.md
