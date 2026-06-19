@@ -220,6 +220,7 @@ class MoimoichanBot(discord.Client):
                     query, str(message.guild.id), user,
                     guild_name=message.guild.name,
                     history=history,
+                    speaker=message.author.display_name,
                 )
                 # 成功時のみ会話を記憶（このチャンネルの次ターンへ引き継ぐ）。
                 self._remember_turn(message.channel.id, query, answer)
