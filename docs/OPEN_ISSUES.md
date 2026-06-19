@@ -348,6 +348,37 @@ LLMツール使用（OI-17）に頼らず**決定論的に表示名へ置換**�
 - 未発言ユーザー（lurker）の `<@ID>` はDBに名前が無く未解決のまま。必要なら将来 Discord REST で補完。
 - 関連: OI-17（ツール使用の代替）/ OI-16（低コスト維持）
 
+## OI-22: 回答LLMに「いま話しかけている人」の名前を渡す ✅ 実装完了（2026-06-19・feature/oi22-speaker-name）
+
+**背景:** Bot に @メンションで質問しても、回答LLMには**質問文だけ**が届いており、
+**発言者（話しかけてきた本人）の名前を一切認識していなかった**。Bot→API へ渡すのは
+`query`/`guild_id`/`user`（数値ID・usage集計用）/`guild_name`/`history` のみで、
+回答プロンプト（`ANSWER_SYSTEM_PROMPT`）にも発言者名の差し込み口が無かった。
+このため「わたしのこと覚えてる？」「○○って呼んで」のような本人を指す発話を解釈できず、
+名前で呼びかけることもできなかった（過去ログ側のチャンクには発言者名が入っているが、
+それは検索対象＝他者の記録であって、今まさに話している人とは別物）。
+
+**実装方式（history と同じく呼び出し側が渡すステートレス設計・任意）:**
+- `src/rag/prompts.py`: `SPEAKER_SECTION`（「いま話しかけてくれている人」ブロック）を新設し、
+  `ANSWER_SYSTEM_PROMPT` に `{speaker_section}` プレースホルダを追加。
+- `src/rag/engine.py`: `answer()` に `speaker_name`（任意）を追加。値があればブロックを差し込み、
+  未指定・空白なら**ブロックごと空文字に置換して消す**（CLI 等は従来どおり）。
+- `src/api.py`: `ChatRequest.speaker` を追加し `answer()` の `speaker_name` へ素通し。
+- `moimoichan_Discordbot/`: `oracle_client.chat()` に `speaker` を追加（payload に載せる）。
+  `bot.py` が `message.author.display_name`（crawler の保存名と同じ＝サーバーニックネーム優先）を渡す。
+- `chat_cli.py`: 変更不要（speaker 省略＝ブロック非表示）。
+- テスト +4件（engine 3：差し込み/未指定で消える/空白扱い・api 1：素通し）。既存 api テストの
+  タプル比較を6要素へ更新。
+
+**反映:** プロンプト・APIの変更につき **api / bot コンテナの再ビルド**が必要
+（`docker compose up -d --build api bot`）。
+
+**残・将来の選択肢(任意):**
+- 今回は**回答プロンプトのみ**に注入。「わたしが前に言ってたやつ」を**検索**で当てたい場合は
+  Query Rewriter にも speaker を渡して名前で具体化する余地がある（クエリ汚染リスクとのトレードオフ）。
+- 表示名は guild ニックネーム優先のため、改名すると過去ログ側の名前と食い違うことがある。
+- 関連: OI-18（`<@ID>`→表示名解決）/ OI-17（ツール使用の代替）/ OI-10（呼び出し側ステートレス設計）
+
 ## ~~OI-1: dry_run.py 未実行~~ ✅ 完了 (2026-03-15)
 総メッセージ数: 36,128件 / 推定チャンク数: 35,994件（除外前）。
 ノイズチャンネル7本を config.yml の exclude_channel_ids に追加済み。
