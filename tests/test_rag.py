@@ -333,6 +333,35 @@ class TestAnswer:
         assert "{current_datetime}" not in answer_system
         assert "今は 20" in answer_system  # _now_str() の "YYYY-..." が埋まっている
 
+    def test_speaker_name_injected_into_answer_prompt(self, store):
+        # OI-22: いま話しかけている人の表示名を回答プロンプトに差し込む
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(
+            _engine(store, llm).answer("g1", "query", speaker_name="まめぽん")
+        )
+        answer_system = llm.calls[1]["system"]
+        assert "{speaker_section}" not in answer_system
+        assert "{speaker}" not in answer_system
+        assert "まめぽん" in answer_system
+        assert "いま話しかけてくれている人" in answer_system
+
+    def test_speaker_section_removed_when_no_speaker(self, store):
+        # speaker_name 未指定（CLI等）ならブロックごと消える（プレースホルダも残らない）
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(_engine(store, llm).answer("g1", "query"))
+        answer_system = llm.calls[1]["system"]
+        assert "{speaker_section}" not in answer_system
+        assert "いま話しかけてくれている人" not in answer_system
+
+    def test_blank_speaker_treated_as_absent(self, store):
+        # 空白だけの speaker はブロックを出さない
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(_engine(store, llm).answer("g1", "query", speaker_name="   "))
+        assert "いま話しかけてくれている人" not in llm.calls[1]["system"]
+
 
 # ── マルチターン会話履歴（OI-10） ────────────────────────────────────────────
 
