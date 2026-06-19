@@ -9,7 +9,7 @@ from qdrant_client import QdrantClient
 
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM, Completion, Usage, strip_think
-from src.rag.prompts import build_context
+from src.rag.prompts import build_context, build_memories
 from src.rag.reranker import RerankResult
 from src.vectorstore import VectorStore
 
@@ -361,6 +361,96 @@ class TestAnswer:
         llm = FakeLLM(["q", "答え"])
         asyncio.run(_engine(store, llm).answer("g1", "query", speaker_name="   "))
         assert "いま話しかけてくれている人" not in llm.calls[1]["system"]
+
+
+# ── 明示メモリ build_memories（OI-24） ───────────────────────────────────────
+
+class TestBuildMemories:
+    def test_empty_returns_empty_string(self):
+        assert build_memories([]) == ""
+
+    def test_content_only(self):
+        out = build_memories([{"content": "ケーキが好き"}])
+        assert out == "- ケーキが好き"
+
+    def test_with_subject(self):
+        out = build_memories([{"subject": "かにじる", "content": "ケーキが好き"}])
+        assert out == "- 〔かにじる〕ケーキが好き"
+
+    def test_skips_blank_content(self):
+        out = build_memories(
+            [{"content": "  "}, {"subject": "x", "content": "残る"}]
+        )
+        assert out == "- 〔x〕残る"
+
+    def test_multiple_lines(self):
+        out = build_memories(
+            [{"content": "A"}, {"subject": "B", "content": "C"}]
+        )
+        assert out == "- A\n- 〔B〕C"
+
+
+# ── 明示メモリの回答プロンプト注入（OI-24） ──────────────────────────────────
+
+def _engine_mem(store, llm, provider, enabled=True) -> RagEngine:
+    cfg = {"rag": {"top_k": 5, "memory_enabled": enabled}}
+    return RagEngine(cfg, store, FakeEmbedder(), llm, memory_provider=provider)
+
+
+class TestMemoryInjection:
+    def test_memories_injected_when_enabled(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        provider = lambda gid: [{"subject": "かにじる", "content": "ケーキが好き"}]
+        asyncio.run(_engine_mem(store, llm, provider).answer("g1", "query"))
+        system = llm.calls[1]["system"]
+        assert "{taught_memories}" not in system
+        assert "{memories}" not in system
+        assert "みんなから教わって覚えていること" in system
+        assert "〔かにじる〕ケーキが好き" in system
+
+    def test_provider_receives_guild_id(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        seen = []
+        provider = lambda gid: seen.append(gid) or [{"content": "x"}]
+        asyncio.run(_engine_mem(store, llm, provider).answer("g1", "query"))
+        assert seen == ["g1"]
+
+    def test_not_injected_when_disabled(self, store):
+        # memory_enabled=false なら provider があっても注入しない（ブロックも消える）
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        provider = lambda gid: [{"content": "教わった事実"}]
+        asyncio.run(
+            _engine_mem(store, llm, provider, enabled=False).answer("g1", "query")
+        )
+        system = llm.calls[1]["system"]
+        assert "{taught_memories}" not in system
+        assert "みんなから教わって覚えていること" not in system
+
+    def test_section_removed_when_no_memories(self, store):
+        # enabled でも 0 件ならブロックごと消える（プレースホルダも残らない）
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(_engine_mem(store, llm, lambda gid: []).answer("g1", "query"))
+        system = llm.calls[1]["system"]
+        assert "{taught_memories}" not in system
+        assert "みんなから教わって覚えていること" not in system
+
+    def test_provider_failure_does_not_break_answer(self, store):
+        # 取得失敗（例外）でもメモリ無しで回答を続行する
+        _seed(store)
+        llm = FakeLLM(["q", "答えだよ"])
+
+        def boom(gid):
+            raise RuntimeError("DB down")
+
+        result = asyncio.run(
+            _engine_mem(store, llm, boom).answer("g1", "query")
+        )
+        assert result["answer"] == "答えだよ"
+        assert "みんなから教わって覚えていること" not in llm.calls[1]["system"]
 
 
 # ── マルチターン会話履歴（OI-10） ────────────────────────────────────────────
