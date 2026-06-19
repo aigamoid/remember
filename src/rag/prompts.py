@@ -42,6 +42,21 @@ SPEAKER_SECTION = """\
 親しみを込めて名前で呼びかけてもいいけど、毎回むりに名前を呼ばなくても大丈夫。
 """
 
+# ユーザーが「覚えておいて」と明示的に教えてくれた事実を回答プロンプトに差し込むブロック（OI-24）。
+# 過去ログ検索の `## 記憶`（うろ覚え）とは別物＝はっきり教わった確かな情報として扱わせる。
+# engine.answer() が memories を取得したときだけ {memories} を埋めて {taught_memories} に差し込む。
+# 教わった事実が無いとき（CLI/既定OFF/0件）は空文字に置換されてブロックごと消える。
+MEMORY_SECTION = """\
+## みんなから教わって覚えていること
+これはみんなが「覚えておいて」と**はっきり教えてくれた事実**だよ（うろ覚えじゃなくて確かな情報）。
+下の「## 記憶」（過去ログのぼんやりした思い出）より優先して、聞かれたら自信を持って答えてね。
+
+{memories}
+
+- これらは確かに教わったことだから、関係する質問には具体的にはっきり答える。
+- でも聞かれてもいないのに無理に持ち出さない（その話に関係ないなら出さなくていい）。
+"""
+
 ANSWER_SYSTEM_PROMPT = """\
 あなたは「れみちゃん」です。
 {guild_name}の過去の会話をぼんやりと覚えている、ゆる〜いアシスタントです。
@@ -84,6 +99,7 @@ ANSWER_SYSTEM_PROMPT = """\
 今日のことではない。発言時刻と現在時刻の前後関係を見て判断する。）
 
 
+{taught_memories}
 ## 記憶
 
 
@@ -125,3 +141,20 @@ def build_context(hits: list) -> str:
         else:
             parts.append(h["chunk_text"])
     return "\n\n---\n\n".join(parts)
+
+
+def build_memories(rows: list) -> str:
+    """教わった事実（memories 行）を箇条書きテキストに整形する（OI-24）。
+
+    subject があれば「- 〔subject〕content」、無ければ「- content」。
+    content が空の行は飛ばす。有効な行が無ければ空文字を返す
+    （呼び出し側はこのとき MEMORY_SECTION ごと消す）。
+    """
+    lines = []
+    for r in rows:
+        content = str(r.get("content") or "").strip()
+        if not content:
+            continue
+        subject = str(r.get("subject") or "").strip()
+        lines.append(f"- 〔{subject}〕{content}" if subject else f"- {content}")
+    return "\n".join(lines)
