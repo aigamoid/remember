@@ -90,6 +90,7 @@ class OracleGroup(app_commands.Group):
                 f"⚠️ {result['message']}", ephemeral=True
             )
             return
+        job_id = result["job_id"]  # None=取り込みジョブが重複（既にキュー済み）
         note = (
             "取り込みを始めるね。終わったら質問できるよ〜。"
             if job_id is not None
