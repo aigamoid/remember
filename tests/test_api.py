@@ -20,8 +20,11 @@ class FakeEngine:
         guild_name: str | None = None,
         user_id: str | None = None,
         history: list[dict] | None = None,
+        speaker_name: str | None = None,
     ) -> dict:
-        self.calls.append((guild_id, query, guild_name, user_id, history))
+        self.calls.append(
+            (guild_id, query, guild_name, user_id, history, speaker_name)
+        )
         return {
             "answer": "テスト回答！っ",
             "rewritten_query": "書き換え済み",
@@ -90,7 +93,7 @@ class TestChat:
         engine = FakeEngine()
         client = TestClient(create_app(engine=engine))
         client.post("/chat", json={"guild_id": "g99", "query": "質問"})
-        assert engine.calls == [("g99", "質問", None, None, None)]
+        assert engine.calls == [("g99", "質問", None, None, None, None)]
 
     def test_chat_passes_guild_name(self):
         engine = FakeEngine()
@@ -99,7 +102,7 @@ class TestChat:
             "/chat",
             json={"guild_id": "g99", "query": "質問", "guild_name": "テストサーバー"},
         )
-        assert engine.calls == [("g99", "質問", "テストサーバー", None, None)]
+        assert engine.calls == [("g99", "質問", "テストサーバー", None, None, None)]
 
     def test_chat_parses_user_id_from_user_field(self):
         engine = FakeEngine()
@@ -108,7 +111,7 @@ class TestChat:
             "/chat",
             json={"guild_id": "g99", "query": "質問", "user": "ch1:u42"},
         )
-        assert engine.calls == [("g99", "質問", None, "u42", None)]
+        assert engine.calls == [("g99", "質問", None, "u42", None, None)]
 
     def test_chat_passes_history(self):
         engine = FakeEngine()
@@ -121,7 +124,17 @@ class TestChat:
             "/chat",
             json={"guild_id": "g1", "query": "それ詳しく", "history": hist},
         )
-        assert engine.calls == [("g1", "それ詳しく", None, None, hist)]
+        assert engine.calls == [("g1", "それ詳しく", None, None, hist, None)]
+
+    def test_chat_passes_speaker(self):
+        # OI-22: speaker フィールドが engine.answer の speaker_name へ素通しされる
+        engine = FakeEngine()
+        client = TestClient(create_app(engine=engine))
+        client.post(
+            "/chat",
+            json={"guild_id": "g1", "query": "質問", "speaker": "まめぽん"},
+        )
+        assert engine.calls == [("g1", "質問", None, None, None, "まめぽん")]
 
     def test_empty_query_rejected(self, client):
         resp = client.post("/chat", json={"guild_id": "g1", "query": "   "})
@@ -162,7 +175,7 @@ class TestQuota:
         resp = client.post("/chat", json={"guild_id": "g1", "query": "質問"})
         assert resp.status_code == 200
         assert resp.json()["answer"] == "テスト回答！っ"
-        assert engine.calls == [("g1", "質問", None, None, None)]
+        assert engine.calls == [("g1", "質問", None, None, None, None)]
 
     def test_quota_checker_receives_guild_id(self):
         seen = []

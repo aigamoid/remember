@@ -17,6 +17,7 @@ from src.rag.llm import ChatLLM, Usage
 from src.rag.prompts import (
     ANSWER_SYSTEM_PROMPT,
     REWRITER_SYSTEM_PROMPT,
+    SPEAKER_SECTION,
     build_context,
 )
 from src.rag.reranker import Reranker
@@ -219,6 +220,7 @@ class RagEngine:
         guild_name: str | None = None,
         user_id: str | None = None,
         history: list[dict] | None = None,
+        speaker_name: str | None = None,
     ) -> dict:
         """質問に回答する。戻り値: {answer, rewritten_query, sources}
 
@@ -227,6 +229,9 @@ class RagEngine:
         user_id は usage_log の集計用（任意）。
         history は直近の会話（{"role","content"} の古い順リスト）。渡すと
         クエリ書き換えと回答の両方が会話文脈を踏まえる（マルチターン・OI-10）。
+        speaker_name は「いま話しかけている人」の表示名（任意・OI-22）。渡すと
+        回答プロンプトに差し込み、本人を指す言葉や呼びかけを解釈できる。
+        未指定（CLI等）のときは該当ブロックごと消える。
         """
         t0 = time.perf_counter()
         events: list[dict] = []
@@ -257,9 +262,17 @@ class RagEngine:
         if use_rerank and hits:
             hits = await self._rerank(rewritten, hits, events)
 
+        # 発言者名（OI-22）。あればブロックを差し込み、無ければ空文字で消す。
+        speaker_section = (
+            SPEAKER_SECTION.replace("{speaker}", speaker_name)
+            if speaker_name and speaker_name.strip()
+            else ""
+        )
         system = ANSWER_SYSTEM_PROMPT.replace(
             "{guild_name}", guild_name or self.guild_name
         ).replace("{current_datetime}", self._now_str()).replace(
+            "{speaker_section}", speaker_section
+        ).replace(
             "{context}", build_context(hits)
         )
         comp = await self.llm.complete(

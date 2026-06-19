@@ -82,6 +82,8 @@ class ChatRequest(BaseModel):
     # 直近の会話履歴（マルチターン・OI-10）。{"role": "user"|"assistant",
     # "content": str} の古い順リスト。呼び出し側（Bot/CLI）が保持して渡す。
     history: Optional[list[dict]] = None
+    # いま話しかけている人の表示名（OI-22）。回答プロンプトに差し込む（任意）。
+    speaker: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -175,6 +177,7 @@ def create_app(
         result = await app.state.engine.answer(
             req.guild_id, req.query, guild_name=req.guild_name,
             user_id=_parse_user_id(req.user), history=req.history,
+            speaker_name=req.speaker,
         )
         return ChatResponse(**result)
 
