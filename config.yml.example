@@ -38,6 +38,7 @@ rag:
   rewriter_history_max_chars: 1000            # Query Rewriterに渡す履歴の文字数バジェット
   guild_name: "みんなのサーバー"                  # プロンプト用サーバー名のデフォルト（Bot経由なら実サーバー名が優先）
   debug_trace: false                          # OI-21: 質問/ヒットチャンク/回答を chat_trace に保存（デバッグ用・既定OFF）。本番はプライバシー上 false 推奨
+  memory_enabled: false                       # OI-24: 「覚えておいて」で教わった事実(memories)を回答プロンプトに注入（既定OFF）
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（APIキー JINA_API_KEY が必要）
     provider: "jina"                          # 現状 jina のみ対応
