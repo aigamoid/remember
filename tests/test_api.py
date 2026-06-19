@@ -10,8 +10,11 @@ from src.trace import TraceRecorder
 
 
 class FakeEngine:
-    def __init__(self) -> None:
+    def __init__(self, memory_enabled: bool = False, extracted: dict | None = None) -> None:
         self.calls: list[tuple] = []
+        self.memory_enabled = memory_enabled
+        self._extracted = extracted
+        self.extract_calls: list[tuple] = []
 
     async def answer(
         self,
@@ -30,6 +33,13 @@ class FakeEngine:
             "rewritten_query": "書き換え済み",
             "sources": [{"channel_name": "general", "anchor_timestamp": "t", "score": 0.9}],
         }
+
+    async def extract_memory(
+        self, guild_id: str, text: str,
+        speaker_name: str | None = None, user_id: str | None = None,
+    ) -> dict | None:
+        self.extract_calls.append((guild_id, text, speaker_name, user_id))
+        return self._extracted
 
 
 @pytest.fixture
@@ -185,3 +195,57 @@ class TestQuota:
         ))
         client.post("/chat", json={"guild_id": "g42", "query": "質問"})
         assert seen == ["g42"]
+
+
+class TestRemember:
+    def _client(self, memory_enabled, extracted, saver=None, records=None):
+        engine = FakeEngine(memory_enabled=memory_enabled, extracted=extracted)
+        if saver is None and records is not None:
+            def saver(*args):
+                records.append(args)
+                return True
+        return TestClient(create_app(engine=engine, memory_saver=saver)), engine
+
+    def test_disabled_returns_not_saved(self):
+        # rag.memory_enabled OFF（engine.memory_enabled=False）なら抽出も保存もしない
+        client, engine = self._client(False, {"subject": "x", "content": "y"})
+        resp = client.post("/remember", json={"guild_id": "g1", "text": "xはy覚えて"})
+        assert resp.status_code == 200
+        assert resp.json()["saved"] is False
+        assert engine.extract_calls == []
+
+    def test_no_fact_returns_not_saved(self):
+        records = []
+        client, engine = self._client(True, None, records=records)
+        resp = client.post("/remember", json={"guild_id": "g1", "text": "いい曲覚えて"})
+        assert resp.json()["saved"] is False
+        assert records == []  # 保存は呼ばれない
+
+    def test_saves_extracted_fact(self):
+        records = []
+        client, engine = self._client(
+            True, {"subject": "かにじる", "content": "ケーキが好き"}, records=records
+        )
+        resp = client.post("/remember", json={
+            "guild_id": "g1", "text": "かにじるはケーキ好き覚えて",
+            "speaker": "うさ", "user": "ch1:u9", "channel_id": "ch1",
+        })
+        assert resp.json() == {
+            "saved": True, "subject": "かにじる", "content": "ケーキが好き"
+        }
+        # saver には (guild_id, content, subject, created_by, source_channel_id)
+        assert records == [("g1", "ケーキが好き", "かにじる", "u9", "ch1")]
+        # extract_memory に speaker / user_id が渡る
+        assert engine.extract_calls == [("g1", "かにじるはケーキ好き覚えて", "うさ", "u9")]
+
+    def test_save_failure_returns_not_saved(self):
+        client, engine = self._client(
+            True, {"subject": None, "content": "x"}, saver=lambda *a: False
+        )
+        resp = client.post("/remember", json={"guild_id": "g1", "text": "x覚えて"})
+        assert resp.json()["saved"] is False
+
+    def test_empty_text_rejected(self):
+        client, engine = self._client(True, None)
+        resp = client.post("/remember", json={"guild_id": "g1", "text": "   "})
+        assert resp.status_code == 422
