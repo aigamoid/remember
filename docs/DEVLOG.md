@@ -4,6 +4,36 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-18 — develop (`d2274a8`) を remember-vm に反映
+
+OI-18 マージ済みの `origin/develop` を GCP 検証機 `remember-vm` にデプロイ。  
+※`feature/oi18-mention-resolution` は既に PR #9 で develop にマージ済みであったため、新たな push/PR は不要だった。
+
+### 作業手順
+- ローカルで `git fetch origin develop` → `git archive origin/develop` で tarball 化（`.env`/`config.yml`/`data/` は除く）。
+- Tailscale SSH (`aigamoid@100.98.83.15`) 経由で `/tmp/remember-develop.tar.gz` を転送。
+- VM 上で既存 `~/remember` を `~/remember-old-20260617-154339` にリネームしてバックアップ。
+- クリーンに tarball を展開し、以下を旧ディレクトリから移動/コピーして設定・データを保持：
+  - `.env`、`config.yml`、`moimoichan_Discordbot/config.yml` を `cp`
+  - `data/` は `sudo mv`（Postgres ユーザー所有のまま権限保持）。
+- `docker compose up -d --build` で 6 サービスを再ビルド＆起動。
+
+### 保持した運用設定
+- VM の `config.yml` は OI-16 最適化（`answer_model: deepseek/deepseek-v3.2`、`top_k: 5`、`answer_max_tokens: 1500`）のまま。
+- `history_max_turns` など OI-10 の新キーは存在しないため、コードのデフォルト値（履歴有効）で動作。
+
+### 動作確認
+- API `/health` → `200 OK`
+- Admin `/login` → `200 OK`
+- Bot → `Shard ID None has connected to Gateway`
+- Discord からの `POST /chat` → 複数回 `200 OK`
+- `docker compose logs` 全体で `ERROR`/`Exception`/`Traceback` なし
+- Qdrant クライアントバージョン差の `UserWarning` は非致命。
+
+### 備考
+- 旧ディレクトリ `~/remember-old-20260617-154339` は削除前に問題ないか確認中。
+- 次回以降のデプロイも同様に tarball 転送＋クリーン展開＋設定保持で運用する。
+
 ## 2026-06-18 — OI-15 れみちゃんリブランド引き継ぎ ＋ PRマージ運用ルール
 
 OpenCodeが実装した OI-15（回答キャラのリブランド）を Claude Code が引き継いでマージし、
