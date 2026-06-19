@@ -16,7 +16,9 @@ from src.embedder import Embedder
 from src.rag.llm import ChatLLM, Usage
 from src.rag.prompts import (
     ANSWER_SYSTEM_PROMPT,
+    NO_SEARCH_SENTINEL,
     REWRITER_SYSTEM_PROMPT,
+    SKIP_CONTEXT,
     SPEAKER_SECTION,
     build_context,
 )
@@ -68,6 +70,10 @@ class RagEngine:
         rerank_cfg = rag_cfg.get("reranker", {})
         self.rerank_enabled: bool = bool(rerank_cfg.get("enabled", False))
         self.rerank_top_n: int = rerank_cfg.get("top_n", 30)
+        # 検索ゲート（OI-23）。Query Rewriter が [NO_SEARCH] を返したら埋め込み・
+        # 検索・リランクをスキップし、素の雑談として回答する（コスト/レイテンシ削減）。
+        # 誤スキップは記憶RAGの価値を損なうため、判定は「迷ったら検索」に倒している。
+        self.search_gate: bool = bool(rag_cfg.get("search_gate", True))
         # デバッグトレース（OI-21）。enabled かつ trace_recorder が渡された時のみ記録。
         # 質問・ヒットチャンク・回答を残すためプライバシー上の既定はオフ。
         self.trace_enabled: bool = bool(rag_cfg.get("debug_trace", False))
@@ -247,20 +253,34 @@ class RagEngine:
         )
         rewritten = await self.rewrite(query, events, history=hist_rw)
 
-        vector, emb_tokens = await asyncio.to_thread(
-            self.embedder.embed_one_with_usage, rewritten
+        # 検索ゲート（OI-23）。Rewriter が [NO_SEARCH] を返したら、雑談・一般質問と
+        # みなして埋め込み・検索・リランクを丸ごとスキップする（コスト/レイテンシ削減）。
+        search_skipped = self.search_gate and NO_SEARCH_SENTINEL in rewritten
+        use_rerank = (
+            not search_skipped and self.reranker is not None and self.rerank_enabled
         )
-        emb_model = getattr(self.embedder, "model", "text-embedding-3-small")
-        self._record(events, "embedding", emb_model, Usage(emb_tokens, 0, emb_tokens))
+        if search_skipped:
+            hits: list[dict] = []
+            context = SKIP_CONTEXT
+        else:
+            vector, emb_tokens = await asyncio.to_thread(
+                self.embedder.embed_one_with_usage, rewritten
+            )
+            emb_model = getattr(self.embedder, "model", "text-embedding-3-small")
+            self._record(
+                events, "embedding", emb_model, Usage(emb_tokens, 0, emb_tokens)
+            )
 
-        # リランク有効時は多め（rerank_top_n）に取って後で top_k に精選する。
-        use_rerank = self.reranker is not None and self.rerank_enabled
-        candidate_k = max(self.rerank_top_n, self.top_k) if use_rerank else self.top_k
-        hits = await asyncio.to_thread(
-            self.store.search, str(guild_id), vector, candidate_k
-        )
-        if use_rerank and hits:
-            hits = await self._rerank(rewritten, hits, events)
+            # リランク有効時は多め（rerank_top_n）に取って後で top_k に精選する。
+            candidate_k = (
+                max(self.rerank_top_n, self.top_k) if use_rerank else self.top_k
+            )
+            hits = await asyncio.to_thread(
+                self.store.search, str(guild_id), vector, candidate_k
+            )
+            if use_rerank and hits:
+                hits = await self._rerank(rewritten, hits, events)
+            context = build_context(hits)
 
         # 発言者名（OI-22）。あればブロックを差し込み、無ければ空文字で消す。
         speaker_section = (
@@ -273,7 +293,7 @@ class RagEngine:
         ).replace("{current_datetime}", self._now_str()).replace(
             "{speaker_section}", speaker_section
         ).replace(
-            "{context}", build_context(hits)
+            "{context}", context
         )
         comp = await self.llm.complete(
             self.answer_model, system, query,
@@ -325,4 +345,5 @@ class RagEngine:
             "answer": comp.text,
             "rewritten_query": rewritten,
             "sources": sources,
+            "search_skipped": search_skipped,
         }
