@@ -9,7 +9,12 @@ from qdrant_client import QdrantClient
 
 from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM, Completion, Usage, strip_think
-from src.rag.prompts import build_context, build_memories
+from src.rag.prompts import (
+    NO_SEARCH_SENTINEL,
+    SKIP_CONTEXT,
+    build_context,
+    build_memories,
+)
 from src.rag.reranker import RerankResult
 from src.vectorstore import VectorStore
 
@@ -814,3 +819,74 @@ class TestDebugTrace:
         )
         asyncio.run(engine.answer("g1", "質問"))
         assert captured[0]["rerank_enabled"] is True
+
+
+# ── 検索ゲート（OI-23：必要なければベクトル検索をスキップ）─────────────────────
+
+class TestSearchGate:
+    def test_skips_search_when_rewriter_returns_sentinel(self, store):
+        # Rewriter が [NO_SEARCH] を返したら埋め込み・検索を行わない
+        _seed(store, chunk_text="関係ない過去ログ")
+        embedder = FakeEmbedder()
+        llm = FakeLLM([NO_SEARCH_SENTINEL, "じゃんけんしよ〜！れみはグー！"])
+        engine = RagEngine(CFG, store, embedder, llm)
+        result = asyncio.run(engine.answer("g1", "じゃんけんしよう！"))
+        assert result["search_skipped"] is True
+        assert result["sources"] == []
+        assert embedder.embedded == []  # 埋め込みも検索も走っていない
+        assert result["answer"] == "じゃんけんしよ〜！れみはグー！"
+
+    def test_skip_uses_skip_context_not_empty_memory(self, store):
+        # スキップ時は「見つからなかった」ではなく雑談用センチネルを差し込む
+        _seed(store)
+        llm = FakeLLM([NO_SEARCH_SENTINEL, "答え"])
+        engine = RagEngine(CFG, store, FakeEmbedder(), llm)
+        asyncio.run(engine.answer("g1", "こんにちは！"))
+        answer_system = llm.calls[1]["system"]
+        assert SKIP_CONTEXT in answer_system
+        assert "見つからなかった" not in answer_system
+
+    def test_skip_records_no_embedding_usage(self, store):
+        # スキップ時の usage は rewrite と answer のみ（embedding は無い）
+        _seed(store)
+        captured: list[dict] = []
+        cfg = {"rag": {"top_k": 5}, "pricing": _PRICING}
+        llm = FakeLLM([NO_SEARCH_SENTINEL, "答え"])
+        engine = RagEngine(
+            cfg, store, FakeEmbedder(), llm, usage_recorder=captured.extend
+        )
+        asyncio.run(engine.answer("g1", "ありがとう！"))
+        assert [e["kind"] for e in captured] == ["rewrite", "answer"]
+
+    def test_normal_query_still_searches(self, store):
+        # [NO_SEARCH] を含まない通常クエリは従来どおり検索する
+        _seed(store, chunk_text="渋谷で飲み会をした")
+        embedder = FakeEmbedder()
+        llm = FakeLLM(["渋谷 飲み会", "答え"])
+        engine = RagEngine(CFG, store, embedder, llm)
+        result = asyncio.run(engine.answer("g1", "飲み会どうだった？"))
+        assert result["search_skipped"] is False
+        assert embedder.embedded == ["渋谷 飲み会"]
+        assert result["sources"][0]["channel_name"] == "general"
+
+    def test_gate_disabled_treats_sentinel_as_query(self, store):
+        # search_gate=false なら [NO_SEARCH] を普通のクエリ扱いで検索する（無効化できる）
+        _seed(store)
+        embedder = FakeEmbedder()
+        cfg = {"rag": {"top_k": 5, "search_gate": False}}
+        llm = FakeLLM([NO_SEARCH_SENTINEL, "答え"])
+        engine = RagEngine(cfg, store, embedder, llm)
+        result = asyncio.run(engine.answer("g1", "じゃんけんしよう！"))
+        assert result["search_skipped"] is False
+        assert embedder.embedded == [NO_SEARCH_SENTINEL]
+
+    def test_skip_disables_reranker(self, store):
+        # スキップ時はリランカーも呼ばれない
+        _seed_many(store, _RR_VECS)
+        reranker = FakeReranker(order=[2, 0, 1])
+        llm = FakeLLM([NO_SEARCH_SENTINEL, "答え"])
+        result = asyncio.run(
+            _engine_rr(store, llm, reranker).answer("g1", "じゃんけんしよう！")
+        )
+        assert result["search_skipped"] is True
+        assert reranker.calls == []
