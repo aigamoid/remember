@@ -35,6 +35,12 @@ from store import Store
 
 _MAX_REPLY_LEN = 2000  # Discord 文字数制限
 _DEFAULT_HISTORY_MAX_TURNS = 5  # チャンネルごとに覚えておく直近やり取り数（OI-10）
+# 「覚えておいて」検知のデフォルトフレーズ（部分一致・OI-24 書き込み）。
+# メンション必須（mention_only）と併用するので、これらを含むメンション発話だけ記憶フローに入る。
+_DEFAULT_REMEMBER_PHRASES = [
+    "覚えておいて", "覚えといて", "覚えてて", "覚えといて",
+    "おぼえておいて", "おぼえといて", "記憶して", "メモして",
+]
 
 _JOB_STATUS_LABEL = {
     "queued": "⏳ 待機中",
@@ -176,6 +182,11 @@ class MoimoichanBot(discord.Client):
             )
         )
         self._history: dict[int, deque] = {}
+        # 「覚えておいて」検知フレーズ（OI-24・書き込み）。config で上書き可。
+        self._remember_phrases = (
+            cfg.get("oracle", {}).get("remember_phrases")
+            or _DEFAULT_REMEMBER_PHRASES
+        )
 
     async def setup_hook(self) -> None:
         self.tree.add_command(OracleGroup(self.store))
@@ -212,6 +223,12 @@ class MoimoichanBot(discord.Client):
             return
 
         user = f"{message.channel.id}:{message.author.id}"
+
+        # 「覚えておいて」検知（OI-24・書き込み）。記憶フローに入ったら chat はしない。
+        if self._is_remember(query):
+            await self._handle_remember(message, query, user)
+            return
+
         history = self._get_history(message.channel.id)
 
         async with message.channel.typing():
@@ -240,6 +257,37 @@ class MoimoichanBot(discord.Client):
                     pass
 
     # ---- 内部ヘルパー ----
+
+    def _is_remember(self, text: str) -> bool:
+        """記憶依頼フレーズ（覚えておいて等）を含むか（OI-24・書き込み）。"""
+        return any(p in text for p in self._remember_phrases)
+
+    async def _handle_remember(
+        self, message: discord.Message, text: str, user: str
+    ) -> None:
+        """「覚えておいて」発話を /remember に送り、保存結果を返信する（OI-24）。"""
+        async with message.channel.typing():
+            try:
+                res = await self.oracle.remember(
+                    text, str(message.guild.id), user,
+                    speaker=message.author.display_name,
+                    channel_id=str(message.channel.id),
+                )
+            except Exception as e:
+                print(f"[ERROR] remember {type(e).__name__}: {e}")
+                await message.reply("⚠️ うまく覚えられなかったかも。もう一度試してね〜。")
+                return
+        if res.get("saved"):
+            subject, content = res.get("subject"), res.get("content")
+            if subject:
+                await message.reply(f"覚えたよ！〔{subject}〕{content} だね🌸")
+            else:
+                await message.reply(f"覚えたよ！「{content}」だね🌸")
+        else:
+            await message.reply(
+                "ん〜、何を覚えればいいか分からなかったかも。"
+                "「◯◯は△△だよ、覚えておいて」みたいに教えてくれたら覚えるよ〜！"
+            )
 
     def _get_history(self, channel_id: int) -> list[dict]:
         """このチャンネルの直近会話を古い順で返す（API へ渡す形）。"""
