@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api import create_app
+from src.api import build_engine, create_app
+from src.trace import TraceRecorder
 
 
 class FakeEngine:
@@ -31,6 +32,32 @@ class FakeEngine:
 @pytest.fixture
 def client():
     return TestClient(create_app(engine=FakeEngine()))
+
+
+_BASE_CFG = {
+    "qdrant": {"url": "http://localhost:6333", "collection": "c"},
+    "embedding": {"model": "text-embedding-3-small", "dimensions": 1536},
+    "rag": {},
+}
+
+
+class TestBuildEngineTrace:
+    def test_trace_recorder_wired_when_enabled(self):
+        cfg = {**_BASE_CFG, "rag": {"debug_trace": True}}
+        engine = build_engine(cfg)
+        assert engine.trace_enabled is True
+        assert isinstance(engine.trace_recorder, TraceRecorder)
+
+    def test_no_trace_recorder_when_disabled(self):
+        cfg = {**_BASE_CFG, "rag": {"debug_trace": False}}
+        engine = build_engine(cfg)
+        assert engine.trace_enabled is False
+        assert engine.trace_recorder is None
+
+    def test_trace_off_by_default(self):
+        engine = build_engine(_BASE_CFG)
+        assert engine.trace_enabled is False
+        assert engine.trace_recorder is None
 
 
 class TestHealth:
