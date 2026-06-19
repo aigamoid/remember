@@ -101,14 +101,17 @@ sh scripts/install_hooks.sh
 - ブランチ戦略: GitFlow
 - 初回ブランチ: `feature/waiwai-oracle`
 - コミット粒度: **1ファイル単位**
-- **プッシュは人間が手動で行う。Claude Codeはpushコマンドを実行しないこと**
+- **feature ブランチの push と PR 作成（`gh pr create`）は Claude Code が実施してよい**
+  （2026-06-19 更新）。`feature/*` ブランチを `git push` し、PR 作成までを Claude Code が行う。
+  ※旧ルール「プッシュは人間が手動で行う」はこの範囲で緩和（feature ブランチに限る）。
+  ※`main` / `develop` への直接 push は引き続き人間が行う（下記ドキュメント直コミット含む）。
 - **PRのマージは必ず人間が行う。Claude CodeはPRの作成（`gh pr create`）まで。
   マージ（`gh pr merge`）はしないこと**（2026-06-18 追加）。
   「マージまでやって」と言われても最終マージは人間に渡し、勝手に `gh pr merge` しない。
 - **ドキュメントは PR 不要・develop へ直接コミット可**（2026-06-18 追加）。
   対象: `CLAUDE.md` / `docs/DEVLOG.md` など**コードを含まないドキュメント類**。
   これらは CI もレビューも不要なため、feature ブランチ／PR を作らず
-  develop の worktree で直接コミットしてよい（push は従来どおり人間が行う）。
+  develop の worktree で直接コミットしてよい（develop への push は従来どおり人間が行う）。
   ※コード（`.py` 等）の変更は引き続き feature ブランチ＋PR を経由すること。
   ※gitignore はしない（全セッション・GCP VM で共有される必要があるため）。
 
