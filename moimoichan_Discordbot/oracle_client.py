@@ -45,3 +45,29 @@ class OracleClient:
                 resp.raise_for_status()
                 data = await resp.json()
         return data["answer"]
+
+    async def remember(
+        self,
+        text: str,
+        guild_id: str,
+        user: str,
+        speaker: str | None = None,
+        channel_id: str | None = None,
+    ) -> dict:
+        """「覚えておいて」発話を /remember に送り、保存結果を返す（OI-24・書き込み）。
+
+        戻り値: {"saved": bool, "subject": str|None, "content": str|None}
+
+        Raises:
+            aiohttp.ClientResponseError: HTTP 4xx/5xx
+            asyncio.TimeoutError: タイムアウト
+        """
+        payload = {"guild_id": str(guild_id), "text": text, "user": user}
+        if speaker:
+            payload["speaker"] = speaker
+        if channel_id:
+            payload["channel_id"] = str(channel_id)
+        async with aiohttp.ClientSession(timeout=self._timeout) as session:
+            async with session.post(f"{self._base}/remember", json=payload) as resp:
+                resp.raise_for_status()
+                return await resp.json()
