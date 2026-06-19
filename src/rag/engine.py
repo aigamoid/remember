@@ -8,6 +8,7 @@ usage_log に記録する（コスト計測用・OI-14 C）。記録失敗は回
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -16,6 +17,7 @@ from src.embedder import Embedder
 from src.rag.llm import ChatLLM, Usage
 from src.rag.prompts import (
     ANSWER_SYSTEM_PROMPT,
+    MEMORY_EXTRACT_PROMPT,
     MEMORY_SECTION,
     REWRITER_SYSTEM_PROMPT,
     SPEAKER_SECTION,
@@ -194,6 +196,61 @@ class RagEngine:
             return query
         self._record(events, "rewrite", comp.model, comp.usage)
         return comp.text.strip() or query
+
+    @staticmethod
+    def _parse_memory_json(text: str) -> dict | None:
+        """抽出LLMの出力からJSONオブジェクトを取り出す。崩れていれば None。"""
+        t = text.strip()
+        if t.startswith("```"):
+            t = t.strip("`")
+            t = t[t.find("{"):]
+        i, j = t.find("{"), t.rfind("}")
+        if i < 0 or j < 0:
+            return None
+        try:
+            return json.loads(t[i:j + 1])
+        except Exception:
+            return None
+
+    async def extract_memory(
+        self,
+        guild_id: str,
+        text: str,
+        speaker_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict | None:
+        """「覚えておいて」発話から保存すべき事実を抽出する（OI-24・書き込み）。
+
+        戻り値: {"subject": str|None, "content": str}、または覚えるべき事実が無ければ None。
+        rewriter_model（安価）で抽出し usage を記録する。LLM失敗・JSON崩れ・content空は
+        None（保存しない＝誤爆の二重ガード）。speaker_name があれば本人参照を解決する。
+        """
+        speaker_line = (
+            f"話者（いまの発話者）の名前: {speaker_name}\n"
+            if speaker_name and speaker_name.strip() else ""
+        )
+        system = MEMORY_EXTRACT_PROMPT.replace("{speaker_line}", speaker_line)
+        events: list[dict] = []
+        try:
+            comp = await self.llm.complete(
+                self.rewriter_model, system, text,
+                temperature=0.1, max_tokens=self.rewriter_max_tokens,
+            )
+        except Exception as e:
+            print(f"[WARN] メモリ抽出失敗（保存しない）: {e}")
+            return None
+        self._record(events, "memory_extract", comp.model, comp.usage)
+        await self._flush(events, guild_id, user_id)
+        data = self._parse_memory_json(comp.text)
+        if not data:
+            return None
+        content = str(data.get("content") or "").strip()
+        if not content or content.lower() == "null":
+            return None
+        subject = str(data.get("subject") or "").strip() or None
+        if subject and subject.lower() == "null":
+            subject = None
+        return {"subject": subject, "content": content}
 
     @staticmethod
     def _doc_for_rerank(hit: dict) -> str:
