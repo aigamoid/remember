@@ -1,16 +1,20 @@
 # Docker ビルドコンテキストから除外する。
 # 実行時に compose の bind mount / env_file で渡るものはイメージに不要。
-# （特に data/ は Postgres/Qdrant のボリュームで root 所有のため、
-#  除外しないと build context 収集時に "permission denied" でビルドが落ちる。）
+# 特に data/ は Postgres/Qdrant のボリュームで root 所有のため、除外しないと
+# build context 収集時に "permission denied" でビルドが落ちる。
+#
+# 注意: .dockerignore は「行末（インライン）コメント」を解釈しない。
+# 行頭の # だけがコメント扱い。パターン行に末尾コメントを付けると、空白＋コメントが
+# パターンの一部になって一致しなくなる（過去に data/ が除外されずビルドが落ちた）。
 
 .git/
 .gitignore
 
-# ランタイムで渡すので焼かない
-data/                              # Postgres/Qdrant ボリューム（compose で bind mount）
-.env                               # env_file で注入（イメージに秘密を入れない）
-config.yml                         # /app/config.yml に bind mount（:ro）
-moimoichan_Discordbot/config.yml   # 同上（bot）
+# ランタイムで渡すのでイメージに焼かない
+data/
+.env
+config.yml
+moimoichan_Discordbot/config.yml
 
 # 開発・テスト由来の生成物（イメージ不要）
 **/__pycache__/
