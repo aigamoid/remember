@@ -453,6 +453,68 @@ class TestMemoryInjection:
         assert "みんなから教わって覚えていること" not in llm.calls[1]["system"]
 
 
+# ── 「覚えておいて」抽出 extract_memory（OI-24・書き込み） ────────────────────
+
+class TestExtractMemory:
+    def test_extracts_subject_and_content(self, store):
+        llm = FakeLLM(['{"subject":"かにじる","content":"ケーキが好き"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        res = asyncio.run(eng.extract_memory("g1", "かにじるはケーキ好き、覚えて"))
+        assert res == {"subject": "かにじる", "content": "ケーキが好き"}
+
+    def test_null_content_returns_none(self, store):
+        # 覚えるべき事実が無い発話は content=null → 保存しない（None）
+        llm = FakeLLM(['{"subject":null,"content":null}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.extract_memory("g1", "この曲いいね覚えて")) is None
+
+    def test_null_subject_kept(self, store):
+        llm = FakeLLM(['{"subject":null,"content":"毎週日曜にゲーム会"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        res = asyncio.run(eng.extract_memory("g1", "ゲーム会覚えて"))
+        assert res == {"subject": None, "content": "毎週日曜にゲーム会"}
+
+    def test_code_fence_stripped(self, store):
+        llm = FakeLLM(['```json\n{"subject":"x","content":"y"}\n```'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.extract_memory("g1", "xはy覚えて")) == {
+            "subject": "x", "content": "y"
+        }
+
+    def test_broken_json_returns_none(self, store):
+        llm = FakeLLM(["これはJSONじゃないよ"])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.extract_memory("g1", "なにか")) is None
+
+    def test_llm_error_returns_none(self, store):
+        llm = FakeLLM([RuntimeError("API down")])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.extract_memory("g1", "なにか")) is None
+
+    def test_speaker_injected_into_prompt(self, store):
+        llm = FakeLLM(['{"subject":"まめぽん","content":"誕生日は3月25日"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        res = asyncio.run(
+            eng.extract_memory("g1", "わたしの誕生日3/25覚えて", speaker_name="まめぽん")
+        )
+        assert res["subject"] == "まめぽん"
+        system = llm.calls[0]["system"]
+        assert "まめぽん" in system
+        assert "{speaker_line}" not in system
+
+    def test_no_speaker_removes_placeholder(self, store):
+        llm = FakeLLM(['{"subject":null,"content":"x"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        asyncio.run(eng.extract_memory("g1", "x覚えて"))
+        assert "{speaker_line}" not in llm.calls[0]["system"]
+
+    def test_uses_low_temperature(self, store):
+        llm = FakeLLM(['{"subject":null,"content":"x"}'])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        asyncio.run(eng.extract_memory("g1", "x覚えて"))
+        assert llm.calls[0]["temperature"] == 0.1
+
+
 # ── マルチターン会話履歴（OI-10） ────────────────────────────────────────────
 
 class TestConversationHistory:
