@@ -21,6 +21,7 @@ from src.db import (
     insert_attachment,
     insert_chunk,
     insert_message,
+    insert_trace,
     insert_usage,
     log_run,
     mark_guild_left,
@@ -462,3 +463,56 @@ class TestUsageLog:
         assert jobs[0]["guild_name"] == "サーバー1"
         assert jobs[0]["kind"] == JOB_INGEST
         assert jobs[0]["status"] == "queued"
+
+
+# ── chat_trace（デバッグトレース・OI-21）────────────────────────
+
+class TestChatTrace:
+    def test_insert_round_trip(self, conn):
+        sources = [
+            {"channel_name": "general", "score": 0.91, "chunk_text": "本文"},
+        ]
+        insert_trace(
+            conn, "g-1", "今日の予定は？",
+            rewritten_query="予定",
+            answer="たしか飲み会だよ",
+            sources=sources,
+            answer_model="deepseek/deepseek-v3.2",
+            rerank_enabled=True,
+            prompt_tokens=1200, completion_tokens=80,
+            total_tokens=1300, cost_usd=0.0023, latency_ms=2500,
+            user_id="u1",
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT guild_id, user_id, question, rewritten_query, answer, "
+            "sources, answer_model, rerank_enabled, prompt_tokens, "
+            "completion_tokens, total_tokens, cost_usd, latency_ms "
+            "FROM chat_trace"
+        ).fetchone()
+        assert row[0] == "g-1"
+        assert row[1] == "u1"
+        assert row[2] == "今日の予定は？"
+        assert row[3] == "予定"
+        assert row[4] == "たしか飲み会だよ"
+        # JSONB は Python の list/dict として返る
+        assert row[5][0]["channel_name"] == "general"
+        assert row[5][0]["chunk_text"] == "本文"
+        assert row[6] == "deepseek/deepseek-v3.2"
+        assert row[7] is True
+        assert row[8] == 1200
+        assert row[10] == 1300
+        assert abs(float(row[11]) - 0.0023) < 1e-9
+        assert row[12] == 2500
+
+    def test_minimal_fields(self, conn):
+        # 任意フィールドは省略でき、sources は NULL でもよい
+        insert_trace(conn, "g-1", "質問だけ")
+        conn.commit()
+        row = conn.execute(
+            "SELECT question, sources, user_id, rerank_enabled FROM chat_trace"
+        ).fetchone()
+        assert row[0] == "質問だけ"
+        assert row[1] is None
+        assert row[2] is None
+        assert row[3] is False
