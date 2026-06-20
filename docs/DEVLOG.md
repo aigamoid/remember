@@ -4,6 +4,49 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-19 — 明示メモリ機能(OI-24) 読み書き実装・A/B・VM動作確認
+
+ユーザーが「◯◯は△△だよ、覚えておいて」と教えた**事実**を、Discord過去ログとは別の記憶領域
+（`memories`テーブル）に保持し、回答プロンプトへ注入する機能。読み取り→効果A/B→書き込み→抽出A/B
+→検証機デプロイ→本番動作確認まで一気通貫で実施（PR #27）。
+
+### やったこと
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/db.py` | `memories`テーブル＋`insert_memory`/`fetch_memories`/`delete_memory`/`count_memories`（全guild_id分離） |
+| 2 | `src/memory.py` | `MemoryProvider`（guildの教わった事実を読む callable・TraceRecorder流儀） |
+| 3 | `src/rag/prompts.py` | `MEMORY_SECTION`＋`build_memories`（読み）/ `MEMORY_EXTRACT_PROMPT`（書き・JSON抽出） |
+| 4 | `src/rag/engine.py` | `answer()`にメモリ注入 / `extract_memory()`（LLMでsubject/content抽出・null判定） |
+| 5 | `src/api.py` | `POST /remember`＋`memory_saver`（テスタブル化）/ `build_engine`で`memory_provider`配線 |
+| 6 | `moimoichan_Discordbot/bot.py`・`oracle_client.py` | メンション＋フレーズ検知→`/remember`→「覚えたよ！」返信 |
+| 7 | `config.yml.example`・bot config | `rag.memory_enabled`（既定OFF）/ `oracle.remember_phrases` |
+| 8 | `tests/`・`scripts/` | テスト+約30件 / 使い捨てA/B `ab_memory.py`・`ab_memory_extract.py` |
+
+### A/B結果
+- **読み取り（注入あり/なし）**: 記憶系 1.00→**5.00**、対照系 4.67→**5.00**（幻覚も矯正・脱線なし）。
+- **書き込み（LLM抽出 vs 素朴保存）**: SHOULD抽出 **5.00** vs 2.00、NOISE誤爆 **0/4** vs 4/4。LLM抽出採用。
+
+### ハマりポイント
+- **semantic conflict（CI赤）**: 作業中に develop へ OI-23 検索ゲート(PR #26)がマージされ、PR CIは
+  「develop+feature」で回るため、検索スキップ時に`SKIP_CONTEXT`でなく`build_context(hits)`で上書き
+  していた箇所が衝突。`develop`を取り込み`{context}`変数を使う形で解消→356 passed→force-with-lease。
+- **VMで覚えない**: 原因は VM実`config.yml`に`memory_enabled`が無く既定OFF。検知・配線・コードは正常
+  （`POST /remember 200`がログにあった）。`config.yml.example`だけ更新し実configを更新し忘れていた。
+
+### 決定事項
+- 保存先は**Postgres全件注入**（少数前提・件数増でQdrant化を再検討）。書き込みはLLM抽出（誤爆制御が決定的に優位）。
+- 分離は**guild単位**（guild内は全員共有・user分離はしない＝過去ログRAGと同じ仕様）。
+
+### 検証機での本番動作確認
+- VMに`memory_enabled: true`追加＋`restart api bot`→ Discordで実テスト→ `memories`に4件保存を確認。
+- 読み取りも `chat_trace` で確認（「ほしのかなた」質問に保存済み「低学歴」が回答へ注入）。
+
+### 次のステップ
+- **センシティブ属性ガードレール**（OI-25候補）: 「低学歴」等の中傷的属性が保存・発話された。公開前に必須。
+- 後段: `/oracle forget`・admin CRUD・更新vs追記の上書き戦略・件数増でのQdrant化・個人メモリ分離。
+
+---
+
 ## 2026-06-19 — デバッグトレース(OI-21)・プロンプトv4・リランカーA/B
 
 「精度が落ちた・以前の方が良かった」という所感を起点に、観測性→診断→改善まで一気通貫で対応した。
