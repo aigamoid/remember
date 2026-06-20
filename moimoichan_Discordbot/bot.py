@@ -16,6 +16,7 @@ APIはステートレスだが、Bot がチャンネルごとに直近の会話�
     /oracle deny <channel>   許可を取り消し、取り込み済みデータを削除
     /oracle sync             許可チャンネルの差分取り込みを今すぐ実行
     /oracle status           取り込み状況を表示
+    /oracle help             使い方とコマンド一覧を表示（オンボーディング・OI-27）
 
 実際の取り込み処理は worker.py（ジョブキュー経由）が行う。
 """
@@ -56,6 +57,33 @@ _WELCOME = (
     "**許可されたチャンネルしか読まない**から、安心してね。\n"
     "サーバー管理権限を持つ人が `/oracle allow #チャンネル` で読んでいい"
     "チャンネルを教えてくれたら、取り込みを始めるね〜"
+)
+
+# /oracle help の本文（オンボーディング・OI-27）。ハードコードでよい
+# （コマンド一覧は頻繁に変わらないため）。コマンドを増減したらここも更新する。
+_HELP = (
+    "**れみちゃんの使い方** 🌸\n"
+    "このサーバーの過去ログを覚えて、メンションで質問すると答えるBotだよ。\n"
+    "\n"
+    "**導入の流れ（3ステップ）**\n"
+    "1️⃣ `/oracle allow #チャンネル` で読んでいいチャンネルを許可する"
+    "（全部まとめてなら `/oracle allowall`）\n"
+    "2️⃣ `/oracle sync` で過去ログを取り込む（初回は自動でも始まるよ）\n"
+    "3️⃣ 取り込みが終わったら、れみちゃんに **メンションして質問** してね〜\n"
+    "\n"
+    "**コマンド一覧**（サーバー管理権限が必要）\n"
+    "・`/oracle allow #チャンネル` … そのチャンネルの読み取りを許可して取り込み開始\n"
+    "・`/oracle allowall` … 全チャンネルを一括で許可（MAXプラン限定）\n"
+    "・`/oracle deny #チャンネル` … 許可を取り消して取り込み済みデータを削除\n"
+    "・`/oracle sync` … 許可チャンネルの新着を今すぐ取り込む\n"
+    "・`/oracle status` … 取り込み状況（許可数・件数・最新ジョブ）を表示\n"
+    "・`/oracle help` … この使い方を表示\n"
+    "\n"
+    "**ちょっと便利**\n"
+    "・「◯◯は△△だよ、覚えておいて」とメンションで言うと、その場で覚えるよ📝\n"
+    "・取り込み状況やコスト・利用量は管理ポータル **remember** からも確認できるよ。\n"
+    "\n"
+    "**読むのは許可されたチャンネルだけ**だから、安心して使ってね〜 🌸"
 )
 
 
@@ -213,6 +241,11 @@ class OracleGroup(app_commands.Group):
         else:
             lines.append("**最新ジョブ**: なし（`/oracle allow` で取り込みを始めてね）")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="help", description="れみちゃんの使い方とコマンド一覧を表示する")
+    async def help(self, interaction: discord.Interaction) -> None:
+        # 静的なヘルプを返すだけなので DB アクセスも defer も不要（OI-27）。
+        await interaction.response.send_message(_HELP, ephemeral=True)
 
 
 class MoimoichanBot(discord.Client):
