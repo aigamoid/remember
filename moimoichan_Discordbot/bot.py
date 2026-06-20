@@ -12,6 +12,7 @@ APIはステートレスだが、Bot がチャンネルごとに直近の会話�
 
 管理者向けスラッシュコマンド（サーバー管理権限が必要）:
     /oracle allow <channel>  チャンネルの読み取りを許可して取り込みを開始（opt-in）
+    /oracle allowall         全チャンネルの読み取りを一括許可（MAXプラン限定・OI-25）
     /oracle deny <channel>   許可を取り消し、取り込み済みデータを削除
     /oracle sync             許可チャンネルの差分取り込みを今すぐ実行
     /oracle status           取り込み状況を表示
@@ -104,6 +105,56 @@ class OracleGroup(app_commands.Group):
         )
         await interaction.followup.send(
             f"✅ {channel.mention} の読み取りを許可したよ。{note}", ephemeral=True
+        )
+
+    @app_commands.command(
+        name="allowall",
+        description="全チャンネルの読み取りを一括で許可して取り込む（MAXプラン限定）",
+    )
+    async def allowall(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        guild_id = str(guild.id)
+        await self.store.register_guild(guild_id, guild.name)
+
+        # Botが閲覧＋履歴読み取りできるテキストチャンネルだけを対象にする
+        # （権限の無いチャンネルを許可してもクロールできないため）。
+        me = guild.me
+        channels = [
+            (str(ch.id), ch.name)
+            for ch in guild.text_channels
+            if (perms := ch.permissions_for(me)).view_channel
+            and perms.read_message_history
+        ]
+        if not channels:
+            await interaction.followup.send(
+                "読み取れるテキストチャンネルが見つからなかったよ〜。"
+                "Botにチャンネルの閲覧・履歴の読み取り権限があるか確認してね。",
+                ephemeral=True,
+            )
+            return
+
+        result = await self.store.allow_all_channels(
+            guild_id, channels, str(interaction.user.id)
+        )
+        if not result["ok"]:  # MAX以外のプラン
+            await interaction.followup.send(
+                f"⚠️ {result['message']}", ephemeral=True
+            )
+            return
+
+        added, total = result["added"], result["total"]
+        if added == 0:
+            await interaction.followup.send(
+                f"全 {total} チャンネルはもう許可済みだったよ。新しく追加したものはなし〜。"
+                " 取り込み直したいときは `/oracle sync` してね。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"✅ 全 {total} チャンネルのうち {added} チャンネルを新しく許可したよ。"
+            " 順番に取り込むから、終わったら質問できるよ〜。",
+            ephemeral=True,
         )
 
     @app_commands.command(name="deny", description="チャンネルの許可を取り消し、取り込み済みデータを削除する")
