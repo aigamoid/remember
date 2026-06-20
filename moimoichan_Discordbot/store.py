@@ -30,6 +30,14 @@ def _next_channel_plan(conn, current: dict) -> dict | None:
     return None
 
 
+def _unlimited_plan(conn) -> dict | None:
+    """チャンネル数が無制限（channel_limit=None ＝ MAX）の最安プラン（allowall 案内用）。"""
+    for d in db.fetch_plan_defs(conn):  # sort_order 昇順＝最安側から
+        if d["channel_limit"] is None:
+            return d
+    return None
+
+
 class Store:
     def __init__(self, dsn: str | None = None) -> None:
         self._dsn = dsn
@@ -86,6 +94,44 @@ class Store:
                 conn, guild_id, db.JOB_INGEST, requested_by=allowed_by
             )
             return {"ok": True, "job_id": job_id}
+
+        return await self._call(run)
+
+    async def allow_all_channels(
+        self, guild_id: str, channels: list[tuple[str, str]], allowed_by: str
+    ) -> dict:
+        """全チャンネルを一括許可する（MAX＝チャンネル数無制限プラン限定）。
+
+        channels: Botが読める全テキストチャンネルの [(channel_id, channel_name), ...]。
+        MAX以外のプランは拒否する（有限上限と矛盾するため・OI-14 C-2 / OI-25）。
+        既に許可済みのチャンネルはスキップし、新規許可があれば取り込みジョブを1件投入する。
+        戻り値:
+          {"ok": True, "added": int, "total": int, "job_id": int|None}
+                                                  … job_id None=新規許可なし or 取り込み重複
+          {"ok": False, "message": str}          … 非対応プランで拒否（案内文つき）
+        """
+        def run(conn):
+            plan = db.get_guild_plan(conn, guild_id)
+            if not quota.allow_all_allowed(plan["channel_limit"]):
+                return {
+                    "ok": False,
+                    "message": quota.allow_all_denied_message(_unlimited_plan(conn)),
+                }
+            existing = dict(db.fetch_allowed_channels(conn, guild_id))
+            added = 0
+            for channel_id, channel_name in channels:
+                if channel_id in existing:
+                    continue  # 既に許可済みは更新不要
+                db.allow_channel(conn, guild_id, channel_id, channel_name, allowed_by)
+                added += 1
+            job_id = None
+            if added:  # 新規許可があるときだけ取り込みジョブを投入する
+                job_id = db.enqueue_job(
+                    conn, guild_id, db.JOB_INGEST, requested_by=allowed_by
+                )
+            return {
+                "ok": True, "added": added, "total": len(channels), "job_id": job_id,
+            }
 
         return await self._call(run)
 

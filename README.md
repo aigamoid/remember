@@ -71,6 +71,7 @@ Discordサーバーの過去ログをRAG化し、Botが質問に回答するマ�
 | コマンド | 動作 |
 |---|---|
 | `/oracle allow #channel` | チャンネル許可 + 取り込みジョブ投入 |
+| `/oracle allowall` | 全チャンネルを一括許可 + 取り込みジョブ投入（**MAXプラン限定**） |
 | `/oracle deny #channel` | 許可取り消し + 取り込み済みデータ削除ジョブ投入 |
 | `/oracle sync` | 差分取り込みジョブ投入 |
 | `/oracle status` | 許可チャンネル/件数/最新ジョブを確認 |

@@ -1,5 +1,33 @@
 # 未解決事項・TODO
 
+## OI-25: 全チャンネル一括許可コマンド `/oracle allowall`（MAXプラン限定）✅ 実装完了（feature/oi25-allow-all）
+
+**背景:** チャンネル数が多いサーバーで全チャンネルを取り込むには `/oracle allow #ch` を
+1つずつ実行する必要があり手間だった。MAXプラン（チャンネル数無制限）の利用者向けに
+**全テキストチャンネルを一括許可する**コマンドを追加する。
+
+**実装方式（既存の opt-in / quota 機構に乗せる・OI-14 C-2 と整合）:**
+- Discord のスラッシュコマンドは `allow` が必須のチャンネル引数を持つため `allow all` という
+  文字列指定はできない。**別サブコマンド `/oracle allowall`（引数なし）**として実装。
+- `moimoichan_Discordbot/bot.py`: `OracleGroup.allowall` を追加。Botが**閲覧＋履歴読み取り**
+  できる全テキストチャンネルだけを対象に集めて Store へ渡す（権限の無いchはクロール不可のため除外）。
+- `moimoichan_Discordbot/store.py`: `Store.allow_all_channels()` を追加。
+  プランの `channel_limit` が **None（無制限＝MAX）のときだけ許可**。それ以外は拒否して案内文を返す。
+  既許可chはスキップし、新規許可があれば取り込みジョブ（`JOB_INGEST`）を1件だけ投入。
+  ※ワーカーは1ジョブで guild の全許可chをクロールする設計なので、ジョブは1件で十分。
+- `src/quota.py`: `allow_all_allowed(channel_limit)`（None=MAXのみTrue）と
+  `allow_all_denied_message()`（MAX限定の案内文）を追加。**MAX判定は plan_key ハードコードでなく
+  `channel_limit is None`（無制限）で行う**（plan_defs はDB編集可なので将来の無制限プランも自然に対象）。
+- テスト: `tests/test_store.py` 新規（実DBで MAX許可/free・pro拒否/既許可スキップ/部分追加）＋
+  `tests/test_quota.py` に allowall 判定・案内文を追加。
+
+**残・要確認(人間):**
+- 一括許可は**同意フロー（OI-14 A の規約同意）を個別 allow と同じ粒度で持たない**。公開・有料化時に
+  「全ch一括取り込み」の同意取得をどう見せるか要検討。
+- 取り込みコストはチャンネル数に比例。MAXは上限満杯でも黒字設計（OI-14 C-2）だが、巨大サーバーの
+  初回一括取り込みは contextualizer/embedding が一時的に重い。
+- 関連: OI-14 C-2（quota・プラン）/ OI-11（opt-in 取り込み）
+
 ## OI-23: 検索ゲート（必要なければベクトル検索をスキップ）✅ 実装完了（2026-06-19・feature/oi23-search-gate）
 
 「じゃんけんしよう！」「こんにちは」「今日の天気は？」のような**過去ログ参照が不要な雑談・
