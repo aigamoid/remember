@@ -1,5 +1,53 @@
 # 未解決事項・TODO
 
+## OI-27: オンボーディング `/oracle help`（使い方ヘルプ）（未着手）
+
+**背景:** 現状ユーザーが使い方を知る手段は、Botのサーバー参加時に1回だけ流れる welcome
+メッセージ（[bot.py](../moimoichan_Discordbot/bot.py) の `_WELCOME`）しかない。後から
+「どう質問するの？」「どう許可するの？」を確認する導線が無く、新規メンバーや後から入った
+管理者がコマンドや質問方法に辿り着けない。一般的なDiscord Botにはあるヘルプを追加する。
+
+**スコープ（このフェーズ）:**
+- `/oracle help`（引数なし・**誰でも実行可**にする＝管理コマンドの allow/deny 等と違い権限不要）を追加。
+  - 注意: 既存の `OracleGroup` は `default_permissions=manage_guild` でグループ全体に管理権限が
+    かかっている。help は一般ユーザーにも見せたいので、**権限要件の扱いを要検討**
+    （別グループにする／コマンド単位で権限を上書きする／`/help` をトップレベルコマンドにする等）。
+- 内容（ephemeral で返す想定・チャンネルを汚さない）:
+  - 質問のしかた（@メンションで話しかける／設定によりトリガーチャンネル限定の旨）
+  - 「覚えておいて」で事実を記憶できること（OI-24）
+  - 管理者向け: `/oracle allow|allowall|deny|sync|status` の早見表（権限が必要な旨も明記）
+  - れみちゃんの口調・キャラに合わせた文面にする（`_WELCOME` と同じトーン）
+- 文面は `bot.py` 内の定数（`_WELCOME` の隣に `_HELP` 等）に切り出すと welcome と一貫性を保てる。
+
+**実装の当たり所:**
+- `moimoichan_Discordbot/bot.py`: コマンド定義（`OracleGroup` か新規トップレベルコマンド）。
+- テスト: Bot のコマンドは Discord 依存で単体テストしづらいので、**文面定数の組み立てを純粋関数に
+  切り出して** テストする（メッセージに主要コマンド名が含まれること等）か、最小に留める。
+- 反映には **bot コンテナの再ビルド**が必要（`docker compose up -d --build bot`）。
+
+**残・要確認(人間):** ヘルプを ephemeral にするか全員に見える形にするか、管理コマンドを
+一般ユーザーにも一覧表示してよいか（権限なしユーザーには実行できないだけで一覧は見せる想定）。
+関連: OI-25（allowall）/ OI-24（覚えておいて）/ welcome メッセージ（`_WELCOME`）
+
+## OI-26: CDデプロイ完了をDiscordに通知する（未着手）
+
+**背景:** 2026-06-20 に CD を導入（`develop` マージ → pytest 緑 → `remember-vm` へ自動デプロイ・
+[.github/workflows/tests.yml](../.github/workflows/tests.yml) の `deploy` ジョブ / PR #29）。
+現状デプロイの成否は **GitHub の Actions 画面でしか分からない**。マージしたら Discord に
+「デプロイ成功 ✅ / 失敗 ❌（コミットSHA・所要時間・/health 結果）」を流したい。
+
+**実装アイデア（着手時に要検討・まだ実装しない）:**
+- 最小: `deploy` ジョブの末尾に Discord Webhook へ `curl` で1回 POST するステップを足す
+  （成功時）＋ `if: failure()` の通知ステップ（失敗時）。Webhook URL は GitHub Secrets に置く。
+  - self-hosted runner は VM 上（Tailnet 内）だが **外向き443は開いている**ので Webhook POST は通る。
+  - メッセージに `${{ github.sha }}` / コミットメッセージ / ジョブ結果を載せる。
+- 既存の通知系（OI-13 取り込み完了通知）とは**別物**。あちらはワーカー→ユーザー通知、
+  こちらは CI/CD →運用者向け（管理用チャンネル/サポートサーバー想定）。
+- Webhook を使うか、Bot の常駐接続を使うかは要検討（Webhook が一番手軽・runner から独立）。
+
+**要確認(人間):** 通知先チャンネル、成功も通知するか失敗だけにするか、メッセージ書式。
+関連: OI-13（取り込み完了通知）/ CD（CLAUDE.md「CD（自動デプロイ）」節）
+
 ## OI-25: 全チャンネル一括許可コマンド `/oracle allowall`（MAXプラン限定）✅ 実装完了（feature/oi25-allow-all）
 
 **背景:** チャンネル数が多いサーバーで全チャンネルを取り込むには `/oracle allow #ch` を
