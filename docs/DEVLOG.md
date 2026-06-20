@@ -4,6 +4,36 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-20 — CD導入: develop マージで remember-vm へ自動デプロイ（PR #29）
+
+CIに続きCDを導入。`develop` への push（PRマージ）で pytest 緑→検証機 `remember-vm` へ自動デプロイされる。
+
+### 方式選定
+- **self-hosted runner（pull型）を採用**。VMはTailnet限定（インバウンド）でGitHubホストrunnerから到達不可だが、
+  runnerはVMから外向きにGitHubへロングポール接続するため成立。SSH鍵・Tailscale越え・GCP認証をCIに置かずに済む。
+- 対抗案（GitHubホスト+Tailscale action+SSH push）は新規シークレットが多く不採用。
+
+### 実装（[.github/workflows/tests.yml](../.github/workflows/tests.yml) に `deploy` ジョブ追加）
+- `needs: pytest` / `if: push && ref==develop` / `runs-on: [self-hosted, remember-vm]` / `concurrency` で直列化。
+- ステップ: `~/remember` で `git reset --hard origin/develop` → `docker compose up -d --build` → `/health` 200確認。
+- `.env`/`config.yml`/`data/` は .gitignore 済みで `reset --hard` でも保持される（追跡ファイルにコード手編集が無いことを事前差分確認）。
+
+### VM側セットアップ（一回限り・SSH代行で実施）
+- `~/remember` は tarball展開のままでgit未初期化だったため **git化**（`git init`→develop に reset）。
+- 認証は **read-only SSHデプロイキー**（`~/.ssh/remember_deploy`・`gh api .../keys` で登録）。
+  当初PATを `.git/config` 直書きしようとしてハーネスに静止され、より安全なデプロイキーへ切替（PATは失効）。
+- runner v2.335.1 を **systemdサービスとして常駐化**（`svc.sh install`・passwordless sudo確認済み・label `remember-vm`）。
+- VMのoutboundは443/22とも開通済みを実測（Tailscale制限はインバウンドのみ）。
+
+### 検証
+- マージ前にデプロイ手順をVM上で手動実行 → 再ビルド34秒・`/health` 200・postgres/qdrant無停止を確認。
+- マージ後の初の自動デプロイ run を観察 → `pytest 59s` / `deploy 51s` 両方success、VM HEAD=PR#29マージ・`/health` 200。
+
+### 運用メモ
+- VM自動停止（JST 2/9/17時）中にマージしてもジョブはキュー待機→起動時に自動実行。
+- デプロイ失敗時は赤化し旧コンテナ継続＝稼働中サービスは保護される。
+- CDの恒久運用ルールは CLAUDE.md「CI/CD」セクションに反映済み。
+
 ## 2026-06-19 — 明示メモリ機能(OI-24) 読み書き実装・A/B・VM動作確認
 
 ユーザーが「◯◯は△△だよ、覚えておいて」と教えた**事実**を、Discord過去ログとは別の記憶領域
