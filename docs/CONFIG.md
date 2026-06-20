@@ -56,6 +56,16 @@ rag:
                                               # （Bot経由のリクエストでは実サーバー名が優先される）
   debug_trace: false                          # OI-21: 質問/ヒットチャンク/回答を chat_trace に保存（デバッグ用）
                                               # 既定OFF。質問・回答本文を残すため本番はプライバシー上 false 運用が前提
+  memory_enabled: false                       # OI-24: 明示メモリ機能（既定OFF）
+                                              # 「覚えておいて」検知→LLM抽出→memories保存（書き込み）と
+                                              # guildの教わった事実を回答プロンプトへ全件注入（読み取り）を有効化。
+                                              # ※項目追加時は各環境の実config.ymlも更新すること（既定OFFで無効化される）
+  search_gate: true                           # OI-23: 検索ゲート（既定ON）
+                                              # 挨拶・雑談・ゲーム・一般質問など過去ログ参照が不要な入力を
+                                              # Query Rewriter が [NO_SEARCH] と判定したら、埋め込み・検索・
+                                              # リランクをスキップして素の雑談として回答する（コスト/レイテンシ削減）。
+                                              # 誤スキップを避けるため判定は「迷ったら検索」に倒している。
+                                              # false にすると常に検索する（従来動作）。
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（要 .env の JINA_API_KEY）
     provider: "jina"                          # 現状 jina のみ対応

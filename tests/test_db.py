@@ -11,7 +11,10 @@ from src.db import (
     enqueue_job,
     fetch_allowed_channels,
     fetch_guilds_overview,
+    count_memories,
+    delete_memory,
     fetch_last_job,
+    fetch_memories,
     fetch_mention_map,
     fetch_recent_jobs,
     fetch_usage_summary,
@@ -20,6 +23,7 @@ from src.db import (
     guilds_due_for_sync,
     insert_attachment,
     insert_chunk,
+    insert_memory,
     insert_message,
     insert_trace,
     insert_usage,
@@ -516,3 +520,66 @@ class TestChatTrace:
         assert row[1] is None
         assert row[2] is None
         assert row[3] is False
+
+
+# ── memories（明示メモリ「覚えておいて」・OI-24）────────────────────
+
+class TestMemories:
+    def test_insert_and_fetch(self, conn):
+        mid = insert_memory(
+            conn, "g-1", "ケーキが好き",
+            subject="かにじる", created_by="u1", source_channel_id="ch1",
+        )
+        assert isinstance(mid, int)
+        rows = fetch_memories(conn, "g-1")
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["id"] == mid
+        assert r["guild_id"] == "g-1"
+        assert r["subject"] == "かにじる"
+        assert r["content"] == "ケーキが好き"
+        assert r["created_by"] == "u1"
+        assert r["source_channel_id"] == "ch1"
+        assert r["created_at"]  # ISO8601 が入っている
+
+    def test_minimal_fields(self, conn):
+        insert_memory(conn, "g-1", "3/25は誕生日")
+        r = fetch_memories(conn, "g-1")[0]
+        assert r["content"] == "3/25は誕生日"
+        assert r["subject"] is None
+        assert r["created_by"] is None
+        assert r["source_channel_id"] is None
+
+    def test_fetch_newest_first(self, conn):
+        insert_memory(conn, "g-1", "古い")
+        insert_memory(conn, "g-1", "新しい")
+        rows = fetch_memories(conn, "g-1")
+        # created_at DESC, id DESC: 後から入れた方が先頭
+        assert rows[0]["content"] == "新しい"
+        assert rows[1]["content"] == "古い"
+
+    def test_guild_isolation(self, conn):
+        insert_memory(conn, "g-1", "g1の事実")
+        insert_memory(conn, "g-2", "g2の事実")
+        assert [r["content"] for r in fetch_memories(conn, "g-1")] == ["g1の事実"]
+        assert [r["content"] for r in fetch_memories(conn, "g-2")] == ["g2の事実"]
+
+    def test_count(self, conn):
+        assert count_memories(conn, "g-1") == 0
+        insert_memory(conn, "g-1", "A")
+        insert_memory(conn, "g-1", "B")
+        insert_memory(conn, "g-2", "C")
+        assert count_memories(conn, "g-1") == 2
+        assert count_memories(conn, "g-2") == 1
+
+    def test_delete(self, conn):
+        mid = insert_memory(conn, "g-1", "消す対象")
+        assert delete_memory(conn, "g-1", mid) is True
+        assert count_memories(conn, "g-1") == 0
+        # 既に無い／別 guild の id は False（消えない）
+        assert delete_memory(conn, "g-1", mid) is False
+
+    def test_delete_wrong_guild_keeps_row(self, conn):
+        mid = insert_memory(conn, "g-1", "他guildからは消せない")
+        assert delete_memory(conn, "g-2", mid) is False
+        assert count_memories(conn, "g-1") == 1

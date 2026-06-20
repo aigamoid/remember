@@ -246,6 +246,30 @@ CREATE INDEX idx_trace_created       ON chat_trace (created_at);
 > **既定オフ**。`config.yml` の `rag.debug_trace: true` のときだけ記録する（質問・回答本文を
 > 保存するため、本番ではプライバシー上 false 運用が前提）。
 
+### memories（明示メモリ「覚えておいて」・OI-24）
+
+```sql
+CREATE TABLE memories (
+    id                BIGSERIAL PRIMARY KEY,
+    guild_id          TEXT NOT NULL,
+    subject           TEXT,              -- 誰/何についての事実か（例: かにじる／本人。任意）
+    content           TEXT NOT NULL,     -- 覚えておく事実本文（例: ケーキが好き）
+    created_by        TEXT,              -- 教えたユーザーID（任意）
+    source_channel_id TEXT,              -- 教わったチャンネルID（任意）
+    created_at        TEXT NOT NULL      -- ISO8601 (UTC)
+);
+
+CREATE INDEX idx_memories_guild ON memories (guild_id);
+```
+
+> ユーザーが「覚えておいて」と**明示的に教えた事実**を保持する、Discord過去ログ（`chunk_index`/
+> Qdrant）とは**別の記憶領域**（OI-24）。回答時に guild 単位で**全件**をプロンプトへ注入する
+> （少数前提＝ベクトル検索を使わない。件数が増えたら別Qdrantコレクション化を検討）。
+> `src/db.py` の `insert_memory` / `fetch_memories` / `delete_memory` / `count_memories` が
+> 読み書きし、`src/memory.py` の `MemoryProvider` 経由で `src/rag/engine.py` の `answer()` が
+> プロンプトへ注入する。**既定オフ**（`config.yml` の `rag.memory_enabled: true` のときだけ注入）。
+> 書き込みUI（「覚えておいて」検知）は A/B で効果確認後に実装予定。
+
 ## Qdrant ペイロード仕様
 
 コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`・全guild共有）

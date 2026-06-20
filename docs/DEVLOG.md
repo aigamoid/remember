@@ -4,6 +4,78 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-19 — 明示メモリ機能(OI-24) 読み書き実装・A/B・VM動作確認
+
+ユーザーが「◯◯は△△だよ、覚えておいて」と教えた**事実**を、Discord過去ログとは別の記憶領域
+（`memories`テーブル）に保持し、回答プロンプトへ注入する機能。読み取り→効果A/B→書き込み→抽出A/B
+→検証機デプロイ→本番動作確認まで一気通貫で実施（PR #27）。
+
+### やったこと
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/db.py` | `memories`テーブル＋`insert_memory`/`fetch_memories`/`delete_memory`/`count_memories`（全guild_id分離） |
+| 2 | `src/memory.py` | `MemoryProvider`（guildの教わった事実を読む callable・TraceRecorder流儀） |
+| 3 | `src/rag/prompts.py` | `MEMORY_SECTION`＋`build_memories`（読み）/ `MEMORY_EXTRACT_PROMPT`（書き・JSON抽出） |
+| 4 | `src/rag/engine.py` | `answer()`にメモリ注入 / `extract_memory()`（LLMでsubject/content抽出・null判定） |
+| 5 | `src/api.py` | `POST /remember`＋`memory_saver`（テスタブル化）/ `build_engine`で`memory_provider`配線 |
+| 6 | `moimoichan_Discordbot/bot.py`・`oracle_client.py` | メンション＋フレーズ検知→`/remember`→「覚えたよ！」返信 |
+| 7 | `config.yml.example`・bot config | `rag.memory_enabled`（既定OFF）/ `oracle.remember_phrases` |
+| 8 | `tests/`・`scripts/` | テスト+約30件 / 使い捨てA/B `ab_memory.py`・`ab_memory_extract.py` |
+
+### A/B結果
+- **読み取り（注入あり/なし）**: 記憶系 1.00→**5.00**、対照系 4.67→**5.00**（幻覚も矯正・脱線なし）。
+- **書き込み（LLM抽出 vs 素朴保存）**: SHOULD抽出 **5.00** vs 2.00、NOISE誤爆 **0/4** vs 4/4。LLM抽出採用。
+
+### ハマりポイント
+- **semantic conflict（CI赤）**: 作業中に develop へ OI-23 検索ゲート(PR #26)がマージされ、PR CIは
+  「develop+feature」で回るため、検索スキップ時に`SKIP_CONTEXT`でなく`build_context(hits)`で上書き
+  していた箇所が衝突。`develop`を取り込み`{context}`変数を使う形で解消→356 passed→force-with-lease。
+- **VMで覚えない**: 原因は VM実`config.yml`に`memory_enabled`が無く既定OFF。検知・配線・コードは正常
+  （`POST /remember 200`がログにあった）。`config.yml.example`だけ更新し実configを更新し忘れていた。
+
+### 決定事項
+- 保存先は**Postgres全件注入**（少数前提・件数増でQdrant化を再検討）。書き込みはLLM抽出（誤爆制御が決定的に優位）。
+- 分離は**guild単位**（guild内は全員共有・user分離はしない＝過去ログRAGと同じ仕様）。
+
+### 検証機での本番動作確認
+- VMに`memory_enabled: true`追加＋`restart api bot`→ Discordで実テスト→ `memories`に4件保存を確認。
+- 読み取りも `chat_trace` で確認（「ほしのかなた」質問に保存済み「低学歴」が回答へ注入）。
+
+### 次のステップ
+- **センシティブ属性ガードレール**（OI-25候補）: 「低学歴」等の中傷的属性が保存・発話された。公開前に必須。
+- 後段: `/oracle forget`・admin CRUD・更新vs追記の上書き戦略・件数増でのQdrant化・個人メモリ分離。
+
+---
+
+## 2026-06-19 — デバッグトレース(OI-21)・プロンプトv4・リランカーA/B
+
+「精度が落ちた・以前の方が良かった」という所感を起点に、観測性→診断→改善まで一気通貫で対応した。
+
+### やったこと
+| # | 内容 | PR |
+|---|---|---|
+| 1 | **OI-21 デバッグトレース**: `chat_trace` テーブル＋`src/trace.py TraceRecorder`。1回の `/chat`（質問/書き換え/ヒットチャンク本文/回答/トークン/コスト/レイテンシ）を1行で保存。`config.yml rag.debug_trace`（既定OFF・プライバシー）。テスト+10 | #20 |
+| 2 | **.dockerignore 追加**（`data/` 等を除外） | #21 |
+| 3 | **プロンプトv4**: れみの口調は維持し情報量を回復（「曖昧に/短く」撤廃・ランキング等の依頼にも応じる） | #22 |
+| 4 | **.dockerignore バグ修正**（行末コメントで `data/` 除外が効かずビルドが落ちていた） | #23 |
+
+### 診断と検証（chat_traceが効いた）
+- **質問ログが無かった**ためA/Bの質問すら実チャンクから推測する羽目に → OI-21で穴を埋めた。
+- **プロンプトA/B**（`scripts/ab_prompt_test.py`・chat_traceの同一検索結果で回答だけ差し替え）で
+  v3 vs v4 を比較 → v4が明確に改善（「優しい人ランキング」: v3拒否→v4具体的に5人列挙 等）。所感を実証。
+- **リランカーA/B**（`scripts/ab_rerank_test.py`・実テスト鯖・5問）→ **明確な改善なし・むしろ悪化例あり**。
+  Jina v2 は費用対効果が見合わず**本番有効化は見送り**（既定OFF維持）。詳細は OPEN_ISSUES OI-9。
+
+### デプロイ（remember-vm・検証機）
+- develop tarball をクリーン展開＋設定/データ保持で再デプロイ。**debug_trace: true** で運用（実トレース収集）。
+- ハマり: `.dockerignore` の**行末コメントは非対応**（`data/ # …` がパターン化して除外が無効）→ ビルドが
+  `data/postgres: permission denied` で落ちた。コメントは行頭のみに修正（#23）。
+
+### 決定事項
+- 回答品質の主レバーは**プロンプト**（retrievalは概ね良好）。リランカーは現状不採用。
+- センシティブ属性（性的指向・健康等）の実名ランキングは v4 が答えるようになった → **公開前に OI-14 A（法務）で
+  ガードレール方針を決める**（今回は検証機優先で見送り）。
+
 ## 2026-06-19 — CI（GitHub Actions）導入・docs直接コミット運用・メインdir develop化
 
 PR作成時の自動テストが無く手動 `pytest` だった状態を解消し、CI を導入。

@@ -8,6 +8,7 @@ usage_log に記録する（コスト計測用・OI-14 C）。記録失敗は回
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -16,8 +17,14 @@ from src.embedder import Embedder
 from src.rag.llm import ChatLLM, Usage
 from src.rag.prompts import (
     ANSWER_SYSTEM_PROMPT,
+    MEMORY_EXTRACT_PROMPT,
+    MEMORY_SECTION,
+    NO_SEARCH_SENTINEL,
     REWRITER_SYSTEM_PROMPT,
+    SKIP_CONTEXT,
+    SPEAKER_SECTION,
     build_context,
+    build_memories,
 )
 from src.rag.reranker import Reranker
 from src.usage import compute_cost
@@ -34,6 +41,7 @@ class RagEngine:
         usage_recorder: Callable[[list[dict]], None] | None = None,
         reranker: Reranker | None = None,
         trace_recorder: Callable[[dict], None] | None = None,
+        memory_provider: Callable[[str], list[dict]] | None = None,
     ) -> None:
         rag_cfg = cfg.get("rag", {})
         self.rewriter_model: str = rag_cfg.get(
@@ -67,9 +75,16 @@ class RagEngine:
         rerank_cfg = rag_cfg.get("reranker", {})
         self.rerank_enabled: bool = bool(rerank_cfg.get("enabled", False))
         self.rerank_top_n: int = rerank_cfg.get("top_n", 30)
+        # 検索ゲート（OI-23）。Query Rewriter が [NO_SEARCH] を返したら埋め込み・
+        # 検索・リランクをスキップし、素の雑談として回答する（コスト/レイテンシ削減）。
+        # 誤スキップは記憶RAGの価値を損なうため、判定は「迷ったら検索」に倒している。
+        self.search_gate: bool = bool(rag_cfg.get("search_gate", True))
         # デバッグトレース（OI-21）。enabled かつ trace_recorder が渡された時のみ記録。
         # 質問・ヒットチャンク・回答を残すためプライバシー上の既定はオフ。
         self.trace_enabled: bool = bool(rag_cfg.get("debug_trace", False))
+        # 明示メモリ（OI-24）。enabled かつ memory_provider が渡された時のみ、
+        # guild の「教わった事実」を回答プロンプトに全件注入する（既定オフ）。
+        self.memory_enabled: bool = bool(rag_cfg.get("memory_enabled", False))
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
         self.store = store
@@ -78,6 +93,7 @@ class RagEngine:
         self.usage_recorder = usage_recorder
         self.reranker = reranker
         self.trace_recorder = trace_recorder
+        self.memory_provider = memory_provider
 
     def _now_str(self) -> str:
         tz = timezone(timedelta(hours=self.tz_offset))
@@ -188,6 +204,61 @@ class RagEngine:
         return comp.text.strip() or query
 
     @staticmethod
+    def _parse_memory_json(text: str) -> dict | None:
+        """抽出LLMの出力からJSONオブジェクトを取り出す。崩れていれば None。"""
+        t = text.strip()
+        if t.startswith("```"):
+            t = t.strip("`")
+            t = t[t.find("{"):]
+        i, j = t.find("{"), t.rfind("}")
+        if i < 0 or j < 0:
+            return None
+        try:
+            return json.loads(t[i:j + 1])
+        except Exception:
+            return None
+
+    async def extract_memory(
+        self,
+        guild_id: str,
+        text: str,
+        speaker_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict | None:
+        """「覚えておいて」発話から保存すべき事実を抽出する（OI-24・書き込み）。
+
+        戻り値: {"subject": str|None, "content": str}、または覚えるべき事実が無ければ None。
+        rewriter_model（安価）で抽出し usage を記録する。LLM失敗・JSON崩れ・content空は
+        None（保存しない＝誤爆の二重ガード）。speaker_name があれば本人参照を解決する。
+        """
+        speaker_line = (
+            f"話者（いまの発話者）の名前: {speaker_name}\n"
+            if speaker_name and speaker_name.strip() else ""
+        )
+        system = MEMORY_EXTRACT_PROMPT.replace("{speaker_line}", speaker_line)
+        events: list[dict] = []
+        try:
+            comp = await self.llm.complete(
+                self.rewriter_model, system, text,
+                temperature=0.1, max_tokens=self.rewriter_max_tokens,
+            )
+        except Exception as e:
+            print(f"[WARN] メモリ抽出失敗（保存しない）: {e}")
+            return None
+        self._record(events, "memory_extract", comp.model, comp.usage)
+        await self._flush(events, guild_id, user_id)
+        data = self._parse_memory_json(comp.text)
+        if not data:
+            return None
+        content = str(data.get("content") or "").strip()
+        if not content or content.lower() == "null":
+            return None
+        subject = str(data.get("subject") or "").strip() or None
+        if subject and subject.lower() == "null":
+            subject = None
+        return {"subject": subject, "content": content}
+
+    @staticmethod
     def _doc_for_rerank(hit: dict) -> str:
         """リランカーに渡すドキュメント文字列。context があれば前置きする。"""
         ctx = hit.get("context_text")
@@ -219,6 +290,7 @@ class RagEngine:
         guild_name: str | None = None,
         user_id: str | None = None,
         history: list[dict] | None = None,
+        speaker_name: str | None = None,
     ) -> dict:
         """質問に回答する。戻り値: {answer, rewritten_query, sources}
 
@@ -227,6 +299,9 @@ class RagEngine:
         user_id は usage_log の集計用（任意）。
         history は直近の会話（{"role","content"} の古い順リスト）。渡すと
         クエリ書き換えと回答の両方が会話文脈を踏まえる（マルチターン・OI-10）。
+        speaker_name は「いま話しかけている人」の表示名（任意・OI-22）。渡すと
+        回答プロンプトに差し込み、本人を指す言葉や呼びかけを解釈できる。
+        未指定（CLI等）のときは該当ブロックごと消える。
         """
         t0 = time.perf_counter()
         events: list[dict] = []
@@ -242,25 +317,64 @@ class RagEngine:
         )
         rewritten = await self.rewrite(query, events, history=hist_rw)
 
-        vector, emb_tokens = await asyncio.to_thread(
-            self.embedder.embed_one_with_usage, rewritten
+        # 検索ゲート（OI-23）。Rewriter が [NO_SEARCH] を返したら、雑談・一般質問と
+        # みなして埋め込み・検索・リランクを丸ごとスキップする（コスト/レイテンシ削減）。
+        search_skipped = self.search_gate and NO_SEARCH_SENTINEL in rewritten
+        use_rerank = (
+            not search_skipped and self.reranker is not None and self.rerank_enabled
         )
-        emb_model = getattr(self.embedder, "model", "text-embedding-3-small")
-        self._record(events, "embedding", emb_model, Usage(emb_tokens, 0, emb_tokens))
+        if search_skipped:
+            hits: list[dict] = []
+            context = SKIP_CONTEXT
+        else:
+            vector, emb_tokens = await asyncio.to_thread(
+                self.embedder.embed_one_with_usage, rewritten
+            )
+            emb_model = getattr(self.embedder, "model", "text-embedding-3-small")
+            self._record(
+                events, "embedding", emb_model, Usage(emb_tokens, 0, emb_tokens)
+            )
 
-        # リランク有効時は多め（rerank_top_n）に取って後で top_k に精選する。
-        use_rerank = self.reranker is not None and self.rerank_enabled
-        candidate_k = max(self.rerank_top_n, self.top_k) if use_rerank else self.top_k
-        hits = await asyncio.to_thread(
-            self.store.search, str(guild_id), vector, candidate_k
+            # リランク有効時は多め（rerank_top_n）に取って後で top_k に精選する。
+            candidate_k = (
+                max(self.rerank_top_n, self.top_k) if use_rerank else self.top_k
+            )
+            hits = await asyncio.to_thread(
+                self.store.search, str(guild_id), vector, candidate_k
+            )
+            if use_rerank and hits:
+                hits = await self._rerank(rewritten, hits, events)
+            context = build_context(hits)
+
+        # 発言者名（OI-22）。あればブロックを差し込み、無ければ空文字で消す。
+        speaker_section = (
+            SPEAKER_SECTION.replace("{speaker}", speaker_name)
+            if speaker_name and speaker_name.strip()
+            else ""
         )
-        if use_rerank and hits:
-            hits = await self._rerank(rewritten, hits, events)
+        # 明示メモリ（OI-24）。有効時のみ guild の「教わった事実」を全件取得して注入する。
+        # 取得失敗・0件・無効ならブロックごと消す（回答は止めない）。
+        memory_section = ""
+        if self.memory_enabled and self.memory_provider:
+            try:
+                mem_rows = await asyncio.to_thread(
+                    self.memory_provider, str(guild_id)
+                )
+            except Exception as e:
+                print(f"[WARN] メモリ取得失敗（メモリ無しで続行）: {e}")
+                mem_rows = []
+            memories_text = build_memories(mem_rows or [])
+            if memories_text:
+                memory_section = MEMORY_SECTION.replace("{memories}", memories_text)
 
         system = ANSWER_SYSTEM_PROMPT.replace(
             "{guild_name}", guild_name or self.guild_name
         ).replace("{current_datetime}", self._now_str()).replace(
-            "{context}", build_context(hits)
+            "{speaker_section}", speaker_section
+        ).replace(
+            "{taught_memories}", memory_section
+        ).replace(
+            "{context}", context
         )
         comp = await self.llm.complete(
             self.answer_model, system, query,
@@ -312,4 +426,5 @@ class RagEngine:
             "answer": comp.text,
             "rewritten_query": rewritten,
             "sources": sources,
+            "search_skipped": search_skipped,
         }

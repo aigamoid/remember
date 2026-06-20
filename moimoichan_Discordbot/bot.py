@@ -12,6 +12,7 @@ APIはステートレスだが、Bot がチャンネルごとに直近の会話�
 
 管理者向けスラッシュコマンド（サーバー管理権限が必要）:
     /oracle allow <channel>  チャンネルの読み取りを許可して取り込みを開始（opt-in）
+    /oracle allowall         全チャンネルの読み取りを一括許可（MAXプラン限定・OI-25）
     /oracle deny <channel>   許可を取り消し、取り込み済みデータを削除
     /oracle sync             許可チャンネルの差分取り込みを今すぐ実行
     /oracle status           取り込み状況を表示
@@ -35,6 +36,12 @@ from store import Store
 
 _MAX_REPLY_LEN = 2000  # Discord 文字数制限
 _DEFAULT_HISTORY_MAX_TURNS = 5  # チャンネルごとに覚えておく直近やり取り数（OI-10）
+# 「覚えておいて」検知のデフォルトフレーズ（部分一致・OI-24 書き込み）。
+# メンション必須（mention_only）と併用するので、これらを含むメンション発話だけ記憶フローに入る。
+_DEFAULT_REMEMBER_PHRASES = [
+    "覚えておいて", "覚えといて", "覚えてて", "覚えといて",
+    "おぼえておいて", "おぼえといて", "記憶して", "メモして",
+]
 
 _JOB_STATUS_LABEL = {
     "queued": "⏳ 待機中",
@@ -90,6 +97,7 @@ class OracleGroup(app_commands.Group):
                 f"⚠️ {result['message']}", ephemeral=True
             )
             return
+        job_id = result["job_id"]  # None=取り込みジョブが重複（既にキュー済み）
         note = (
             "取り込みを始めるね。終わったら質問できるよ〜。"
             if job_id is not None
@@ -97,6 +105,56 @@ class OracleGroup(app_commands.Group):
         )
         await interaction.followup.send(
             f"✅ {channel.mention} の読み取りを許可したよ。{note}", ephemeral=True
+        )
+
+    @app_commands.command(
+        name="allowall",
+        description="全チャンネルの読み取りを一括で許可して取り込む（MAXプラン限定）",
+    )
+    async def allowall(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        guild_id = str(guild.id)
+        await self.store.register_guild(guild_id, guild.name)
+
+        # Botが閲覧＋履歴読み取りできるテキストチャンネルだけを対象にする
+        # （権限の無いチャンネルを許可してもクロールできないため）。
+        me = guild.me
+        channels = [
+            (str(ch.id), ch.name)
+            for ch in guild.text_channels
+            if (perms := ch.permissions_for(me)).view_channel
+            and perms.read_message_history
+        ]
+        if not channels:
+            await interaction.followup.send(
+                "読み取れるテキストチャンネルが見つからなかったよ〜。"
+                "Botにチャンネルの閲覧・履歴の読み取り権限があるか確認してね。",
+                ephemeral=True,
+            )
+            return
+
+        result = await self.store.allow_all_channels(
+            guild_id, channels, str(interaction.user.id)
+        )
+        if not result["ok"]:  # MAX以外のプラン
+            await interaction.followup.send(
+                f"⚠️ {result['message']}", ephemeral=True
+            )
+            return
+
+        added, total = result["added"], result["total"]
+        if added == 0:
+            await interaction.followup.send(
+                f"全 {total} チャンネルはもう許可済みだったよ。新しく追加したものはなし〜。"
+                " 取り込み直したいときは `/oracle sync` してね。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"✅ 全 {total} チャンネルのうち {added} チャンネルを新しく許可したよ。"
+            " 順番に取り込むから、終わったら質問できるよ〜。",
+            ephemeral=True,
         )
 
     @app_commands.command(name="deny", description="チャンネルの許可を取り消し、取り込み済みデータを削除する")
@@ -175,6 +233,11 @@ class MoimoichanBot(discord.Client):
             )
         )
         self._history: dict[int, deque] = {}
+        # 「覚えておいて」検知フレーズ（OI-24・書き込み）。config で上書き可。
+        self._remember_phrases = (
+            cfg.get("oracle", {}).get("remember_phrases")
+            or _DEFAULT_REMEMBER_PHRASES
+        )
 
     async def setup_hook(self) -> None:
         self.tree.add_command(OracleGroup(self.store))
@@ -211,6 +274,12 @@ class MoimoichanBot(discord.Client):
             return
 
         user = f"{message.channel.id}:{message.author.id}"
+
+        # 「覚えておいて」検知（OI-24・書き込み）。記憶フローに入ったら chat はしない。
+        if self._is_remember(query):
+            await self._handle_remember(message, query, user)
+            return
+
         history = self._get_history(message.channel.id)
 
         async with message.channel.typing():
@@ -219,6 +288,7 @@ class MoimoichanBot(discord.Client):
                     query, str(message.guild.id), user,
                     guild_name=message.guild.name,
                     history=history,
+                    speaker=message.author.display_name,
                 )
                 # 成功時のみ会話を記憶（このチャンネルの次ターンへ引き継ぐ）。
                 self._remember_turn(message.channel.id, query, answer)
@@ -238,6 +308,37 @@ class MoimoichanBot(discord.Client):
                     pass
 
     # ---- 内部ヘルパー ----
+
+    def _is_remember(self, text: str) -> bool:
+        """記憶依頼フレーズ（覚えておいて等）を含むか（OI-24・書き込み）。"""
+        return any(p in text for p in self._remember_phrases)
+
+    async def _handle_remember(
+        self, message: discord.Message, text: str, user: str
+    ) -> None:
+        """「覚えておいて」発話を /remember に送り、保存結果を返信する（OI-24）。"""
+        async with message.channel.typing():
+            try:
+                res = await self.oracle.remember(
+                    text, str(message.guild.id), user,
+                    speaker=message.author.display_name,
+                    channel_id=str(message.channel.id),
+                )
+            except Exception as e:
+                print(f"[ERROR] remember {type(e).__name__}: {e}")
+                await message.reply("⚠️ うまく覚えられなかったかも。もう一度試してね〜。")
+                return
+        if res.get("saved"):
+            subject, content = res.get("subject"), res.get("content")
+            if subject:
+                await message.reply(f"覚えたよ！〔{subject}〕{content} だね🌸")
+            else:
+                await message.reply(f"覚えたよ！「{content}」だね🌸")
+        else:
+            await message.reply(
+                "ん〜、何を覚えればいいか分からなかったかも。"
+                "「◯◯は△△だよ、覚えておいて」みたいに教えてくれたら覚えるよ〜！"
+            )
 
     def _get_history(self, channel_id: int) -> list[dict]:
         """このチャンネルの直近会話を古い順で返す（API へ渡す形）。"""
