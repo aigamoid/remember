@@ -23,7 +23,7 @@ Discordサーバーの過去ログをRAG化し、チャットボットで回答�
 | 3 | `exporter.py` | chunk_index → output/*.txt へファイル出力（旧Dify用・任意） |
 | 4 | `indexer.py` | chunk_index → embedding → Qdrant 登録 |
 
-**通常運用は自動**: Botのスラッシュコマンド（`/oracle allow|deny|sync|status`）が
+**通常運用は自動**: Botのスラッシュコマンド（`/oracle allow|allowall|deny|sync|status`）が
 `ingest_jobs` キューにジョブを積み、常駐ワーカー（`worker.py` → `src/worker.py`）が
 Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎）もワーカーが行う。
 各ルートスクリプトは config.yml の guild_id に対する手動実行用（デバッグ・再構築）。
