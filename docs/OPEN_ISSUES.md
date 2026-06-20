@@ -1,6 +1,10 @@
 # 未解決事項・TODO
 
-## OI-27: オンボーディング `/oracle help`（使い方ヘルプ）（未着手）
+## OI-27: オンボーディング `/oracle help`（使い方ヘルプ）（対応済み）
+
+**対応:** `/oracle help` を追加（[bot.py](../moimoichan_Discordbot/bot.py) の `_HELP` 定数）。
+導入フロー（allow/allowall → sync → メンションで質問）・主要コマンド一覧・管理ポータル案内を
+静的テキストで返す（ephemeral）。テストは [tests/test_bot_help.py](../tests/test_bot_help.py)。
 
 **背景:** 現状ユーザーが使い方を知る手段は、Botのサーバー参加時に1回だけ流れる welcome
 メッセージ（[bot.py](../moimoichan_Discordbot/bot.py) の `_WELCOME`）しかない。後から
