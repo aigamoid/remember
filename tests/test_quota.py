@@ -49,6 +49,25 @@ class TestChannelLimit:
         assert quota.channel_limit_exceeded(9999, None) is False
 
 
+class TestAllowAll:
+    def test_unlimited_plan_allowed(self):
+        assert quota.allow_all_allowed(None) is True
+
+    def test_finite_plan_not_allowed(self):
+        assert quota.allow_all_allowed(1) is False
+        assert quota.allow_all_allowed(10) is False
+
+    def test_denied_message_mentions_max(self):
+        m = quota.allow_all_denied_message()
+        assert "MAX" in m and "allowall" in m
+
+    def test_denied_message_with_upgrade(self):
+        up = {"display_name": "MAX", "price_jpy": 1500, "daily_question_limit": 200,
+              "channel_limit": None}
+        m = quota.allow_all_denied_message(up)
+        assert "MAX" in m and "1500" in m and "全チャンネル" in m
+
+
 class TestMessages:
     def test_daily_message_contains_limit_and_reset(self):
         m = quota.daily_limit_message(20)
