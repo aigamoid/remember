@@ -51,7 +51,6 @@ Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎
 - CI内では Postgres を**サービスコンテナ**（`postgres:16`）で起動し、
   `TEST_DATABASE_URL` で接続先を指定する（conftest.py がこの環境変数を読む）。
 - APIキー・config.yml はテストで参照しないため、**GitHub側のシークレット登録は不要**。
-- CD（自動デプロイ）は**未導入**。GCP VM への反映は引き続き手動。
 - 注意: ローカルでは `test_indexer` の一部がインメモリQdrant共有で稀に揺れるが、
   CI（クリーン環境）では再現せずパスする。コードのバグではない。
 - `.github/workflows/` 配下を push するには gh トークンに `workflow` スコープが必要
@@ -62,6 +61,21 @@ Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎
   `history` 引数が追加され5要素タプル化されたが、先に分岐していた oi14 のテストが
   4要素のままマージされ CI が赤化 / PR #18 で修正）。古いブランチをマージする前に
   `git merge develop` で最新を取り込み、ローカルで `pytest` を通すこと。
+
+### CD（自動デプロイ・GitHub Actions）
+
+- **`develop` に push（＝PRマージ）され、かつ pytest が緑のときだけ** `remember-vm` へ自動デプロイされる
+  （定義: [.github/workflows/tests.yml](.github/workflows/tests.yml) の `deploy` ジョブ・2026-06-20 導入 / PR #29）。
+  PR更新・`main` への push では走らない（`if: push && ref==develop`）。やることは「PRをマージ」だけ。
+- 実行場所は **GCP検証機 remember-vm 上の self-hosted runner**（systemdサービスで常駐・label `remember-vm`）。
+  VMはTailnet限定（インバウンド）だが、runnerはVMから外向きにGitHubへ接続するため成立する（pull型）。
+- デプロイ内容: VM上の `~/remember`（gitクローン）で `git reset --hard origin/develop`
+  → `docker compose up -d --build` → `/health` が200を返すまで確認。
+  `.env`/`config.yml`/`data/` は **.gitignore 済みなので reset --hard でも保持**される。
+- 認証: VMの **read-only SSHデプロイキー**（`~/.ssh/remember_deploy`）で `git fetch`（PATは不使用）。
+- **VM停止中（自動停止 JST 2/9/17時）にマージしても、deployジョブはキューで待機し起動時に自動実行**される。
+- デプロイ失敗時（ビルド失敗・health NG）は赤化し、**旧コンテナが動き続ける**ので稼働中サービスは守られる。
+- 同時マージ対策として `concurrency: deploy-remember-vm` でデプロイは直列化（前のデプロイは中断しない）。
 
 ## 詳細ドキュメント
 
