@@ -33,6 +33,15 @@ def channel_limit_exceeded(current_count: int, channel_limit: int | None) -> boo
     return current_count >= channel_limit
 
 
+def allow_all_allowed(channel_limit: int | None) -> bool:
+    """全チャンネル一括許可（/oracle allowall）が使えるプランか。
+
+    チャンネル数が無制限（channel_limit is None ＝ MAXプラン）のときだけ True。
+    有限上限のプランで全チャンネルを一括許可すると上限と矛盾するため、MAX限定にする。
+    """
+    return channel_limit is None
+
+
 def _upgrade_suffix(upgrade: dict | None, axis: str) -> str:
     """アップグレード案内の付加文。axis: 'questions' | 'channels'。"""
     if not upgrade:
@@ -60,5 +69,14 @@ def channel_limit_message(channel_limit: int, upgrade: dict | None = None) -> st
     """チャンネル取り込み上限に達したときの案内文（/oracle allow 拒否時）。"""
     return (
         f"このプランで取り込めるチャンネルは{channel_limit}個までです。"
+        + _upgrade_suffix(upgrade, "channels")
+    )
+
+
+def allow_all_denied_message(upgrade: dict | None = None) -> str:
+    """全チャンネル一括許可を非対応プランで実行したときの案内文（/oracle allowall 拒否時）。"""
+    return (
+        "全チャンネルの一括許可（/oracle allowall）は MAX プラン限定の機能です🙏 "
+        "ふつうの `/oracle allow #チャンネル` は今のプランでも使えるよ。"
         + _upgrade_suffix(upgrade, "channels")
     )
