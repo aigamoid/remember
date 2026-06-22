@@ -4,6 +4,40 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-22 — OI管理を GitHub Issues へハイブリッド移行（採番 #NN・OPEN_ISSUES 1024→94行）
+
+肥大化した `docs/OPEN_ISSUES.md`（1024行/OI 54件・手動採番 `OI-44` が2系統で衝突）を、
+GitHub Issues 中心のハイブリッド管理へ移行した。3者レビュー（Claude Code/Codex/Aider 全員PASS）→ プラン承認 → 実装。
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `CLAUDE.md` | 採番を `#NN` へ移行（`OI-XX` は OI-54 で凍結）・OPEN_ISSUES の役割変更・「PRは `Closes #NN` で Issue 紐づけ」運用を追記 |
+| 2 | `docs/OPEN_ISSUES.md` | インデックス表（OI-XX→#NN）＋確定設計決定＋完了アーカイブへ再構成（**1024→94行**） |
+| 3 | `docs/oi_migration.tsv` | OI→Issue 移行マニフェスト（#31〜#47・冪等運用の記録） |
+| 4 | `scripts/migrate_oi_to_issues.py` | 一回限りの冪等移行スクリプト（manifest 連動・再実行で重複作成しない） |
+| 5 | GitHub Issues | 未着手OIを **17件**起票（#31〜#47） |
+| 6 | GitHub Labels | `P0`〜`P3` / `area:*`（6種）/ `kind:*`（3種）を作成 |
+| 7 | memory `feedback_read_open_issues` | 参照先に GitHub Issues を追加 |
+
+### 決定事項
+- **採番は GitHub Issue の `#NN` を正典**に。独自 `OI-XX` は **OI-54 で凍結**（手動採番の衝突を根絶）。
+  コードに深く埋まった既存 `OI-XX`（engine.py 16・bot.py 12・DEVLOG 53 等）は**書き換えず温存**し、
+  OPEN_ISSUES のインデックス表で `OI-XX → #NN` を橋渡し。
+- 未着手OIは全件 Issue 化。**アイデア群（OI-28〜43）は「魅力強化 epic」#33 に集約**、
+  **収益化ロードマップ OI-14 は epic #32**。完了済みOIは OPEN_ISSUES の完了アーカイブに1行で保持。
+- **OI-16（コスト最適化）は「ほぼ完了」扱いでアーカイブ**、**OI-17（function calling 見送り）は確定設計決定**として保持。
+- 各 Issue 本文に `Legacy-ID: OI-XX` / `Source` を入れ双方向リンク化（Codexレビュー反映）。
+- PR運用: PR本文に `Closes #NN` で Issue と紐づけ（マージで自動クローズ・マージは人間）。
+
+### ハマりポイント
+- **採番衝突の正体は重複起票**: 旧 `OI-44〜49`（コードレビュー指摘）は `OI-44〜51`（codex-fugu 安全性レビュー）と
+  同一内容だった。Issue化の際に統合（片方のみ起票・統合理由を本文に明記）。
+- 既存PR等で番号が消費済みのため、**新規 Issue は #31 から**採番された。
+
+### 次のステップ
+- 人間が develop を push（本セッションのコミット5件: `2fc64a2`〜`dd4f1b5`）。
+- 今後の課題着手は GitHub Issues 起点で。最優先は P0（#31 purge範囲 / #38 API認証）。
+
 ## 2026-06-20 — CD導入: develop マージで remember-vm へ自動デプロイ（PR #29）
 
 CIに続きCDを導入。`develop` への push（PRマージ）で pytest 緑→検証機 `remember-vm` へ自動デプロイされる。
