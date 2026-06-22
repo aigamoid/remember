@@ -83,7 +83,11 @@ Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎
 - 処理フロー図解（Mermaid） → `docs/DIAGRAMS.md`
 - Postgresスキーマ・メタデータ仕様 → `docs/SCHEMA.md`
 - 設定ファイル項目説明 → `docs/CONFIG.md`
-- 未解決事項・TODO → `docs/OPEN_ISSUES.md`
+- **未解決事項・TODO（アクティブ）→ GitHub Issues**（2026-06-22 移行）。
+  起票・進捗・クローズは GitHub Issues で管理する（採番は `#NN`）。
+- `docs/OPEN_ISSUES.md` は **①OI-XX→#NN インデックス表 ②確定設計決定の記録 ③完了アーカイブ** のみ。
+  肥大化したファイル運用を GitHub Issues へ移行した経緯と、旧 `OI-XX` 番号（コードに残存）の
+  対応表を保持する（旧番号は OI-54 で凍結）。
 
 ## codex-fugu の利用ルール
 
@@ -95,8 +99,10 @@ Phase 1→2→2.5→4 を順に実行する。定期sync（デフォルト24h毎
 
 ## Claude Codeへの注意事項
 
-- **新フェーズ開始前・プランレビュー前に必ず `docs/OPEN_ISSUES.md` を読むこと。**
-  過去フェーズで確定した設計決定（例: Difyメタデータフィルタ不使用）がここに記録されている。
+- **新フェーズ開始前・プランレビュー前に必ず、関連する GitHub Issues と
+  `docs/OPEN_ISSUES.md`（確定設計決定の節）を読むこと。**
+  アクティブな課題は GitHub Issues（`gh issue list` / `gh issue view <#NN>`）にある。
+  過去フェーズで確定した設計決定（例: Difyメタデータフィルタ不使用）は `docs/OPEN_ISSUES.md` に残る。
   読まずにプランを立てると、決定済み事項を「抜け」として誤指摘するリスクがある。
 
 ### ファイルを追加・削除・改名したときのドキュメント更新ルール
@@ -123,6 +129,11 @@ sh scripts/install_hooks.sh
 - ブランチ戦略: GitFlow
 - 初回ブランチ: `feature/waiwai-oracle`
 - コミット粒度: **1ファイル単位**
+- **課題の採番は GitHub Issue の `#NN` を正典とする**（2026-06-22 移行）。
+  独自の `OI-XX` 採番は **OI-54 で凍結**（手動採番の番号衝突を避けるため）。新規課題は GitHub Issue を立てる。
+  - コミット・PR・本文での参照は **新規は `#NN`**（例: `fix: purge範囲を拡張 (#7)`）。
+  - **既存コード内の `OI-XX` 参照は書き換えない**（履歴の一貫性のため温存）。既存参照を修正する場合のみ
+    `OI-44 (#7)` のように `OI-XX (#NN)` を併記してよい。対応は `docs/OPEN_ISSUES.md` のインデックス表で辿る。
 - **feature ブランチの push と PR 作成（`gh pr create`）は Claude Code が実施してよい**
   （2026-06-19 更新）。`feature/*` ブランチを `git push` し、PR 作成までを Claude Code が行う。
   ※旧ルール「プッシュは人間が手動で行う」はこの範囲で緩和（feature ブランチに限る）。
