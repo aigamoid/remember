@@ -54,7 +54,8 @@ waiwai-oracle/
 │   ├── check_docs.py      # ドキュメント内 .py 参照の検証（pre-commit hook）
 │   ├── install_hooks.sh
 │   ├── vm_setup.sh        # GCP VM初期セットアップ（Docker+compose+swap・Phase3）
-│   └── migrate_sqlite_to_pg.py # 旧SQLiteデータのPostgres移行（1回だけ実行）
+│   ├── migrate_sqlite_to_pg.py # 旧SQLiteデータのPostgres移行（1回だけ実行）
+│   └── migrate_oi_to_issues.py # 旧OI→GitHub Issues移行（1回だけ実行・冪等）
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
 ├── crawler.py             # Phase 1 エントリポイント（手動実行用）
 ├── chunker.py             # Phase 2 エントリポイント（手動実行用）
