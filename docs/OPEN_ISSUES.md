@@ -239,6 +239,41 @@ usage/cost logging＋admin portal・RAG段階整理・テスト数の多さは�
 **codex-fugu 推奨の着手順:** OI-44（purge範囲）→ OI-45（API認証）→ OI-46（/remember quota・管理導線）
 → OI-48（同意ログ）→ OI-49（CD後チェック＋OI-26）。この5つで「身内ベータ→公開/課金の手前」まで安全度が上がる。
 
+### OI-52〜54: OI整理で発見した未起票の運用・技術的負債（2026-06-22・未着手）
+
+このセッションのOI棚卸し（コード/DEVLOG横断スキャン）で見つかった、既存OIに載っていない項目。
+いずれも P2 以下の housekeeping だが、放置すると効いてくるので記録する。
+
+- **OI-52（P2）: GitFlow の `main` 不整合・リリースフロー未整備**
+  - 現状: `origin/main` は **`Initial commit` 1件のみ**で、`develop` が **472コミット先行**。GitFlow を
+    掲げているが develop が全てを持ち、main へリリースが一度も流れていない。CD は develop 起点で
+    回っている（CLAUDE.md「CD」節）ため稼働はするが、**「公開＝mainが本番」という運用に切り替える際に
+    main が空のままだと事故る**（タグ/リリース/ロールバック基点が無い）。DEVLOG 2026-06-18 に
+    「develop → main のリリース整理（main は別ルートの空のため要対応）」と既記。
+  - 対応案: develop を main へ初回リリースとして取り込む方針を決める（merge or main を develop に
+    リセットして接ぎ直す＝履歴方針は人間判断）。以降のリリースタグ運用・CDのデプロイ基点（develop のままか
+    main に移すか）を明文化。あわせて**マージ済みローカル feature ブランチ**（feature/waiwai-oracle /
+    multitenant-ingest / saas-rag-engine / usage-metering-portal / oi18-mention-resolution 等）の掃除。
+  - 関連: OI-14 E（インフラ・本番化）/ CLAUDE.md「Git運用ルール」「CD」。
+
+- **OI-53（P2）: テストの非決定的な揺らぎ（test_db / test_indexer の分離）**
+  - 現状: `pytest-randomly` のランダム順序で **test_db 同士の分離揺らぎ**で稀に1件 error、
+    **test_indexer のインメモリQdrant共有**でも稀に揺れる（DEVLOG 2026-06 / CLAUDE.md に
+    「CIクリーン環境では再現せずパス・コードのバグではない」と既記）。複数箇所に分散していて OI が無い。
+  - 対応案: テスト間の状態分離を堅くする（test_db は per-test TRUNCATE/トランザクション境界の見直し、
+    test_indexer はインメモリQdrant共有をやめ fixture でテストごとに分離）。CIで `-p randomly` を明示し
+    seed を固定/記録して再現性を確保。優先度は低い（CIは緑）。
+  - 関連: CLAUDE.md「CI」節 / `feedback_test_db_tmpfs`。
+
+- **OI-54（P3）: 既知の軽微なランタイム/依存ドリフト**
+  - 現状: ①`src/api.py:201` の `@app.on_event("startup")` は **FastAPI で deprecated**（将来 lifespan へ
+    移行が必要）。②ローカル `.venv` が **Python 3.9.6**（README/CI/Docker は **3.11+**）でズレ。
+    ③urllib3+LibreSSL 警告。いずれも codex-fugu レビュー（OI-44〜51）の警告欄で既出だが、独立した
+    対応項目として未整理。
+  - 対応案: ①startup/shutdown を `lifespan` ハンドラへ移行（admin 側も確認）。②ローカル venv を 3.11+ に
+    そろえる（運用手順 or `.python-version`）。③は影響軽微・様子見。
+  - 関連: OI-51（config ドリフト）/ CLAUDE.md「技術スタック」。
+
 ---
 
 ## OI-44〜49: コードレビュー指摘（2026-06-22・セキュリティ/プライバシー/運用）
