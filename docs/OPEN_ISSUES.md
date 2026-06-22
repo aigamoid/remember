@@ -1,5 +1,116 @@
 # 未解決事項・TODO
 
+## OI-28〜37: 魅力強化（リテンション・課金理由）アイデア群（未着手・アイデア段階）
+
+収益化に向け「お金を注ぎ込みたくなる魅力の核」を増すための案。OI-14（収益化ロードマップ）の
+**横断的アイデア（収益価値を上げる）**を具体化したもの。**いずれもアイデア段階**で、着手＝ソース
+変更・方針決定の前には必ず人間に確認する（OI-14 と同じ流儀）。
+
+**前提となるコンセプト転換:** 今の remember は「聞かれたら答える**検索ツール**」設計。勝ち筋は
+「コミュニティの共有記憶を持った**"れみちゃんという一員"**」＝*そこに居て・覚えていて・自分から
+思い出させてくれる存在*への格上げ。ChatGPTメモリ=個人の記憶／MEE6等=管理機能 に対し、
+**"コミュニティの共有脳"** は空いた陣地で、ここが堀になる。
+
+**市場調査（2026-06-22・Web）でわかった「魅力の核」3類型:**
+①ゲーミフィケーション/エンゲージ（MEE6レベリング・Tatsuペット・CommunityOneクエスト）
+②AIの人格・記憶・愛着（Clyde・Shapes friendship meter）③キャッチアップ/要約（SummaryBot・Discord公式）。
+教訓2つ: **MEE6は過度な収益化で評判を落とした**（出し惜しみは毒）/ **Discordが要約を公式実装**
+（単純機能はコモディティ化＝差別化必須）。
+
+**優先度サマリ（推奨）:**
+- **高**: OI-29（記憶ベースクエスト）/ OI-28（関係性メーター）/ OI-33（プッシュ型思い出し）
+  ＝実証済みリテンション装置を自社の堀（記憶）で動かす中核。
+- **中**: OI-30（スケジュールダイジェスト＋記憶）/ OI-32（知識貢献エコノミー）/ OI-31（カスタム人格）/
+  OI-35（公式FAQ）/ OI-36（メンバープロファイル）/ OI-37（記憶の可視化）。
+- **要検討（低）**: OI-34（オンデマンド要約）＝Discord公式と競合する赤い海。記憶連携で差別化できる時のみ。
+
+---
+
+### OI-28: れみちゃんとの「関係性が育つ」メーター（高・リテンション中核）
+- **着想元**: Shapes.inc の *"friendship meter that tracks interactions, unlocking escalating joke
+  complexity with loyal users"* / *"remembers your chats and evolves with them"*
+  （[bestaitools: Shapes](https://www.bestaitools.com/tool/shapes/) / [Shapes公式](https://shapes.inc/discordbot)）。
+- **私の考え**: remember は既に memories＋発言者名（OI-22/24）を持つ。**ユーザー単位の"覚えてる量"を
+  関係性レベルに変換**し、レベルで口調が砕ける/特別な思い出話を解禁。Shapesは個人記憶で愛着を作るが、
+  remember は*コミュニティ共有*記憶という彼らに無い深さで同じ機構を回せる。**解約率を下げる核**。
+- **既存資産**: memories / speaker（OI-22/24）。**リスク**: 数値の見せ方を誤ると作業感。関連: OI-37/OI-24。
+
+### OI-29: 記憶ベースのパーソナライズド・クエスト（高・最有力）
+- **着想元**: CommunityOne Hype Engine = 活動/興味に合わせたAI生成デイリークエストで
+  *"10× higher 28-day retention"*・*"4× daily chat"*、かつ *"encourages quality interactions"*
+  （スパム加点のレベリングと対比）（[Hype Engine](https://communityone.io/hype-engine/) /
+  [Discord Quests](https://communityone.io/discord-quests/)）。
+- **私の考え**: クエストは効果実証済みの最強リテンション装置。他社は「行動データ」だけでパーソナライズ
+  するが、remember は**サーバーの会話内容そのもの**を知っているので「先週ゲームの話してた○○さんに
+  話しかけてみよう」等の*記憶由来クエスト*が作れる＝**誰も真似できないパーソナライズ**。エンゲージ機能を
+  自社の堀（RAG記憶）で動かす形。**リスク**: クエスト品質のばらつき・スパム誘発回避。関連: OI-32/OI-33。
+
+### OI-30: スケジュール配信ダイジェスト（＋記憶で差別化）（中）
+- **着想元**: SummaryBot *"/schedule … recurring daily or weekly digests without anyone running a
+  command"*（[SummaryBot](https://discordsummarybot.com/)）。ただし **Discord公式が In-Channel
+  Summaries を実装済み**（[Discord Support](https://support.discord.com/hc/en-us/articles/12926016807575-In-Channel-Conversation-Summaries) /
+  [Engadget](https://www.engadget.com/with-the-help-of-openai-discord-is-finally-adding-conversation-summaries-160030905.html)）。
+- **私の考え**: オンデマンド要約は公式に飲まれた赤い海。勝ち筋は**長期記憶を絡めた定期ダイジェスト**
+  ＝「今週の#雑談まとめ＋*先月の同じ話題との比較*＋覚えてる予定のリマインド」。"いま"しか見ない公式に対し
+  "過去と繋いで思い出させる"のがうちだけ。Pro/MAXの定期配信機能に。**既存資産**: 時系列チャンク。関連: OI-34。
+
+### OI-31: サーバーごとに人格・名前をカスタムできる"そのコミュニティのれみ"（中）
+- **着想元**: Clyde は *personality field・presets・名前/アイコン変更* を提供し会話に編み込まれたが、
+  *永続人格/記憶が無い*まま**廃止**された（[Discord Wiki: Clyde](https://discord.fandom.com/wiki/Clyde_(chatbot)) /
+  [vibebot](https://www.vibebot.gg/blog/discord-ai-bots)）。
+- **私の考え**: Clydeが愛された理由（カスタム人格）と死んだ理由（記憶が続かない）は表裏。remember は
+  **Clydeに無かった永続記憶を既に持つ**。ここに*サーバーごとのリネーム＋人格チューニング*を足せば
+  「うちのサーバーだけの、記憶を持つマスコット」になる＝Clydeが成れなかった製品。人格カスタムは
+  有料の差別化ゲートにしやすい。**リスク**: プロンプト管理・ガードレール（OI-14 A）。関連: OI-15。
+
+### OI-32: 「知識を教えると育つ」貢献エコノミー（中）
+- **着想元**: Tatsu は経済/ペットで *"increase how long people stick around"*、Hype Engine は
+  *スパムでなく質の高い貢献*に報酬（[peakbot](https://peakbot.pro/blog/mee6-vs-dyno-vs-carl-bot-2026) /
+  [Hype Engine](https://communityone.io/hype-engine/)）。Tatsuはレベル報酬を*無料*にしてMEE6と差別化。
+- **私の考え**: 一般の経済系は「喋る＝加点」でスパムを生む。remember なら**「良い事実を"覚えておいて"で
+  教える」「良い質問をする」＝Botの記憶を育てる行為に報酬**を出せる。*エンゲージ報酬*でありながら
+  **自社の資産（記憶＝堀）をユーザーに育てさせる**二重の効き。プロダクト名 `remember` と一致。
+  「みんなで育てたから解約できない」を作る。関連: OI-24/OI-29/OI-37。
+
+### OI-33: プッシュ型「思い出し」（On This Day / さりげないリマインド）（高）
+- **着想元**: ゲーミフィケーション/能動接触が *"lasting user interest"* を生む
+  （[IONOS](https://www.ionos.com/digitalguide/online-marketing/social-media/discord-bots/)）。
+- **私の考え**: 受動RAGは「用がある時しか開かない」。れみちゃんが**自分から**「1年前の今日こんな話で
+  盛り上がってたよ📷」「もうすぐ○○さんの誕生日だよ（前に覚えたやつ！）」と投下＝毎日の接触＝定着＋
+  "想い出が蘇る"感情価値。ログ（時系列チャンク）＋memories両方が活きる。worker の定期実行に乗る。
+  **リスク**: 頻度を誤るとスパム化→頻度をプラン/設定で制御。関連: OI-28/OI-24/OI-13。
+
+### OI-34: オンデマンド要約「見てない間に何があった？」（要検討・低）
+- **着想元**: SummaryBot/Catch Me Up 等の *catch up* 系（[SummaryBot](https://discordsummarybot.com/)）。
+  ただし**Discord公式が同等機能を内製化済み**（OI-30 出典参照）。
+- **私の考え**: 「昨日の#雑談まとめて」は課金理由が明確（時間節約）だが、**公式と正面衝突する赤い海**。
+  単独では弱い。OI-30（記憶連携の定期ダイジェスト）に**吸収して差別化**するのが筋。単体着手は非推奨。
+  関連: OI-30。
+
+### OI-35: 管理者がBotを"育てる"公式ナレッジ / FAQ自動応答（中）
+- **着想元**: 課金を決めるのは運営者。Dyno等の有料差別化は運営支援（モデ/連携）に集中
+  （[peakbot](https://peakbot.pro/blog/mee6-vs-dyno-vs-carl-bot-2026)）。
+- **私の考え**: 「サーバーのルールは？」「次のイベントいつ？」に過去ログ＋**管理者が公式に覚えさせた事実**で
+  自動回答。memories に「公式」レイヤーを足す（`/oracle teach` を一般の「覚えておいて」と分離）。
+  運営工数を直接削る＝最も財布に近い相手に刺さる。「Botを育てる」体験が愛着と乗り換えコストを生む。
+  **既存資産**: memories 書き込み経路（OI-24）。関連: OI-24/OI-32。
+
+### OI-36: メンバープロファイル / 「あの人どんな人？」カード（中）
+- **着想元**: コミュニティ固有価値はゲーミフィケーション系の差別化軸（[IONOS](https://www.ionos.com/digitalguide/online-marketing/social-media/discord-bots/)）。
+- **私の考え**: 過去ログ＋memoriesから各メンバーの興味・好み・口癖を要約したカードを生成
+  （「@○○ ってどんな人？」「ケーキ好きの人いた？」）。**汎用botにもChatGPTにも作れない**コミュニティ固有資産で、
+  新規参加者のオンボーディング価値が高い。**既存資産**: OI-22（speaker）/OI-18（mention解決）の延長。
+  **リスク**: プライバシー必須→本人opt-out・センシティブ属性ガードレール（OI-14 A / プロンプトv4の宿題）。
+
+### OI-37: 記憶の"育つ"可視化（プロダクト名 remember の回収）（中）
+- **着想元**: Tatsu/CommunityOne の成長・貢献の可視化が定着を生む（[peakbot](https://peakbot.pro/blog/mee6-vs-dyno-vs-carl-bot-2026) /
+  [Hype Engine](https://communityone.io/hype-engine/)）。
+- **私の考え**: 「れみちゃんは今このサーバーのことを **312件** 覚えています」「今月 **47回** 助けました」。
+  **プロダクト名と完全に整合**。成長/貢献の可視化は愛着＝解約率低下に効き、集計データ（usage_log /
+  chat_trace）も既にある。Botの一言＋管理ポータル表示を足すだけで形になる。関連: OI-28/OI-32.
+
+---
+
 ## OI-27: オンボーディング `/oracle help`（使い方ヘルプ）（対応済み）
 
 **対応:** `/oracle help` を追加（[bot.py](../moimoichan_Discordbot/bot.py) の `_HELP` 定数）。
