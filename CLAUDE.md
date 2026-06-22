@@ -134,6 +134,14 @@ sh scripts/install_hooks.sh
   - コミット・PR・本文での参照は **新規は `#NN`**（例: `fix: purge範囲を拡張 (#7)`）。
   - **既存コード内の `OI-XX` 参照は書き換えない**（履歴の一貫性のため温存）。既存参照を修正する場合のみ
     `OI-44 (#7)` のように `OI-XX (#NN)` を併記してよい。対応は `docs/OPEN_ISSUES.md` のインデックス表で辿る。
+- **PR は対応する GitHub Issue と必ず紐づける**（2026-06-22 追加）。
+  - PR 本文に **クロージングキーワード**を入れる: `Closes #NN`（または `Fixes #NN` / `Resolves #NN`）。
+    これで**人間が PR をマージした瞬間に対象 Issue が自動クローズ**される（マージは人間・下記参照）。
+    例: `gh pr create --title "fix: purge範囲を拡張 (#31)" --body "Closes #31\n\n..."`。
+  - クローズせず**関連だけ**示したい場合は本文に `#NN` と書く（参照リンクのみ。epic への言及など）。
+  - 旧 `OI-XX` で切ったブランチ（`feature/oiXX-*`）はそのままでよい。コードの `OI-XX` ↔ Issue `#NN` は
+    `docs/OPEN_ISSUES.md` のインデックス表で対応する。1つの PR が複数 Issue を閉じるなら
+    `Closes #38, closes #39` のように**各番号にキーワードを付ける**（カンマ列挙だけでは2件目が閉じない）。
 - **feature ブランチの push と PR 作成（`gh pr create`）は Claude Code が実施してよい**
   （2026-06-19 更新）。`feature/*` ブランチを `git push` し、PR 作成までを Claude Code が行う。
   ※旧ルール「プッシュは人間が手動で行う」はこの範囲で緩和（feature ブランチに限る）。
