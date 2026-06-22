@@ -1,0 +1,18 @@
+oi	title	labels	issue	status
+OI-44	OI-44: Bot退出/purge時の削除範囲が不完全（プライバシー）	P0,area:security-privacy,kind:tech-debt	#31	created
+OI-14	OI-14: 収益化・パブリック化ロードマップ（epic）	P1,area:infra-ops,kind:feature	#32	created
+OI-28-43	OI-28〜43: 魅力強化（リテンション・課金理由）アイデア群（epic）	area:retention,kind:idea	#33	created
+OI-3	OI-3: ThreadCollector 未実装（スレッド取得）	P3,area:bot,kind:feature	#34	created
+OI-13	OI-13: 取り込み完了のDiscord通知が無い	P2,area:bot,kind:feature	#35	created
+OI-19	OI-19: worker の `Event loop is closed` 警告（無害・既知）	P3,area:infra-ops,kind:tech-debt	#36	created
+OI-26	OI-26: CDデプロイ完了をDiscordに通知する	P2,area:infra-ops,kind:feature	#37	created
+OI-45	OI-45: /chat・/remember が無認証で guild_id がクライアント指定	P0,area:security-privacy,kind:tech-debt	#38	created
+OI-46	OI-46: /remember が quota/レート管理の外でコスト発生・記憶汚染	P1,area:security-privacy,kind:tech-debt	#39	created
+OI-47	OI-47: 明示メモリが有効だが安全弁が薄い	P1,area:security-privacy,kind:tech-debt	#40	created
+OI-48	OI-48: 公開/課金前の同意ログが未実装（法務）	P1,area:security-privacy,kind:tech-debt	#41	created
+OI-49	OI-49: CD後のヘルスチェックがAPIのみ	P2,area:infra-ops,kind:tech-debt	#42	created
+OI-50	OI-50: 正式な schema migration が無い	P2,area:infra-ops,kind:tech-debt	#43	created
+OI-51	OI-51: config.yml と config.yml.example の運用ドリフト	P2,area:infra-ops,kind:tech-debt	#44	created
+OI-52	OI-52: GitFlow の main 不整合・リリースフロー未整備	P2,area:infra-ops,kind:tech-debt	#45	created
+OI-53	OI-53: テストの非決定的な揺らぎ（test_db / test_indexer の分離）	P2,area:infra-ops,kind:tech-debt	#46	created
+OI-54	OI-54: 既知の軽微なランタイム/依存ドリフト	P3,area:infra-ops,kind:tech-debt	#47	created
