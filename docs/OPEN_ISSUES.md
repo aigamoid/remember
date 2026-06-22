@@ -1,6 +1,6 @@
 # 未解決事項・TODO
 
-## OI-28〜37: 魅力強化（リテンション・課金理由）アイデア群（未着手・アイデア段階）
+## OI-28〜43: 魅力強化（リテンション・課金理由）アイデア群（未着手・アイデア段階）
 
 収益化に向け「お金を注ぎ込みたくなる魅力の核」を増すための案。OI-14（収益化ロードマップ）の
 **横断的アイデア（収益価値を上げる）**を具体化したもの。**いずれもアイデア段階**で、着手＝ソース
@@ -23,6 +23,14 @@
 - **中**: OI-30（スケジュールダイジェスト＋記憶）/ OI-32（知識貢献エコノミー）/ OI-31（カスタム人格）/
   OI-35（公式FAQ）/ OI-36（メンバープロファイル）/ OI-37（記憶の可視化）。
 - **要検討（低）**: OI-34（オンデマンド要約）＝Discord公式と競合する赤い海。記憶連携で差別化できる時のみ。
+
+**Codexコメント（ClaudeCode向け・2026-06-22）:**
+- 収益化の勝ち筋は「機能の有無」より「毎日戻る体験」。検索ツールから、共有記憶を育てる存在への転換を優先。
+- 実装順は **OI-29 -> OI-33 -> OI-28/OI-37** を推奨。まず OI-29 を MVP（週3クエスト+達成ログ+軽い可視化）で小さく検証。
+- 無料プランは体験を壊さず、有料で継続体験の深さを増やす（出し惜しみで体験を壊さない）。
+- スパム化防止を最優先: 頻度上限、quiet hours、opt-out を初期から入れる。
+- 管理者価値（財布に近い層）を並走強化: OI-35（公式ナレッジ/FAQ自動応答）を中期で当てる。
+- 追うKPI: 7日/28日継続率、DAU/WAU、Free->Pro/MAX転換率、通知ミュート率（スパム兆候）。
 
 ---
 
@@ -108,6 +116,211 @@
 - **私の考え**: 「れみちゃんは今このサーバーのことを **312件** 覚えています」「今月 **47回** 助けました」。
   **プロダクト名と完全に整合**。成長/貢献の可視化は愛着＝解約率低下に効き、集計データ（usage_log /
   chat_trace）も既にある。Botの一言＋管理ポータル表示を足すだけで形になる。関連: OI-28/OI-32.
+
+### OI-38〜42候補: Codex追加アイデア（2026-06-22・未着手）
+- **OI-38: Memory Moments（週1の思い出ハイライト）**
+  - 概要: 「今週の盛り上がり」と「過去の似た話題」をセットで自動投稿する。
+  - 既存OIに対する利点: OI-30/OI-34 の要約価値を、**過去との接続**に拡張できる。Discord公式要約との正面競合を避けやすい。
+  - 関連: OI-30/OI-33。
+- **OI-39: Quest Streak（連続達成ボーナス）**
+  - 概要: OI-29 のクエストに「連続達成」概念を追加し、称号や軽い演出で習慣化を促す。
+  - 既存OIに対する利点: OI-29/OI-32 を土台に、単発参加で終わらせず**継続行動**に変換しやすい。
+  - 関連: OI-29/OI-32。
+- **OI-40: Server Memory Capsule（月次レポート）**
+  - 概要: 「今月覚えたこと」「助けた回数」「FAQ寄与」などを1枚で可視化する管理者向けレポート。
+  - 既存OIに対する利点: OI-37 の可視化を**運営者ROI提示**へ昇格できる。課金継続判断に直結しやすい。
+  - 関連: OI-37/OI-35。
+- **OI-41: Proactive Warm Ping（静かな会話再点火）**
+  - 概要: OI-33 のプッシュを、個人通知より低圧な「チャンネル向け話題振り」に寄せる。
+  - 既存OIに対する利点: OI-33 のスパムリスクを抑えつつ、サーバー全体の再訪・再会話を起こしやすい。
+  - 関連: OI-33。
+- **OI-42: Admin Copilot Pack（運営向け導入バンドル）**
+  - 概要: `/oracle teach`（公式知識投入）+ FAQ応答 + ルール案内テンプレを運営向けにパッケージ化。
+  - 既存OIに対する利点: OI-35 を単機能でなく**導入価値セット**として提示でき、Pro/MAXの価格説明がしやすい。
+  - 関連: OI-35/OI-24。
+
+### OI-43: 「真似っこ」モード（メンバーをプロファイリングして憑依させる）（高・愛着/話題性）
+- **着想元**: ユーザー発案（2026-06-22）。「`/oracle mimic @○○` で人を指定 → その人をプロファイリング →
+  『○○さんの模倣をはじめるね。まず○○さんはこういう人で、こう呼ばれていて、性格は〜、好きなものは〜、
+  話し方は〜』と宣言 → 以降そのサーバーで○○さんの口調・性格・特性で話すようになる」。
+- **私の考え**: 新機能というより **OI-36（メンバープロファイル）× OI-31（人格カスタム）の合体・昇華版**。
+  「あの人どんな人？」カード（OI-36）で生成した人格を、人格差し替え枠（OI-31）に流し込んで*憑依*させる
+  体験にする。検索ツールから「そこに居る存在」への転換（OI-14 横断アイデア）に直結し、話題性・愛着
+  （OI-28）が強い＝SNSで言及されやすい魅力の核。
+- **既存資産（ほぼ揃っている）**:
+  - 発言データ: `messages`（author_id/author_name 付き）から対象者の発言だけ集約可能。
+  - メンション解決: OI-18 で `<@ID>`→表示名が確定済み。
+  - 人格差し込み口: `ANSWER_SYSTEM_PROMPT`（src/rag/engine.py）は `{guild_name}`/`{speaker_section}`
+    等を差し替える作り。**「真似する人格ブロック」を1枠足すだけ**で口調・性格を上書きできる。
+  - 発言者名を渡す経路: OI-22 で「いま話す人」をプロンプトに渡す仕組みあり。
+- **最小形（着手時に要検討・まだ実装しない）**:
+  - `/oracle mimic @ユーザー`: 対象者の発言を集約 → LLM で人格カード生成（名前・呼ばれ方・性格・好き・
+    口調）→「○○さんの模倣をはじめるね…」と宣言（発案そのまま）。
+  - 生成カードを保存（memories 流の別テーブル）し、以降そのチャンネル/サーバーの回答プロンプトに
+    人格ブロックとして注入。`/oracle mimic off` で解除。状態（誰を真似中か）を guild/channel 単位で保持。
+  - コスト: プロファイル生成は1回 LLM を回すだけ。保存すれば回答時の追加コストは小さい（OI-16と整合）。
+- **リスク（重め・公開前に必須）**:
+  - **プライバシー/なりすまし**: 実在の人を AI が演じるため、からかい・なりすまし・本人が嫌がる用途の温床。
+    **本人 opt-out（むしろ opt-in 必須化も検討）**・センシティブ属性ガードレール（OI-36/OI-14 A の宿題と共通）。
+  - 模倣品質のばらつき（発言が少ない人は薄いカードになる）。誇張・揶揄に倒れない生成プロンプト設計。
+- **関連**: OI-36（プロファイル生成＝素材）/ OI-31（人格差し替え＝器）/ OI-22（発言者名）/ OI-18（mention解決）/
+  OI-28（愛着）/ OI-14 A（法務・センシティブ属性）。
+
+### OI-44〜51: codex-fugu 安全性レビュー指摘（収益化・公開前提）（2026-06-22・未着手）
+
+read-only レビュー（コード変更なし）の所見。**魅力強化（OI-28〜43）とは別系統＝「身内ベータ→
+公開/課金の手前」へ上げるための安全性・運用課題**。指摘はレビュー時点のもので、**着手前に各自で
+live code を再確認**すること（特にP0は実装と突き合わせてから直す）。
+
+参考（レビュー時）: pytest 368収集 / 217 passed / 151 skipped（DB系はローカルPostgres未接続でskip・
+CIでは走る）。警告: FastAPI `@app.on_event` deprecated / ローカル .venv が Python 3.9.6（README/CI/
+Docker は 3.11+）/ urllib3+LibreSSL。良い点: マルチテナント分離・opt-in設計・C-2 quota/plan・
+usage/cost logging＋admin portal・RAG段階整理・テスト数の多さは収益化の土台として評価。
+
+- **OI-44（P0）: Bot退出/purge の削除範囲が不完全（プライバシー）**
+  - 指摘: `purge_guild_data()` は attachments/messages/chunk_index/crawl_state/allowed_channels は
+    消すが、**memories・usage_log・chat_trace・guild_plans・ingest_jobs・run_log が残る**。
+    特に **memories / chat_trace はユーザー発話・明示記憶・ヒットチャンク本文を含む**ため、README/
+    規約の「Bot退出で全削除」と実装が食い違う。
+  - 対応案: purge対象に memories/chat_trace を追加（最低限）。会計監査で残す usage_log/guild_plans は
+    本文/個人列の削除 or 匿名化＋保持ポリシー明文化。`tests/test_db.py` に削除/保持ポリシーのテスト追加。
+    README/規約の表現を実装に一致させる。関連: OI-14 A / OI-21 / OI-24。
+
+- **OI-45（P0）: /chat API が認証なし・guild_id がクライアント指定**
+  - 指摘: `src/api.py` の `/chat` は guild_id をリクエストから受けそのまま検索に使い、Bot発であることを
+    検証する認証/署名が無い。`docker-compose.yml` で API が `8000:8000` でホスト公開されているため、
+    外部到達する配置だと**他guildの文脈検索・quota消費・LLMコスト発生**のリスク。
+  - 対応案: Bot→API 間に共有シークレット（例 `X-Oracle-Token`）。API側で guild_id と bot-origin を検証。
+    本番は API/admin の公開範囲を Tailscale/VPN/内部網に限定。将来公開時は gateway/auth/rate limit。
+    関連: OI-14 E（インフラ）/ OI-46。
+
+- **OI-46（P0/P1）: /remember が quota 管理外でコスト発生・記憶汚染**
+  - 指摘: 質問quotaは `/chat` 入口で見るが、`/remember` は quota check なしで LLM抽出を実行。
+    「覚えておいて」連打で **memory_extract のLLMコスト発生**、`count_questions_since()` は
+    `kind='answer'` だけ見るため**日次上限にカウントされず**、memories がスパム/汚染される抜け道。
+  - 対応案: `/remember` も quota/rate limit 対象に（最低 guild/user/channel 単位の短時間 rate limit）。
+    明示メモリ書き込みを管理者限定 or モデレーション可能に。`/oracle memory list/delete` 管理導線。
+    関連: OI-14 C-2 / OI-24 / OI-47。
+
+- **OI-47（P1）: 明示メモリ機能の安全弁が薄い（config で有効化済み）**
+  - 指摘: `config.yml rag.memory_enabled: true`。誰でもサーバー全体の長期記憶を書け、センシティブ属性・
+    個人情報・悪意ある虚偽の保存ガードが弱い。全件注入のためmemories増でプロンプト肥大。削除/一覧/
+    監査UIが未見。
+  - 対応案: memories に moderation status を持たせ管理者承認制 or 信頼ユーザー限定。件数上限・古い記憶の
+    要約・関連memoryだけ検索注入（Qdrant化＝OI-24後段）。管理ポータルに memory 管理。purge対象化（OI-44）。
+    関連: OI-24 / OI-44 / OI-14 A。
+
+- **OI-48（P1）: 公開/課金前の同意ログが未実装**
+  - 指摘: `/oracle allow` は opt-in 設計として良いが、**過去ログ本文の保存・外部LLM送信・料金/quota/削除
+    ポリシーへの明示同意ログ**を取っていない。OI-14 A のとおり公開・有料化では必須級。
+  - 対応案: `/oracle allow` 初回に同意文表示＋`consent_log` テーブル（同意した管理者ID・日時・対象ch・
+    規約バージョン）。`/oracle allowall` は全ch対象ゆえ強めの確認。関連: OI-14 A / OI-25。
+
+- **OI-49（P1）: CD のヘルスチェックが API の /health だけ**
+  - 指摘: develop push → runner → `docker compose up -d --build` → `/health` 確認、の成功判定が API のみ。
+    **bot/worker/admin/Postgres・Qdrant実接続/実 /chat 動作/job処理が落ちていても成功扱い**になりうる。
+  - 対応案: compose に `restart: unless-stopped` / `healthcheck` 追加。CD後に `docker compose ps` 確認。
+    `/health` を DB/Qdrant optional check 付きに拡張 or `/ready` を別途。worker/bot のログ末尾検査。
+    **OI-26（Discord通知）の実装**で可視化。関連: OI-26 / CLAUDE.md「CD」節。
+
+- **OI-50（P2）: 正式な schema migration が無い**
+  - 指摘: `src/db.py init_schema()` は `CREATE TABLE IF NOT EXISTS`。新規テーブルには強いが、既存テーブルの
+    カラム追加・型/index 変更が将来つらい。memories/consent_log/billing/Stripe/mimic 等を増やすなら要検討。
+  - 対応案: Alembic か軽量 `schema_migrations` テーブル導入。既存DBからの移行手順を docs/ に。CIで
+    旧schema fixture からの migration も検査。関連: OI-14 D / OI-43。
+
+- **OI-51（P2）: config.yml と config.yml.example の運用ドリフト**
+  - 指摘: ローカル `config.yml`（ignored）が `config.yml.example` より項目が少ない（history_max_turns/
+    history_max_chars/rewriter_history_*/debug_trace/search_gate/reranker/contextualizer retry 等）。
+    コード側 default があり即バグではないが「今どの設定が効くか」が不透明。
+  - 対応案: ローカル config を最新 example に追随。`docs/CONFIG.md`＋`config.yml.example` を正典に。
+    起動時に主要設定をログ出力。関連: docs/CONFIG.md。
+
+**codex-fugu 推奨の着手順:** OI-44（purge範囲）→ OI-45（API認証）→ OI-46（/remember quota・管理導線）
+→ OI-48（同意ログ）→ OI-49（CD後チェック＋OI-26）。この5つで「身内ベータ→公開/課金の手前」まで安全度が上がる。
+
+---
+
+## OI-44〜49: コードレビュー指摘（2026-06-22・セキュリティ/プライバシー/運用）
+
+`develop`（HEAD `7be5957` 付近）に対する軽量レビューで挙がった指摘群。**いずれも未着手**で、
+着手＝ソース変更・方針決定の前には必ず人間に確認する（OI-14 と同じ流儀）。テストは現状
+217 passed / 151 skipped（DB依存はローカルPostgresがなくCI側で実行される）。
+
+**優先度サマリ（推奨）:**
+- **最優先（公開前に必須）**: OI-44（退出時の全削除が不完全）/ OI-45（API無認証・guild_id偽装）。
+- **高**: OI-46（`/remember` がquota管理外）/ OI-47（明示メモリの安全弁不足）/ OI-48（同意ログ未実装）。
+- **中**: OI-49（CD後ヘルスチェックがAPIのみ）。
+
+### OI-44: Bot退出/purge時の「全削除」が不完全（最優先・プライバシー）
+- **症状**: README/規約のニュアンス（Bot退出で `guild_id` データを全削除）と実装が不整合。
+  [src/db.py](../src/db.py) の `purge_guild_data()` は `attachments`/`messages`/`chunk_index`/
+  `crawl_state`/`allowed_channels` のみ削除し、**`memories`/`usage_log`/`chat_trace`/`guild_plans`/
+  `ingest_jobs`/`run_log` が残る**。特に `memories`・`chat_trace` はユーザー発話・本文・ヒットチャンクを
+  含みうるため「全削除」と言い切れない。
+- **対応案（要確認・まだ実装しない）**:
+  - `purge_guild_data()` の削除対象に少なくとも `memories`・`chat_trace` を追加。
+  - 会計監査で残したい `usage_log`/`guild_plans` は「保持する／本文・user_id を匿名化する」の
+    どちらにするか方針決定し、規約/READMEの表現と一致させる。
+  - [tests/test_db.py](../tests/test_db.py) に削除/保持ポリシーの検証を追加。
+- **関連**: OI-24（memories）/ OI-21（chat_trace）/ OI-14 A（法務・削除権）/ OI-11（退出時削除）。
+
+### OI-45: `/chat`・`/remember` が無認証で `guild_id` がクライアント指定（最優先・セキュリティ）
+- **症状**: [src/api.py](../src/api.py) はリクエストの `guild_id` をそのまま検索に使い、Botからの
+  呼び出しを検証する認証/署名が無い。かつ [docker-compose.yml](../docker-compose.yml) で API を
+  `8000:8000` でホスト公開している。外部到達可能な配置になると、他 `guild_id` 指定で別サーバー文脈の
+  検索・quota消費・LLMコスト発生のリスク。
+- **対応案（要確認・まだ実装しない）**:
+  - Bot→API間に共有シークレット（例: `X-Oracle-Token`）を入れ、API側で検証する。
+  - 本番は API/admin の公開範囲を Tailscale/VPN/内部ネットワークに限定（compose のポート公開見直し）。
+  - 将来の公開時は gateway/auth/rate-limit を別途検討。
+- **関連**: OI-14 C-2（quota）/ OI-14 E（インフラ・公開面）。
+
+### OI-46: `/remember` が quota/レート管理の外でコスト発生（高）
+- **症状**: 質問上限は `/chat` 入口で見ているが、[src/api.py](../src/api.py) の `/remember` は
+  quotaチェック無しで LLM 抽出を実行する。さらに [src/db.py](../src/db.py) の
+  `count_questions_since()` は `kind='answer'` しか数えないため、「覚えておいて」連打で
+  **コストだけ増え・上限にも乗らず・memories が汚染される**抜け道になる。
+- **対応案（要確認・まだ実装しない）**:
+  - `/remember` も quota/レート制限の対象にする（guild/user/channel 単位の短時間レート制限など）。
+  - 明示メモリ書き込みを管理者限定 or モデレーション可能にする。
+  - `/oracle memory list|delete` 的な管理導線を用意する。
+- **関連**: OI-24（memories）/ OI-14 C-2（quota）/ OI-47。
+
+### OI-47: 明示メモリが有効だが安全弁が薄い（高）
+- **症状**: [config.yml](../config.yml) は `rag.memory_enabled: true`。誰でもサーバー全体の長期記憶を
+  書け、センシティブ属性/個人情報/虚偽情報の保存ガードが弱い。回答時に memories を**全件注入**するため
+  件数増でプロンプトが肥大化する。削除/一覧/監査UIも未整備。
+- **対応案（要確認・まだ実装しない）**:
+  - memories に moderation status を持たせる／承認制 or 信頼ユーザー限定。
+  - 件数上限・古い記憶の要約・関連memoryだけ検索注入（全件注入の見直し）。
+  - 管理ポータルに memory 管理画面を追加。
+  - 退出/purge時に memories を削除（OI-44 と連動）。
+- **関連**: OI-24（memories）/ OI-36（プロファイル・プライバシー）/ OI-14 A。
+
+### OI-48: 公開/課金前の同意ログが未実装（高・法務）
+- **症状**: `/oracle allow` は opt-in 設計だが、現状のBot文面（`_WELCOME`/`allow` 応答）は
+  「過去ログ本文の保存」「外部LLM APIへの送信」「料金/quota/削除ポリシー」への明示同意ログまでは
+  取っていない。公開・有料化には事実上必須（OI-14 A）。
+- **対応案（要確認・まだ実装しない）**:
+  - `/oracle allow`/`allowall` 初回に同意文を表示し、同意した管理者ID・日時・対象ch・規約バージョンを
+    `consent_log`（新テーブル）に保存。
+  - `allowall` は全ch対象のため、より強い確認フローにする。
+- **関連**: OI-14 A（法務）/ OI-25（allowall）/ OI-11（opt-in）。
+
+### OI-49: CD後のヘルスチェックがAPIのみ（中・運用）
+- **症状**: [.github/workflows/tests.yml](../.github/workflows/tests.yml) の `deploy` は
+  `git reset --hard origin/develop` + `docker compose up -d --build` 後に API `/health` だけ確認する。
+  bot/worker/admin の死活・DB/Qdrant 実接続・実際の `/chat` 動作・ジョブ処理が落ちていても成功扱いになる。
+- **対応案（要確認・まだ実装しない）**:
+  - compose に `healthcheck`/`restart: unless-stopped` を追加、CD後に `docker compose ps` を検査。
+  - `/health` を DB/Qdrant の任意チェック付きに拡張、または `/ready` を別途用意。
+  - worker/bot のログ末尾検査と、OI-26（Discordデプロイ通知）の実装。
+- **関連**: OI-26（デプロイ通知）/ OI-13（取り込み完了通知）/ OI-14 E（運用）。
+
+補足（番号化はしないが記録）: スキーマは `CREATE TABLE IF NOT EXISTS` 運用で正式な migration が無く、
+今後の列追加・型変更に備え Alembic 等の導入余地あり。ローカル `config.yml` が `config.yml.example` より
+項目が少なく（history/debug_trace/search_gate/reranker 等）、現行設定の見通しが悪い点も要追従。
 
 ---
 
