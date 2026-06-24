@@ -9,6 +9,12 @@ from src.api import build_engine, create_app
 from src.trace import TraceRecorder
 
 
+@pytest.fixture(autouse=True)
+def _clear_api_token_env(monkeypatch):
+    """テストでは ORACLE_API_TOKEN の有無を各ケースで明示する。"""
+    monkeypatch.delenv("ORACLE_API_TOKEN", raising=False)
+
+
 class FakeEngine:
     def __init__(self, memory_enabled: bool = False, extracted: dict | None = None) -> None:
         self.calls: list[tuple] = []
@@ -86,6 +92,72 @@ class TestHealth:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
+
+
+class TestApiToken:
+    """Bot→API 共有シークレット認証（OI-45 / #38）。"""
+
+    def _client(self, token):
+        return TestClient(create_app(engine=FakeEngine(), api_token=token))
+
+    def test_chat_rejects_missing_token_when_configured(self):
+        client = self._client("secret")
+        resp = client.post("/chat", json={"guild_id": "g1", "query": "質問"})
+        assert resp.status_code == 401
+
+    def test_chat_rejects_wrong_token(self):
+        client = self._client("secret")
+        resp = client.post(
+            "/chat",
+            json={"guild_id": "g1", "query": "質問"},
+            headers={"X-Oracle-Token": "nope"},
+        )
+        assert resp.status_code == 401
+
+    def test_chat_accepts_correct_token(self):
+        client = self._client("secret")
+        resp = client.post(
+            "/chat",
+            json={"guild_id": "g1", "query": "質問"},
+            headers={"X-Oracle-Token": "secret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["answer"] == "テスト回答！っ"
+
+    def test_remember_rejects_missing_token_when_configured(self):
+        client = TestClient(create_app(
+            engine=FakeEngine(memory_enabled=True, extracted={"subject": "s", "content": "c"}),
+            memory_saver=lambda *a: True,
+            api_token="secret",
+        ))
+        resp = client.post("/remember", json={"guild_id": "g1", "text": "x覚えて"})
+        assert resp.status_code == 401
+
+    def test_remember_accepts_correct_token(self):
+        client = TestClient(create_app(
+            engine=FakeEngine(memory_enabled=True, extracted={"subject": "s", "content": "c"}),
+            memory_saver=lambda *a: True,
+            api_token="secret",
+        ))
+        resp = client.post(
+            "/remember",
+            json={"guild_id": "g1", "text": "x覚えて"},
+            headers={"X-Oracle-Token": "secret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["saved"] is True
+
+    def test_health_open_without_token(self):
+        client = self._client("secret")
+        assert client.get("/health").status_code == 200
+
+    def test_no_token_configured_allows_requests(self):
+        # 後方互換: ORACLE_API_TOKEN 未設定なら従来どおり認証なしで通る（fail-open）
+        client = TestClient(create_app(engine=FakeEngine(), api_token=None))
+        resp = client.post(
+            "/chat", json={"guild_id": "g1", "query": "質問"}
+        )
+        assert resp.status_code == 200
 
 
 class TestChat:
