@@ -93,6 +93,17 @@ class TestChatOnce:
         cli.chat_once("http://x:8000", "g1", "質問", history=hist)
         assert captured["json"]["history"] == hist
 
+    def test_api_token_sent_as_header(self, monkeypatch):
+        captured = {}
+
+        def fake_post(url, json, timeout, headers):
+            captured["headers"] = headers
+            return FakeResponse(200, dict(SAMPLE))
+
+        monkeypatch.setattr(cli.requests, "post", fake_post)
+        cli.chat_once("http://x:8000", "g1", "質問", api_token="secret")
+        assert captured["headers"] == {"X-Oracle-Token": "secret"}
+
     def test_http_error_raises(self, monkeypatch):
         monkeypatch.setattr(
             cli.requests, "post", lambda url, json, timeout: FakeResponse(500)

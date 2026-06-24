@@ -416,12 +416,13 @@ def main() -> None:
     cfg = _load_config()
     oracle_cfg = cfg.get("oracle", {})
     api_url = os.getenv("ORACLE_API_URL") or oracle_cfg.get("api_url", "")
+    api_token = os.getenv("ORACLE_API_TOKEN") or oracle_cfg.get("api_token")
     timeout = oracle_cfg.get("chat_timeout", 90)
     if not api_url:
         print("エラー: ORACLE_API_URL も config.yml の oracle.api_url も未設定です")
         sys.exit(1)
 
-    oracle = OracleClient(base_url=api_url, timeout=timeout)
+    oracle = OracleClient(base_url=api_url, timeout=timeout, api_token=api_token)
     store = Store()
     bot = MoimoichanBot(oracle=oracle, store=store, cfg=cfg)
     bot.run(token)

@@ -98,6 +98,7 @@ POSTGRES_PASSWORD=oracle             # composeのpostgresサービスのパス�
 DATABASE_URL=postgresql://oracle:oracle@localhost:5432/oracle  # ホストから手動スクリプトを実行する場合
 # OPENROUTER_API_KEY=...             # RAG用LLM（config.yml の openai.api_key が空の場合）
 # ORACLE_API_URL=http://localhost:8000  # Bot → APIサーバ接続先（composeでは自動設定）
+# ORACLE_API_TOKEN=...                  # Bot→API 共有シークレット（設定すると /chat・/remember が認証必須・OI-45）
 # QDRANT_URL=http://qdrant:6333         # Qdrant接続先オーバーライド（composeでは自動設定）
 # TEST_DATABASE_URL=...                 # pytest用DB接続先（デフォルト: localhost:5432/oracle_test）
 ADMIN_PASSWORD=change-me              # 管理ポータル（src/admin）のログインパスワード（未設定だとログイン不可）
