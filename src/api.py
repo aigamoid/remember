@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 from typing import Callable, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 load_dotenv()  # uvicorn 直接起動でも .env を読み込む
@@ -28,12 +29,26 @@ from src.trace import TraceRecorder
 from src.usage import UsageRecorder
 from src.vectorstore import VectorStore
 
+_ENV_API_TOKEN = object()
+
 
 def _parse_user_id(user: Optional[str]) -> Optional[str]:
     """ログ用 user 文字列（"channel_id:user_id" 形式）から user_id を取り出す。"""
     if not user:
         return None
     return user.rsplit(":", 1)[-1] or None
+
+
+def _verify_api_token(configured_token: Optional[str], supplied_token: Optional[str]) -> None:
+    """Bot→API の共有シークレットを検証する。
+
+    ORACLE_API_TOKEN 未設定時は後方互換のため fail-open（ローカル開発・既存テスト用）。
+    設定済みなら X-Oracle-Token が無い/一致しないリクエストを 401 にする。
+    """
+    if not configured_token:
+        return
+    if not supplied_token or not hmac.compare_digest(supplied_token, configured_token):
+        raise HTTPException(status_code=401, detail="invalid oracle api token")
 
 
 def _next_plan(conn, current_key: str) -> Optional[dict]:
@@ -186,17 +201,22 @@ def create_app(
     engine: Optional[RagEngine] = None,
     quota_checker: Optional[Callable[[str], Optional[str]]] = None,
     memory_saver: Optional[Callable[..., bool]] = None,
+    api_token: Optional[str] | object = _ENV_API_TOKEN,
 ) -> FastAPI:
     """アプリを生成する。engine / quota_checker / memory_saver を渡すとテスト用に差し替えられる。
 
     quota_checker(guild_id) -> 案内文 or None。本番では startup で DB 版を設定。
     memory_saver(guild_id, content, subject, created_by, source_channel_id) -> bool。
+    api_token は Bot→API の共有シークレット。未指定なら ORACLE_API_TOKEN 環境変数から読む。
     engine 注入時（テスト）は quota_checker / memory_saver 未指定ならそのチェック/保存を行わない。
     """
     app = FastAPI(title="remember API")
     app.state.engine = engine
     app.state.quota_checker = quota_checker
     app.state.memory_saver = memory_saver
+    app.state.api_token = (
+        os.getenv("ORACLE_API_TOKEN") if api_token is _ENV_API_TOKEN else api_token
+    )
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -219,7 +239,11 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/chat", response_model=ChatResponse)
-    async def chat(req: ChatRequest) -> ChatResponse:
+    async def chat(
+        req: ChatRequest,
+        x_oracle_token: Optional[str] = Header(default=None),
+    ) -> ChatResponse:
+        _verify_api_token(app.state.api_token, x_oracle_token)
         if not req.query.strip():
             raise HTTPException(status_code=422, detail="query が空です")
         # プラン上限チェック（超過なら回答せず案内＝コスト発生なし・OI-14 C-2）
@@ -236,12 +260,16 @@ def create_app(
         return ChatResponse(**result)
 
     @app.post("/remember", response_model=RememberResponse)
-    async def remember(req: RememberRequest) -> RememberResponse:
+    async def remember(
+        req: RememberRequest,
+        x_oracle_token: Optional[str] = Header(default=None),
+    ) -> RememberResponse:
         """「覚えておいて」発話から事実を抽出して memories に保存する（OI-24・書き込み）。
 
         rag.memory_enabled が OFF、覚えるべき事実が無い、保存失敗のいずれも saved=false を返す
         （回答系と同じく「機能の失敗で例外を投げない」流儀）。
         """
+        _verify_api_token(app.state.api_token, x_oracle_token)
         if not req.text.strip():
             raise HTTPException(status_code=422, detail="text が空です")
         engine = app.state.engine

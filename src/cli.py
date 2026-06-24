@@ -26,11 +26,13 @@ def chat_once(
     query: str,
     timeout: int = 120,
     history: list[dict] | None = None,
+    api_token: str | None = None,
 ) -> dict:
     """1問送信して応答辞書を返す。経過秒数を elapsed キーに追加する。
 
     history は直近の会話（{"role", "content"} の古い順リスト）。渡すと
     マルチターン回答になる（OI-10）。
+    api_token を渡すと X-Oracle-Token ヘッダで認証する（OI-45）。
 
     Raises:
         requests.RequestException: 接続失敗・HTTP 4xx/5xx
@@ -39,10 +41,12 @@ def chat_once(
     payload = {"guild_id": str(guild_id), "query": query, "user": "cli"}
     if history:
         payload["history"] = history
+    kwargs = {"headers": {"X-Oracle-Token": api_token}} if api_token else {}
     resp = requests.post(
         f"{api_url.rstrip('/')}/chat",
         json=payload,
         timeout=timeout,
+        **kwargs,
     )
     resp.raise_for_status()
     result = resp.json()

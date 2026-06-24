@@ -40,11 +40,15 @@ services:
     environment:
       QDRANT_URL: http://qdrant:6333
       DATABASE_URL: postgresql://oracle:${POSTGRES_PASSWORD:-oracle}@postgres:5432/oracle
+      # Bot→API 共有シークレット（OI-45）。.env で設定すると /chat・/remember を認証必須化。
+      ORACLE_API_TOKEN: ${ORACLE_API_TOKEN:-}
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
     ports:
-      - "8000:8000"
+      # 既定はホスト localhost のみ公開（外部到達を防ぐ・OI-45）。
+      # 外部公開する場合は gateway/auth/rate-limit を別途用意すること。
+      - "127.0.0.1:8000:8000"
     depends_on:
       - qdrant
       - postgres
@@ -61,7 +65,7 @@ services:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     depends_on:
       - postgres
 
@@ -88,6 +92,7 @@ services:
     env_file: .env
     environment:
       ORACLE_API_URL: http://api:8000
+      ORACLE_API_TOKEN: ${ORACLE_API_TOKEN:-}
       DATABASE_URL: postgresql://oracle:${POSTGRES_PASSWORD:-oracle}@postgres:5432/oracle
     volumes:
       - ./moimoichan_Discordbot/config.yml:/app/config.yml:ro

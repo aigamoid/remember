@@ -10,9 +10,13 @@ import aiohttp
 
 
 class OracleClient:
-    def __init__(self, base_url: str, timeout: int = 90) -> None:
+    def __init__(
+        self, base_url: str, timeout: int = 90, api_token: str | None = None
+    ) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=timeout)
+        # Bot→API の共有シークレット（OI-45）。設定時は X-Oracle-Token として送る。
+        self._headers = {"X-Oracle-Token": api_token} if api_token else {}
 
     async def chat(
         self,
@@ -41,7 +45,9 @@ class OracleClient:
         if speaker:
             payload["speaker"] = speaker
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
-            async with session.post(f"{self._base}/chat", json=payload) as resp:
+            async with session.post(
+                f"{self._base}/chat", json=payload, headers=self._headers
+            ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
         return data["answer"]
@@ -68,6 +74,8 @@ class OracleClient:
         if channel_id:
             payload["channel_id"] = str(channel_id)
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
-            async with session.post(f"{self._base}/remember", json=payload) as resp:
+            async with session.post(
+                f"{self._base}/remember", json=payload, headers=self._headers
+            ) as resp:
                 resp.raise_for_status()
                 return await resp.json()

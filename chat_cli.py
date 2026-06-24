@@ -40,6 +40,7 @@ def main() -> None:
     api_url = (
         args.api_url or os.getenv("ORACLE_API_URL") or "http://localhost:8000"
     )
+    api_token = os.getenv("ORACLE_API_TOKEN")
     guild_id = args.guild_id or str(load_config().get("guild_id", ""))
     if not guild_id:
         print("エラー: guild_id が特定できません（--guild-id か config.yml で指定）")
@@ -75,7 +76,9 @@ def main() -> None:
 
         print("（考え中…）")
         try:
-            result = chat_once(api_url, guild_id, query, history=history)
+            result = chat_once(
+                api_url, guild_id, query, history=history, api_token=api_token
+            )
             print(format_result(result))
             # 今回のやり取りを履歴に追加し、直近 N ペアに丸める。
             history.append({"role": "user", "content": query})
