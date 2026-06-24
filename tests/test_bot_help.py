@@ -39,3 +39,18 @@ def test_oracle_group_has_help_command():
     group = bot.OracleGroup(store=None)
     names = {cmd.name for cmd in group.commands}
     assert "help" in names
+
+
+def test_oracle_group_has_mimic_commands():
+    """#49: OracleGroup に mimic / mimic_off が登録されていること。"""
+    group = bot.OracleGroup(store=None)
+    names = {cmd.name for cmd in group.commands}
+    assert "mimic" in names
+    assert "mimic_off" in names
+
+
+def test_help_mentions_mimic():
+    """#49: ヘルプに真似っこ関連コマンドが載っていること。"""
+    text = bot._HELP
+    assert "/oracle mimic" in text
+    assert "mimic_optout" in text

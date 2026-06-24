@@ -26,12 +26,14 @@ class OracleClient:
         guild_name: str | None = None,
         history: list[dict] | None = None,
         speaker: str | None = None,
+        channel_id: str | None = None,
     ) -> str:
         """質問を送り回答テキストを返す。
 
         history は直近の会話（{"role": "user"|"assistant", "content": str} の
         古い順リスト）。渡すとマルチターン回答になる（OI-10）。
         speaker は「いま話しかけている人」の表示名（任意・OI-22）。
+        channel_id は真似っこモードの状態解決に使う（任意・#49）。
 
         Raises:
             aiohttp.ClientResponseError: HTTP 4xx/5xx
@@ -44,6 +46,8 @@ class OracleClient:
             payload["history"] = history
         if speaker:
             payload["speaker"] = speaker
+        if channel_id:
+            payload["channel_id"] = str(channel_id)
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
             async with session.post(
                 f"{self._base}/chat", json=payload, headers=self._headers
@@ -51,6 +55,51 @@ class OracleClient:
                 resp.raise_for_status()
                 data = await resp.json()
         return data["answer"]
+
+    async def _post(self, path: str, payload: dict) -> dict:
+        """共通 POST ヘルパー（#49 の /mimic/* 用）。"""
+        async with aiohttp.ClientSession(timeout=self._timeout) as session:
+            async with session.post(
+                f"{self._base}{path}", json=payload, headers=self._headers
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+    async def mimic_start(
+        self,
+        guild_id: str,
+        target_id: str,
+        channel_id: str,
+        target_name: str | None = None,
+        user: str | None = None,
+    ) -> dict:
+        """真似を開始する（#49）。戻り値: {started, declaration?, reason?, sample_count}。"""
+        payload = {
+            "guild_id": str(guild_id),
+            "target_id": str(target_id),
+            "channel_id": str(channel_id),
+        }
+        if target_name:
+            payload["target_name"] = target_name
+        if user:
+            payload["user"] = user
+        return await self._post("/mimic/start", payload)
+
+    async def mimic_stop(self, guild_id: str, channel_id: str) -> dict:
+        """その channel の真似を解除する（#49）。戻り値: {stopped}。"""
+        return await self._post(
+            "/mimic/stop",
+            {"guild_id": str(guild_id), "channel_id": str(channel_id)},
+        )
+
+    async def mimic_optout(
+        self, guild_id: str, target_id: str, user: str | None = None
+    ) -> dict:
+        """本人を真似対象から除外する（#49）。戻り値: {ok}。"""
+        payload = {"guild_id": str(guild_id), "target_id": str(target_id)}
+        if user:
+            payload["user"] = user
+        return await self._post("/mimic/optout", payload)
 
     async def remember(
         self,

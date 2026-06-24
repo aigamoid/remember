@@ -14,6 +14,10 @@ from src.rag.prompts import (
     SKIP_CONTEXT,
     build_context,
     build_memories,
+    build_mimic_declaration,
+    build_mimic_section,
+    persona_is_empty,
+    sanitize_persona_card,
 )
 from src.rag.reranker import RerankResult
 from src.vectorstore import VectorStore
@@ -890,3 +894,164 @@ class TestSearchGate:
         )
         assert result["search_skipped"] is True
         assert reranker.calls == []
+
+
+def _engine_mimic(store, llm, provider, enabled=True) -> RagEngine:
+    cfg = {"rag": {"top_k": 5, "mimic_enabled": enabled}}
+    return RagEngine(cfg, store, FakeEmbedder(), llm, mimic_provider=provider)
+
+
+_CARD = {
+    "nicknames": ["うさ"], "personality": "明るい", "likes": ["ゲーム"],
+    "speech_style": "語尾に〜っす", "catchphrases": ["っす"], "confidence": "high",
+}
+
+
+class TestMimicInjection:
+    """#49: 回答時に {mimic_section} が注入される/消える。"""
+
+    def test_injected_when_enabled(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        provider = lambda gid, cid: {"display_name": "うさぎ", "card": _CARD}
+        asyncio.run(
+            _engine_mimic(store, llm, provider).answer("g1", "q", channel_id="c1")
+        )
+        system = llm.calls[1]["system"]
+        assert "{mimic_section}" not in system
+        assert "うさぎ" in system and "モノマネ" in system
+
+    def test_provider_receives_guild_and_channel(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        seen = []
+        provider = lambda gid, cid: seen.append((gid, cid)) or {
+            "display_name": "X", "card": _CARD
+        }
+        asyncio.run(
+            _engine_mimic(store, llm, provider).answer("g1", "q", channel_id="c9")
+        )
+        assert seen == [("g1", "c9")]
+
+    def test_not_injected_when_disabled(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        provider = lambda gid, cid: {"display_name": "うさぎ", "card": _CARD}
+        asyncio.run(
+            _engine_mimic(store, llm, provider, enabled=False).answer(
+                "g1", "q", channel_id="c1"
+            )
+        )
+        system = llm.calls[1]["system"]
+        assert "{mimic_section}" not in system
+        assert "モノマネ" not in system
+
+    def test_section_removed_without_channel_id(self, store):
+        # channel_id 未指定（CLI等）なら mimic は効かずブロックも消える
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        provider = lambda gid, cid: {"display_name": "うさぎ", "card": _CARD}
+        asyncio.run(_engine_mimic(store, llm, provider).answer("g1", "q"))
+        system = llm.calls[1]["system"]
+        assert "{mimic_section}" not in system
+        assert "モノマネ" not in system
+
+    def test_section_removed_when_none(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答え"])
+        asyncio.run(
+            _engine_mimic(store, llm, lambda gid, cid: None).answer(
+                "g1", "q", channel_id="c1"
+            )
+        )
+        assert "{mimic_section}" not in llm.calls[1]["system"]
+        assert "モノマネ" not in llm.calls[1]["system"]
+
+    def test_provider_failure_does_not_break_answer(self, store):
+        _seed(store)
+        llm = FakeLLM(["q", "答えだよ"])
+
+        def boom(gid, cid):
+            raise RuntimeError("DB down")
+
+        result = asyncio.run(
+            _engine_mimic(store, llm, boom).answer("g1", "q", channel_id="c1")
+        )
+        assert result["answer"] == "答えだよ"
+        assert "モノマネ" not in llm.calls[1]["system"]
+
+
+class TestBuildPersonaCard:
+    """#49: build_persona_card のJSONパース・センシティブ除去・空判定。"""
+
+    def test_parses_and_returns_card(self, store):
+        import json
+        llm = FakeLLM([json.dumps(_CARD)])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        card = asyncio.run(
+            eng.build_persona_card("g1", "うさぎ", [{"content": "やっほ〜っす"}])
+        )
+        assert card and card["personality"] == "明るい"
+        assert card["speech_style"] == "語尾に〜っす"
+
+    def test_no_samples_returns_none(self, store):
+        llm = FakeLLM([])  # 呼ばれない
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        assert asyncio.run(eng.build_persona_card("g1", "X", [])) is None
+
+    def test_broken_json_returns_none(self, store):
+        llm = FakeLLM(["これはJSONじゃない"])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        card = asyncio.run(
+            eng.build_persona_card("g1", "X", [{"content": "発言"}])
+        )
+        assert card is None
+
+    def test_sensitive_only_card_returns_none(self, store):
+        import json
+        bad = {
+            "nicknames": [], "personality": "支持政党は自民", "likes": ["政治"],
+            "speech_style": "宗教の話ばかり", "catchphrases": [], "confidence": "low",
+        }
+        llm = FakeLLM([json.dumps(bad)])
+        eng = RagEngine(CFG, store, FakeEmbedder(), llm)
+        card = asyncio.run(
+            eng.build_persona_card("g1", "X", [{"content": "発言"}])
+        )
+        assert card is None  # センシティブ除去後に実質空
+
+
+class TestMimicBuilders:
+    """#49: prompts の builder/sanitizer の純粋関数テスト。"""
+
+    def test_sanitize_removes_sensitive(self):
+        out = sanitize_persona_card({
+            "personality": "明るい", "speech_style": "宗教の話が多い",
+            "likes": ["ゲーム", "政治"], "nicknames": ["うさ"],
+            "catchphrases": [], "confidence": "high",
+        })
+        assert out["personality"] == "明るい"
+        assert out["speech_style"] == ""        # センシティブ語で除去
+        assert out["likes"] == ["ゲーム"]        # 「政治」だけ落ちる
+        assert out["nicknames"] == ["うさ"]
+
+    def test_persona_is_empty(self):
+        assert persona_is_empty({"personality": "", "likes": [], "nicknames": [],
+                                 "speech_style": "", "catchphrases": []})
+        assert not persona_is_empty(_CARD)
+
+    def test_build_section_empty_for_empty_card(self):
+        assert build_mimic_section({}, "X") == ""
+
+    def test_build_section_contains_traits(self):
+        sec = build_mimic_section(_CARD, "うさぎ")
+        assert "うさぎ" in sec and "明るい" in sec and "〜っす" in sec
+
+    def test_declaration_mentions_name(self):
+        dec = build_mimic_declaration(_CARD, "うさぎ")
+        assert "うさぎ" in dec and "mimic off" in dec
+
+    def test_declaration_low_confidence_prefix(self):
+        low = dict(_CARD, confidence="low")
+        dec = build_mimic_declaration(low, "うさぎ")
+        assert "自信ない" in dec
