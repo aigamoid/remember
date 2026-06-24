@@ -270,6 +270,54 @@ CREATE INDEX idx_memories_guild ON memories (guild_id);
 > プロンプトへ注入する。**既定オフ**（`config.yml` の `rag.memory_enabled: true` のときだけ注入）。
 > 書き込みUI（「覚えておいて」検知）は A/B で効果確認後に実装予定。
 
+### personas（真似っこモードの人格カード・#49）
+
+```sql
+CREATE TABLE personas (
+    guild_id     TEXT NOT NULL,
+    author_id    TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    card         JSONB NOT NULL DEFAULT '{}'::jsonb,  -- {nicknames,personality,likes,speech_style,catchphrases,confidence}
+    sample_count INTEGER NOT NULL DEFAULT 0,           -- カード生成に使った発言数
+    consent      TEXT NOT NULL DEFAULT 'unknown',      -- 'unknown'|'optin'|'optout'（本人 opt-out で除外）
+    created_by   TEXT,                                 -- 真似を開始した実行者
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT,
+    PRIMARY KEY (guild_id, author_id)
+);
+CREATE INDEX idx_personas_guild ON personas (guild_id);
+```
+
+> 対象メンバーの過去発言（`messages`）から生成した「口調・性格カード」を保持する（#49）。
+> **guild+author 単位＝サーバー全体でのその人の傾向**で、guild 資産として保持する。
+> `purge_channel`（`/oracle deny`）では**消さない**。`purge_guild`・Bot退出でのみ削除する。
+> `src/db.py` の `upsert_persona_card`/`fetch_persona_card`/`set_persona_consent`/
+> `get_persona_consent`/`delete_persona_card` が読み書きし、生成は `src/rag/engine.py` の
+> `build_persona_card()`（センシティブ属性は `prompts.sanitize_persona_card` で保存前に除去）。
+> `consent='optout'` の人は `/mimic/start` で開始を拒否する（本人保護）。
+
+### mimic_state（真似っこモードの現在状態・#49）
+
+```sql
+CREATE TABLE mimic_state (
+    guild_id   TEXT NOT NULL,
+    channel_id TEXT NOT NULL,    -- scope=channel 固定（宣言した ch だけ真似が効く）
+    author_id  TEXT NOT NULL,    -- いま真似中の対象
+    started_by TEXT,
+    started_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, channel_id)
+);
+CREATE INDEX idx_mimic_state_guild ON mimic_state (guild_id);
+```
+
+> 「いまどの channel で誰を真似中か」を保持する（#49）。**1 channel = 1 対象**（upsert で上書き）。
+> 回答時に `src/mimic.py` の `MimicProvider`（`get_active_mimic`→`fetch_persona_card`）が解決し、
+> `engine.answer()` が人格カードを `{mimic_section}` に注入する。**guild への fallback はしない**
+> （意図せぬサーバー全体適用を防ぐ）。`/oracle mimic_off` で解除（`clear_mimic_state`）。
+> `purge_channel` はその channel の行だけ削除、`purge_guild`・退出は guild 単位で全削除。
+> **既定オフ**（`config.yml` の `rag.mimic_enabled: true` のときだけ機能する）。
+> あわせて `messages (guild_id, author_id, timestamp DESC)` のインデックスを追加（カード生成の高速化）。
+
 ## Qdrant ペイロード仕様
 
 コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`・全guild共有）
