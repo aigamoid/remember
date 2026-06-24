@@ -20,11 +20,15 @@ from src.rag.prompts import (
     MEMORY_EXTRACT_PROMPT,
     MEMORY_SECTION,
     NO_SEARCH_SENTINEL,
+    PERSONA_EXTRACT_PROMPT,
     REWRITER_SYSTEM_PROMPT,
     SKIP_CONTEXT,
     SPEAKER_SECTION,
     build_context,
     build_memories,
+    build_mimic_section,
+    persona_is_empty,
+    sanitize_persona_card,
 )
 from src.rag.reranker import Reranker
 from src.usage import compute_cost
@@ -42,6 +46,7 @@ class RagEngine:
         reranker: Reranker | None = None,
         trace_recorder: Callable[[dict], None] | None = None,
         memory_provider: Callable[[str], list[dict]] | None = None,
+        mimic_provider: Callable[[str, str], dict | None] | None = None,
     ) -> None:
         rag_cfg = cfg.get("rag", {})
         self.rewriter_model: str = rag_cfg.get(
@@ -85,6 +90,13 @@ class RagEngine:
         # 明示メモリ（OI-24）。enabled かつ memory_provider が渡された時のみ、
         # guild の「教わった事実」を回答プロンプトに全件注入する（既定オフ）。
         self.memory_enabled: bool = bool(rag_cfg.get("memory_enabled", False))
+        # 真似っこモード（#49）。enabled かつ mimic_provider が渡された時のみ、
+        # その channel で真似中の対象の人格カードを {mimic_section} に注入する（既定オフ）。
+        self.mimic_enabled: bool = bool(rag_cfg.get("mimic_enabled", False))
+        # 人格カード生成は answer_model を流用する（profile_model は新設しない・設計 §0）。
+        mimic_cfg = rag_cfg.get("mimic", {})
+        self.mimic_sample_limit: int = mimic_cfg.get("sample_limit", 300)
+        self.mimic_min_sample: int = mimic_cfg.get("min_sample_count", 30)
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
         self.store = store
@@ -94,6 +106,7 @@ class RagEngine:
         self.reranker = reranker
         self.trace_recorder = trace_recorder
         self.memory_provider = memory_provider
+        self.mimic_provider = mimic_provider
 
     def _now_str(self) -> str:
         tz = timezone(timedelta(hours=self.tz_offset))
@@ -258,6 +271,51 @@ class RagEngine:
             subject = None
         return {"subject": subject, "content": content}
 
+    async def build_persona_card(
+        self,
+        guild_id: str,
+        display_name: str,
+        samples: list[dict],
+        user_id: str | None = None,
+    ) -> dict | None:
+        """対象者の発言サンプルから人格カードを生成する（#49・書き込み）。
+
+        戻り値: 正規化済みカード dict（personality/speech_style/likes/nicknames/
+        catchphrases/confidence）、または素材不足・LLM失敗・JSON崩れ・センシティブ除去後に
+        実質空なら None（=真似を開始しない・二重ガード）。answer_model を流用し usage を記録。
+        samples は新しい順の [{"content","timestamp","channel_name"}, ...]（db.fetch_member_messages）。
+        """
+        lines = [
+            str(s.get("content") or "").strip()
+            for s in samples
+            if str(s.get("content") or "").strip()
+        ]
+        if not lines:
+            return None
+        # プロンプト肥大を避け、サンプルは行頭に「- 」を付けて連結（古い→新しいの順に戻す）。
+        sample_text = "\n".join(f"- {ln}" for ln in reversed(lines))
+        system = PERSONA_EXTRACT_PROMPT.replace(
+            "{display_name}", display_name
+        ).replace("{samples}", sample_text)
+        events: list[dict] = []
+        try:
+            comp = await self.llm.complete(
+                self.answer_model, system, "上記の発言から人格プロファイルをJSONで出力して。",
+                temperature=0.2, max_tokens=self.answer_max_tokens,
+            )
+        except Exception as e:
+            print(f"[WARN] 人格カード生成失敗（真似を開始しない）: {e}")
+            return None
+        self._record(events, "mimic_profile", comp.model, comp.usage)
+        await self._flush(events, guild_id, user_id)
+        data = self._parse_memory_json(comp.text)
+        if not data:
+            return None
+        card = sanitize_persona_card(data)
+        if persona_is_empty(card):
+            return None
+        return card
+
     @staticmethod
     def _doc_for_rerank(hit: dict) -> str:
         """リランカーに渡すドキュメント文字列。context があれば前置きする。"""
@@ -291,6 +349,7 @@ class RagEngine:
         user_id: str | None = None,
         history: list[dict] | None = None,
         speaker_name: str | None = None,
+        channel_id: str | None = None,
     ) -> dict:
         """質問に回答する。戻り値: {answer, rewritten_query, sources}
 
@@ -367,10 +426,29 @@ class RagEngine:
             if memories_text:
                 memory_section = MEMORY_SECTION.replace("{memories}", memories_text)
 
+        # 真似っこモード（#49）。有効時のみ、その channel で真似中の対象の人格カードを
+        # 取得して {mimic_section} に注入する。真似中でない・取得失敗・実質空ならブロックごと
+        # 消す（回答は止めない）。scope=channel 固定なので channel_id 必須。
+        mimic_section = ""
+        if self.mimic_enabled and self.mimic_provider and channel_id:
+            try:
+                mimic = await asyncio.to_thread(
+                    self.mimic_provider, str(guild_id), str(channel_id)
+                )
+            except Exception as e:
+                print(f"[WARN] mimic 取得失敗（真似なしで続行）: {e}")
+                mimic = None
+            if mimic:
+                mimic_section = build_mimic_section(
+                    mimic.get("card") or {}, mimic.get("display_name") or ""
+                )
+
         system = ANSWER_SYSTEM_PROMPT.replace(
             "{guild_name}", guild_name or self.guild_name
         ).replace("{current_datetime}", self._now_str()).replace(
             "{speaker_section}", speaker_section
+        ).replace(
+            "{mimic_section}", mimic_section
         ).replace(
             "{taught_memories}", memory_section
         ).replace(
