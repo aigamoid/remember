@@ -79,6 +79,13 @@ _HELP = (
     "・`/oracle status` … 取り込み状況（許可数・件数・最新ジョブ）を表示\n"
     "・`/oracle help` … この使い方を表示\n"
     "\n"
+    "**🪄 真似っこモード**\n"
+    "メンバーの過去の発言から口調・性格をプロファイリングして、れみがその人っぽく話すよ。\n"
+    "・`/oracle mimic @メンバー` … その人の真似を始める（**このチャンネルだけ**で効くよ）\n"
+    "・`/oracle mimic_off` … 真似っこを解除して元のれみに戻る\n"
+    "・`/mimic_optout` … 自分を真似の対象から外す（**本人なら誰でも**実行できるよ）\n"
+    "※あくまで れみ によるモノマネ遊びだよ。サーバーで有効化されているときだけ使えるよ。\n"
+    "\n"
     "**ちょっと便利**\n"
     "・「◯◯は△△だよ、覚えておいて」とメンションで言うと、その場で覚えるよ📝\n"
     "・取り込み状況やコスト・利用量は管理ポータル **remember** からも確認できるよ。\n"
@@ -100,7 +107,7 @@ class OracleGroup(app_commands.Group):
     """/oracle 管理コマンド群。DBへの書き込みと取り込みジョブの投入のみ行い、
     実処理はワーカーに任せる。"""
 
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, oracle: OracleClient | None = None) -> None:
         super().__init__(
             name="oracle",
             description="過去ログ取り込みの管理（サーバー管理権限が必要）",
@@ -108,6 +115,7 @@ class OracleGroup(app_commands.Group):
             guild_only=True,
         )
         self.store = store
+        self.oracle = oracle  # 真似っこ（#49）で API を呼ぶため
 
     @app_commands.command(name="allow", description="チャンネルの読み取りを許可して取り込みを開始する")
     @app_commands.describe(channel="読み取りを許可するテキストチャンネル")
@@ -247,6 +255,57 @@ class OracleGroup(app_commands.Group):
         # 静的なヘルプを返すだけなので DB アクセスも defer も不要（OI-27）。
         await interaction.response.send_message(_HELP, ephemeral=True)
 
+    @app_commands.command(
+        name="mimic",
+        description="指定したメンバーの口調・性格を真似して話す（#49）",
+    )
+    @app_commands.describe(member="真似してほしいメンバー")
+    async def mimic(
+        self, interaction: discord.Interaction, member: discord.Member
+    ) -> None:
+        await interaction.response.defer()  # 宣言はみんなに見せたいので非 ephemeral
+        if self.oracle is None:
+            await interaction.followup.send("いま真似っこ機能は使えないみたい〜")
+            return
+        guild_id = str(interaction.guild_id)
+        try:
+            result = await self.oracle.mimic_start(
+                guild_id, str(member.id), str(interaction.channel_id),
+                target_name=member.display_name,
+                user=f"{interaction.channel_id}:{interaction.user.id}",
+            )
+        except Exception as e:
+            print(f"[ERROR] mimic_start: {type(e).__name__}: {e}")
+            await interaction.followup.send("⚠️ 真似の準備に失敗しちゃった。あとでもう一度試してね〜")
+            return
+        if not result.get("started"):
+            await interaction.followup.send(
+                result.get("reason") or "うまく真似できなかったかも〜"
+            )
+            return
+        await interaction.followup.send(result.get("declaration") or "真似はじめるね！")
+
+    @app_commands.command(
+        name="mimic_off", description="真似っこモードを解除して元のれみに戻る（#49）"
+    )
+    async def mimic_off(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        if self.oracle is None:
+            await interaction.followup.send("いま真似っこ機能は使えないみたい〜")
+            return
+        try:
+            result = await self.oracle.mimic_stop(
+                str(interaction.guild_id), str(interaction.channel_id)
+            )
+        except Exception as e:
+            print(f"[ERROR] mimic_stop: {type(e).__name__}: {e}")
+            await interaction.followup.send("⚠️ 解除に失敗しちゃった。もう一度試してね〜")
+            return
+        if result.get("stopped"):
+            await interaction.followup.send("ふぅ、元のれみに戻ったよ〜🪄")
+        else:
+            await interaction.followup.send("いまこのチャンネルでは誰も真似してないみたい〜")
+
 
 class MoimoichanBot(discord.Client):
     def __init__(self, oracle: OracleClient, store: Store, cfg: dict) -> None:
@@ -273,8 +332,51 @@ class MoimoichanBot(discord.Client):
         )
 
     async def setup_hook(self) -> None:
-        self.tree.add_command(OracleGroup(self.store))
+        self.tree.add_command(OracleGroup(self.store, self.oracle))
+        self._register_mimic_optout()
         await self.tree.sync()
+
+    def _register_mimic_optout(self) -> None:
+        """本人 opt-out を一般メンバーも使えるトップレベルコマンドとして登録する（#49・§2）。
+
+        /oracle グループは管理者限定（default_permissions=manage_guild）なので、
+        本人が自分を真似対象から外す opt-out はグループ外のトップレベルに置く（誰でも実行可）。
+        """
+        oracle = self.oracle
+
+        @app_commands.command(
+            name="mimic_optout",
+            description="自分を「真似っこ」の対象から外す（本人の意思表示・#49）",
+        )
+        @app_commands.guild_only()
+        async def mimic_optout(interaction: discord.Interaction) -> None:
+            await interaction.response.defer(ephemeral=True)
+            if oracle is None:
+                await interaction.followup.send(
+                    "いま真似っこ機能は使えないみたい〜", ephemeral=True
+                )
+                return
+            try:
+                result = await oracle.mimic_optout(
+                    str(interaction.guild_id), str(interaction.user.id),
+                    user=f"{interaction.channel_id}:{interaction.user.id}",
+                )
+            except Exception as e:
+                print(f"[ERROR] mimic_optout: {type(e).__name__}: {e}")
+                await interaction.followup.send(
+                    "⚠️ 設定に失敗しちゃった。もう一度試してね〜", ephemeral=True
+                )
+                return
+            if result.get("ok"):
+                await interaction.followup.send(
+                    "わかった！これからはあなたの真似はしないようにするね🙏", ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "設定できなかったかも…あとでもう一度試してね〜", ephemeral=True
+                )
+
+        self.tree.add_command(mimic_optout)
 
     async def on_ready(self) -> None:
         print(f"[INFO] Logged in as {self.user} (id={self.user.id})")
@@ -322,6 +424,7 @@ class MoimoichanBot(discord.Client):
                     guild_name=message.guild.name,
                     history=history,
                     speaker=message.author.display_name,
+                    channel_id=str(message.channel.id),
                 )
                 # 成功時のみ会話を記憶（このチャンネルの次ターンへ引き継ぐ）。
                 self._remember_turn(message.channel.id, query, answer)
