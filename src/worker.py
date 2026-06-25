@@ -170,4 +170,8 @@ class IngestWorker:
     def _purge_guild(self, guild_id: str) -> str:
         self._store.delete_by_guild(guild_id)
         stats = purge_guild_data(self._conn, guild_id)
-        return f"messages={stats['messages']} chunks={stats['chunks']} 削除"
+        return (
+            f"messages={stats['messages']} chunks={stats['chunks']} "
+            f"memories={stats['memories']} traces={stats['traces']} "
+            f"usage={stats['usage']} 削除"
+        )
