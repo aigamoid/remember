@@ -40,6 +40,11 @@ rag:
   debug_trace: false                          # OI-21: 質問/ヒットチャンク/回答を chat_trace に保存（デバッグ用・既定OFF）。本番はプライバシー上 false 推奨
   memory_enabled: false                       # OI-24: 「覚えておいて」で教わった事実(memories)を回答プロンプトに注入（既定OFF）
   search_gate: true                           # OI-23: 雑談/挨拶/一般質問など過去ログ参照が不要な入力は検索をスキップ（コスト/レイテンシ削減・既定ON）。Rewriterが[NO_SEARCH]判定したら検索しない
+  mimic_enabled: false                        # #49: 「真似っこ」モード（/oracle mimic）を有効化（既定OFF）。対象メンバーの口調・性格を真似て回答
+  mimic:                                      # #49: 真似っこの調整（mimic_enabled=true のときだけ効く）
+    sample_limit: 300                         # 人格カード生成時に対象者の発言を最大何件まで使うか
+    min_sample_count: 30                      # これ未満は confidence=low（特徴が薄ければ開始を断ることもある）
+    require_optin: false                      # MVPは false。公開/課金前は true（本人の事前同意を必須化）にする
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（APIキー JINA_API_KEY が必要）
     provider: "jina"                          # 現状 jina のみ対応

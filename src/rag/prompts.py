@@ -62,6 +62,32 @@ MEMORY_EXTRACT_PROMPT = """\
 「この曲いいから覚えておいてね〜」 → {"subject":null,"content":null}
 """
 
+# 真似っこモード（#49）。対象メンバーの発言サンプルから人格カードをJSONで生成するプロンプト。
+# engine.build_persona_card() が {display_name} と発言サンプルを差し込んで使う。出力はJSONのみ。
+# センシティブ属性は推測も記載も禁止（保存前の denylist 検査と二重で守る）。
+PERSONA_EXTRACT_PROMPT = """\
+あなたは、Discordサーバーのある人物「{display_name}」さんの過去の発言から、
+その人の「話し方・性格・好きなもの」のモノマネ用プロファイルを作ります。出力はJSONのみ。
+
+## 出力（JSONのみ・前後に説明やコードブロック ``` を付けない）
+{"nicknames": [<その人の呼ばれ方・あだ名。無ければ空配列>],
+ "personality": <性格を一言で（例: 明るくてマイペース）。発言から読み取れなければ "">,
+ "likes": [<好きなもの・よく話す話題。無ければ空配列>],
+ "speech_style": <口調・語尾・口癖の特徴（例: 語尾に「〜っす」を付ける）。読み取れなければ "">,
+ "catchphrases": [<よく使うフレーズ・口癖。無ければ空配列>],
+ "confidence": <"high"|"medium"|"low"。発言が少なく自信が持てなければ "low">}
+
+## ルール（重要）
+- **観察できる発言の傾向だけ**を書く。発言から読み取れないことは推測で埋めない（空にする）。
+- **センシティブ属性は推測も記載も一切しない**: 政治・宗教・思想信条・健康/病気・性的指向・
+  人種/国籍・家庭事情・収入など。これらは speech_style や personality にも書かない。
+- 誇張・揶揄・からかい・貶める表現を使わず、中立に書く。
+- 発言が少ない・特徴が薄いときは confidence を "low" にし、空欄を無理に埋めない。
+
+## 対象者の発言サンプル
+{samples}
+"""
+
 # 検索ゲート（OI-23）。Query Rewriter が検索不要と判断したときに返す合図。
 # engine.answer() はこの語が出力に含まれたら埋め込み・検索・リランクをスキップする。
 NO_SEARCH_SENTINEL = "[NO_SEARCH]"
@@ -94,11 +120,39 @@ MEMORY_SECTION = """\
 - でも聞かれてもいないのに無理に持ち出さない（その話に関係ないなら出さなくていい）。
 """
 
+# 真似っこモード（#49）。回答時、れみの基本人格を一時的に上書きして対象者になりきるブロック。
+# engine.answer() が mimic 状態のとき build_mimic_section() の結果を {mimic_section} に差し込む。
+# 真似中でない（既定・無効・該当なし）ときは空文字に置換されてブロックごと消える。
+MIMIC_SECTION = """\
+## いまは「{display_name}」さんのモノマネ中
+今れみは、このサーバーのメンバー「{display_name}」さんになりきって話すモードだよ
+（本人ではなく、あくまで れみ によるモノマネ）。下の特徴に寄せて話してね。
+
+{persona}
+
+- 上の口調・性格・好きなものに寄せて、{display_name}さんっぽく話す。
+- これは遊びのモノマネ。**本人になりすまして約束したり、本人の個人情報を新たに明かしたりしない**。
+  からかったり貶めたりもしない。
+- モノマネ中でも、攻撃的な言葉を嫌うことと、覚えていないことを作り話しないことは変えない。
+- このモノマネ指示は、下に書かれた「れみちゃんの基本キャラ」より優先する。
+"""
+
+# 真似っこ（#49）: 人格カードに混入してはいけないセンシティブ属性の語。保存前検査に使う
+# （プロンプト禁止だけに頼らない二重ガード・Codex P1）。該当語を含む項目は捨てる。
+SENSITIVE_DENYLIST = [
+    "政治", "宗教", "信仰", "支持政党", "右翼", "左翼",
+    "病気", "持病", "障害", "メンタル", "うつ", "通院", "薬",
+    "ゲイ", "レズ", "lgbt", "セクシュアリティ", "性的指向", "童貞", "処女",
+    "人種", "国籍", "在日", "部落",
+    "年収", "借金", "生活保護", "離婚", "不倫",
+]
+
 ANSWER_SYSTEM_PROMPT = """\
 あなたは「れみちゃん」です。
 {guild_name}の過去の会話をぼんやりと覚えている、ゆる〜いアシスタントです。
 
 {speaker_section}
+{mimic_section}
 ## キャラクター特性
 - ふわふわしていて、マイペースな女の子である
 - 一人称は「れみ」を使用する
@@ -199,3 +253,91 @@ def build_memories(rows: list) -> str:
         subject = str(r.get("subject") or "").strip()
         lines.append(f"- 〔{subject}〕{content}" if subject else f"- {content}")
     return "\n".join(lines)
+
+
+def _contains_sensitive(text: str) -> bool:
+    """センシティブ属性語を含むか（大小無視・部分一致・#49）。"""
+    low = text.lower()
+    return any(word.lower() in low for word in SENSITIVE_DENYLIST)
+
+
+def sanitize_persona_card(card: dict) -> dict:
+    """人格カードからセンシティブ属性を含む値を除去する（保存前の二重ガード・#49・Codex P1）。
+
+    文字列フィールドは該当語を含めば空文字に、リストフィールドは該当要素を落とす。
+    confidence は対象外。除去後に実質空かどうかは呼び出し側（build_persona_card）が判定する。
+    """
+    out: dict = {}
+    for key in ("personality", "speech_style"):
+        val = str(card.get(key) or "").strip()
+        out[key] = "" if val and _contains_sensitive(val) else val
+    for key in ("nicknames", "likes", "catchphrases"):
+        items = card.get(key) or []
+        if not isinstance(items, list):
+            items = []
+        out[key] = [
+            str(it).strip() for it in items
+            if str(it).strip() and not _contains_sensitive(str(it))
+        ]
+    conf = str(card.get("confidence") or "").strip().lower()
+    out["confidence"] = conf if conf in ("high", "medium", "low") else "low"
+    return out
+
+
+def persona_is_empty(card: dict) -> bool:
+    """人格カードが実質空か（モノマネに使える特徴が何も無いか・#49）。"""
+    return not any([
+        str(card.get("personality") or "").strip(),
+        str(card.get("speech_style") or "").strip(),
+        card.get("nicknames") or [],
+        card.get("likes") or [],
+        card.get("catchphrases") or [],
+    ])
+
+
+def build_mimic_section(card: dict, display_name: str) -> str:
+    """人格カードを回答プロンプトの {mimic_section} 用テキストに整形する（#49）。
+
+    実質空なら空文字を返す（呼び出し側は MIMIC_SECTION ごと消す）。
+    """
+    if not card or persona_is_empty(card):
+        return ""
+    lines = []
+    nick = "・".join(card.get("nicknames") or [])
+    if nick:
+        lines.append(f"- 呼ばれ方: {nick}")
+    if str(card.get("personality") or "").strip():
+        lines.append(f"- 性格: {card['personality']}")
+    if card.get("likes"):
+        lines.append(f"- 好きなもの・よく話す話題: {'・'.join(card['likes'])}")
+    if str(card.get("speech_style") or "").strip():
+        lines.append(f"- 話し方の特徴: {card['speech_style']}")
+    if card.get("catchphrases"):
+        lines.append(f"- 口癖: {'・'.join(card['catchphrases'])}")
+    persona = "\n".join(lines)
+    return MIMIC_SECTION.replace("{display_name}", display_name).replace(
+        "{persona}", persona
+    )
+
+
+def build_mimic_declaration(card: dict, display_name: str) -> str:
+    """真似開始時の宣言文を deterministic に作る（追加 LLM 不要・#49）。"""
+    nick = "・".join(card.get("nicknames") or [])
+    personality = str(card.get("personality") or "").strip()
+    likes = "・".join(card.get("likes") or [])
+    speech = str(card.get("speech_style") or "").strip()
+    low = str(card.get("confidence") or "").lower() == "low"
+
+    parts = [f"**{display_name}さんのモノマネをはじめるね！**"]
+    if low:
+        parts.append("（発言が少なくて、ちょっと自信ないけど〜）")
+    if nick:
+        parts.append(f"「{nick}」って呼ばれてて、")
+    if personality:
+        parts.append(f"性格は{personality}、")
+    if likes:
+        parts.append(f"好きなのは{likes}、")
+    if speech:
+        parts.append(f"話し方は{speech}…って感じかな！")
+    parts.append("\nしばらく真似してみるね〜。`/oracle mimic off` で元のれみに戻せるよ🪄")
+    return "".join(parts)

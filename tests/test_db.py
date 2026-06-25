@@ -629,3 +629,113 @@ class TestMemories:
         mid = insert_memory(conn, "g-1", "他guildからは消せない")
         assert delete_memory(conn, "g-2", mid) is False
         assert count_memories(conn, "g-1") == 1
+
+
+# ── 真似っこモード personas / mimic_state（#49）─────────────────
+
+from src import db as _db  # noqa: E402
+
+
+class TestPersonas:
+    def test_upsert_and_fetch(self, conn):
+        card = {"personality": "明るい", "speech_style": "〜っす"}
+        _db.upsert_persona_card(conn, "g1", "u1", "うさぎ", card, 42, created_by="adm")
+        got = _db.fetch_persona_card(conn, "g1", "u1")
+        assert got["display_name"] == "うさぎ"
+        assert got["card"]["personality"] == "明るい"
+        assert got["sample_count"] == 42
+        assert got["consent"] == "unknown"
+
+    def test_fetch_missing_returns_none(self, conn):
+        assert _db.fetch_persona_card(conn, "g1", "nope") is None
+
+    def test_upsert_overwrites_card_keeps_consent(self, conn):
+        _db.set_persona_consent(conn, "g1", "u1", "optout")
+        _db.upsert_persona_card(conn, "g1", "u1", "うさぎ", {"personality": "X"}, 1)
+        got = _db.fetch_persona_card(conn, "g1", "u1")
+        assert got["card"]["personality"] == "X"
+        assert got["consent"] == "optout"  # consent は upsert で壊さない
+
+    def test_consent_row_created_when_absent(self, conn):
+        # カード未生成でも opt-out できる（consent だけの行が先に作られる）
+        _db.set_persona_consent(conn, "g1", "u9", "optout")
+        assert _db.get_persona_consent(conn, "g1", "u9") == "optout"
+
+    def test_get_consent_default_unknown(self, conn):
+        assert _db.get_persona_consent(conn, "g1", "none") == "unknown"
+
+    def test_delete_persona(self, conn):
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        assert _db.delete_persona_card(conn, "g1", "u1") is True
+        assert _db.fetch_persona_card(conn, "g1", "u1") is None
+
+
+class TestFetchMemberMessages:
+    def test_filters_guild_author_and_empty(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g1", author_id="u1",
+                                           content="あ", timestamp="2024-01-01T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m2", guild_id="g1", author_id="u1",
+                                           content="", has_attachment=True,
+                                           timestamp="2024-01-02T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m3", guild_id="g1", author_id="u2",
+                                           content="別人", timestamp="2024-01-03T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m4", guild_id="g2", author_id="u1",
+                                           content="別guild", timestamp="2024-01-04T00:00:00+00:00"))
+        rows = _db.fetch_member_messages(conn, "g1", "u1")
+        contents = [r["content"] for r in rows]
+        assert contents == ["あ"]  # 空content・別author・別guildは除外
+
+    def test_limit(self, conn):
+        for i in range(5):
+            insert_message(conn, _make_message(
+                id=f"m{i}", guild_id="g1", author_id="u1", content=f"c{i}",
+                timestamp=f"2024-01-0{i+1}T00:00:00+00:00"))
+        rows = _db.fetch_member_messages(conn, "g1", "u1", limit=3)
+        assert len(rows) == 3
+
+    def test_resolve_member_name_latest(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g1", author_id="u1",
+                                           author_name="旧名", timestamp="2024-01-01T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m2", guild_id="g1", author_id="u1",
+                                           author_name="新名", timestamp="2024-02-01T00:00:00+00:00"))
+        assert _db.resolve_member_name(conn, "g1", "u1") == "新名"
+
+
+class TestMimicState:
+    def test_set_get_clear(self, conn):
+        _db.set_mimic_state(conn, "g1", "c1", "u1", started_by="adm")
+        st = _db.get_active_mimic(conn, "g1", "c1")
+        assert st["author_id"] == "u1" and st["started_by"] == "adm"
+        assert _db.clear_mimic_state(conn, "g1", "c1") is True
+        assert _db.get_active_mimic(conn, "g1", "c1") is None
+
+    def test_no_guild_fallback(self, conn):
+        # channel 行のみ解決。別 channel には漏れない（guild fallback しない）
+        _db.set_mimic_state(conn, "g1", "c1", "u1")
+        assert _db.get_active_mimic(conn, "g1", "c2") is None
+
+    def test_one_target_per_channel(self, conn):
+        _db.set_mimic_state(conn, "g1", "c1", "u1")
+        _db.set_mimic_state(conn, "g1", "c1", "u2")  # 上書き
+        assert _db.get_active_mimic(conn, "g1", "c1")["author_id"] == "u2"
+
+
+class TestMimicPurgeIntegrity:
+    def test_purge_channel_keeps_personas_clears_state(self, conn):
+        # personas は guild 資産＝ch削除で残る。mimic_state は該当chだけ消える。
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        _db.set_mimic_state(conn, "g1", "ch-1", "u1")
+        _db.set_mimic_state(conn, "g1", "ch-2", "u1")
+        from src.db import purge_channel_data
+        purge_channel_data(conn, "g1", "ch-1")
+        assert _db.fetch_persona_card(conn, "g1", "u1") is not None   # 残る
+        assert _db.get_active_mimic(conn, "g1", "ch-1") is None       # 該当ch消える
+        assert _db.get_active_mimic(conn, "g1", "ch-2") is not None   # 他chは無傷
+
+    def test_purge_guild_clears_both(self, conn):
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        _db.set_mimic_state(conn, "g1", "ch-1", "u1")
+        from src.db import purge_guild_data
+        purge_guild_data(conn, "g1")
+        assert _db.fetch_persona_card(conn, "g1", "u1") is None
+        assert _db.get_active_mimic(conn, "g1", "ch-1") is None

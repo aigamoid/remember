@@ -197,6 +197,40 @@ CREATE TABLE IF NOT EXISTS memories (
 
 CREATE INDEX IF NOT EXISTS idx_memories_guild
     ON memories (guild_id);
+
+-- 真似っこモード（#49）。対象メンバーの過去発言から生成した人格カード。
+-- guild+author 単位＝「サーバー全体でのその人の傾向」。guild 資産として保持し、
+-- purge_channel では削除しない（guild purge・Bot退出でのみ削除）。
+CREATE TABLE IF NOT EXISTS personas (
+    guild_id     TEXT NOT NULL,
+    author_id    TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    card         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    consent      TEXT NOT NULL DEFAULT 'unknown',
+    created_by   TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT,
+    PRIMARY KEY (guild_id, author_id)
+);
+CREATE INDEX IF NOT EXISTS idx_personas_guild
+    ON personas (guild_id);
+
+-- 「いまどの channel で誰を真似中か」（#49）。scope=channel 固定なので channel_id は実値。
+CREATE TABLE IF NOT EXISTS mimic_state (
+    guild_id   TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    author_id  TEXT NOT NULL,
+    started_by TEXT,
+    started_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mimic_state_guild
+    ON mimic_state (guild_id);
+
+-- 人格カード生成時の対象者発言取得を速くする（#49）。
+CREATE INDEX IF NOT EXISTS idx_messages_guild_author_timestamp
+    ON messages (guild_id, author_id, timestamp DESC);
 """
 
 # ingest_jobs.kind の取りうる値
@@ -719,6 +753,12 @@ def purge_channel_data(
         "DELETE FROM crawl_state WHERE guild_id = %s AND channel_id = %s",
         (guild_id, channel_id),
     )
+    # 真似っこ（#49）: personas は guild 資産なので channel 削除では消さない。
+    # mimic_state はその channel の行だけ消す（真似中だった ch が無くなるため）。
+    conn.execute(
+        "DELETE FROM mimic_state WHERE guild_id = %s AND channel_id = %s",
+        (guild_id, channel_id),
+    )
     conn.commit()
     return {"messages": msgs, "attachments": atts, "chunks": chunks}
 
@@ -765,6 +805,9 @@ def purge_guild_data(conn: psycopg.Connection, guild_id: str) -> dict:
         "DELETE FROM ingest_jobs WHERE guild_id = %s AND status != 'running'",
         (guild_id,),
     )
+    # 真似っこ（#49）: guild 退出/purge では人格カードと真似中状態も全削除する。
+    conn.execute("DELETE FROM personas WHERE guild_id = %s", (guild_id,))
+    conn.execute("DELETE FROM mimic_state WHERE guild_id = %s", (guild_id,))
     conn.commit()
     return {
         "messages": msgs,
@@ -916,6 +959,181 @@ def count_memories(conn: psycopg.Connection, guild_id: str) -> int:
         "SELECT count(*) FROM memories WHERE guild_id = %s", (guild_id,)
     ).fetchone()
     return row[0]
+
+
+# ---- personas / mimic_state（真似っこモード・#49。src/mimic.py / engine が使用）----
+
+def fetch_member_messages(
+    conn: psycopg.Connection, guild_id: str, author_id: str, limit: int = 300
+) -> list[dict]:
+    """人格カード生成用に、対象メンバーの発言を新しい順で取得する（#49）。
+
+    空 content（添付のみ等）は除外。guild_id で分離。戻り値は新しい順
+    [{"content", "timestamp", "channel_name"}, ...]。
+    """
+    rows = conn.execute(
+        """
+        SELECT content, timestamp, channel_name
+        FROM messages
+        WHERE guild_id = %s AND author_id = %s AND content <> ''
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (guild_id, author_id, limit),
+    ).fetchall()
+    cols = ["content", "timestamp", "channel_name"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def resolve_member_name(
+    conn: psycopg.Connection, guild_id: str, author_id: str
+) -> str | None:
+    """author_id の最新表示名を返す（#49）。発言が無ければ None。"""
+    row = conn.execute(
+        "SELECT author_name FROM messages "
+        "WHERE guild_id = %s AND author_id = %s "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (guild_id, author_id),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def upsert_persona_card(
+    conn: psycopg.Connection,
+    guild_id: str,
+    author_id: str,
+    display_name: str,
+    card: dict,
+    sample_count: int,
+    created_by: str | None = None,
+) -> None:
+    """生成した人格カードを保存（再 mimic で上書き）。consent は既存値を維持する（#49）。"""
+    conn.execute(
+        """
+        INSERT INTO personas
+            (guild_id, author_id, display_name, card, sample_count, created_by,
+             created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (guild_id, author_id) DO UPDATE SET
+            display_name = EXCLUDED.display_name,
+            card         = EXCLUDED.card,
+            sample_count = EXCLUDED.sample_count,
+            updated_at   = EXCLUDED.updated_at
+        """,
+        (
+            guild_id, author_id, display_name, Json(card), sample_count,
+            created_by, _now(), _now(),
+        ),
+    )
+    conn.commit()
+
+
+def fetch_persona_card(
+    conn: psycopg.Connection, guild_id: str, author_id: str
+) -> dict | None:
+    """保存済み人格カードを返す（#49）。無ければ None。"""
+    row = conn.execute(
+        """
+        SELECT author_id, display_name, card, sample_count, consent
+        FROM personas WHERE guild_id = %s AND author_id = %s
+        """,
+        (guild_id, author_id),
+    ).fetchone()
+    if not row:
+        return None
+    cols = ["author_id", "display_name", "card", "sample_count", "consent"]
+    return dict(zip(cols, row))
+
+
+def set_persona_consent(
+    conn: psycopg.Connection, guild_id: str, author_id: str, consent: str
+) -> None:
+    """本人 opt-out 等の consent を設定する（#49）。
+
+    カード未生成でも opt-out できるよう、行が無ければ consent だけの行を先に作る。
+    """
+    conn.execute(
+        """
+        INSERT INTO personas (guild_id, author_id, consent, created_at)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (guild_id, author_id) DO UPDATE SET
+            consent    = EXCLUDED.consent,
+            updated_at = %s
+        """,
+        (guild_id, author_id, consent, _now(), _now()),
+    )
+    conn.commit()
+
+
+def get_persona_consent(
+    conn: psycopg.Connection, guild_id: str, author_id: str
+) -> str:
+    """consent を返す（#49）。行が無ければ 'unknown'。"""
+    row = conn.execute(
+        "SELECT consent FROM personas WHERE guild_id = %s AND author_id = %s",
+        (guild_id, author_id),
+    ).fetchone()
+    return row[0] if row else "unknown"
+
+
+def delete_persona_card(
+    conn: psycopg.Connection, guild_id: str, author_id: str
+) -> bool:
+    """人格カードを削除する（#49）。"""
+    cur = conn.execute(
+        "DELETE FROM personas WHERE guild_id = %s AND author_id = %s",
+        (guild_id, author_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def set_mimic_state(
+    conn: psycopg.Connection,
+    guild_id: str,
+    channel_id: str,
+    author_id: str,
+    started_by: str | None = None,
+) -> None:
+    """その channel で真似中の対象を設定する（1 channel 1 対象・上書き・#49）。"""
+    conn.execute(
+        """
+        INSERT INTO mimic_state (guild_id, channel_id, author_id, started_by, started_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (guild_id, channel_id) DO UPDATE SET
+            author_id  = EXCLUDED.author_id,
+            started_by = EXCLUDED.started_by,
+            started_at = EXCLUDED.started_at
+        """,
+        (guild_id, channel_id, author_id, started_by, _now()),
+    )
+    conn.commit()
+
+
+def get_active_mimic(
+    conn: psycopg.Connection, guild_id: str, channel_id: str
+) -> dict | None:
+    """その channel で真似中の対象を返す（#49）。channel 行のみ・guild fallback しない。"""
+    row = conn.execute(
+        "SELECT author_id, started_by, started_at FROM mimic_state "
+        "WHERE guild_id = %s AND channel_id = %s",
+        (guild_id, channel_id),
+    ).fetchone()
+    if not row:
+        return None
+    return {"author_id": row[0], "started_by": row[1], "started_at": row[2]}
+
+
+def clear_mimic_state(
+    conn: psycopg.Connection, guild_id: str, channel_id: str
+) -> bool:
+    """その channel の真似中状態を解除する（#49）。"""
+    cur = conn.execute(
+        "DELETE FROM mimic_state WHERE guild_id = %s AND channel_id = %s",
+        (guild_id, channel_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def _month_start_iso() -> str:

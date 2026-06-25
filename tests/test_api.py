@@ -16,11 +16,23 @@ def _clear_api_token_env(monkeypatch):
 
 
 class FakeEngine:
-    def __init__(self, memory_enabled: bool = False, extracted: dict | None = None) -> None:
+    def __init__(
+        self,
+        memory_enabled: bool = False,
+        extracted: dict | None = None,
+        mimic_enabled: bool = False,
+        persona_card: dict | None = None,
+    ) -> None:
         self.calls: list[tuple] = []
         self.memory_enabled = memory_enabled
         self._extracted = extracted
         self.extract_calls: list[tuple] = []
+        # 真似っこ（#49）
+        self.mimic_enabled = mimic_enabled
+        self.mimic_sample_limit = 300
+        self._persona_card = persona_card
+        self.persona_calls: list[tuple] = []
+        self.last_channel_id: str | None = None
 
     async def answer(
         self,
@@ -30,10 +42,12 @@ class FakeEngine:
         user_id: str | None = None,
         history: list[dict] | None = None,
         speaker_name: str | None = None,
+        channel_id: str | None = None,
     ) -> dict:
         self.calls.append(
             (guild_id, query, guild_name, user_id, history, speaker_name)
         )
+        self.last_channel_id = channel_id
         return {
             "answer": "テスト回答！っ",
             "rewritten_query": "書き換え済み",
@@ -46,6 +60,51 @@ class FakeEngine:
     ) -> dict | None:
         self.extract_calls.append((guild_id, text, speaker_name, user_id))
         return self._extracted
+
+    async def build_persona_card(
+        self, guild_id: str, display_name: str, samples: list[dict],
+        user_id: str | None = None,
+    ) -> dict | None:
+        self.persona_calls.append((guild_id, display_name, len(samples), user_id))
+        return self._persona_card
+
+
+class FakeMimicStore:
+    """/mimic/* 用のフェイク（DB I/O 無し・#49）。"""
+
+    def __init__(
+        self, consent: str = "unknown", samples: list[dict] | None = None,
+        name: str | None = "うさぎ",
+    ) -> None:
+        self._consent = consent
+        self._samples = samples if samples is not None else [{"content": "やっほ〜"}]
+        self._name = name
+        self.saved: list[tuple] = []
+        self.states: list[tuple] = []
+        self.cleared: list[tuple] = []
+        self.consent_set: list[tuple] = []
+
+    def get_consent(self, guild_id, author_id):
+        return self._consent
+
+    def set_consent(self, guild_id, author_id, consent):
+        self.consent_set.append((guild_id, author_id, consent))
+
+    def fetch_samples(self, guild_id, author_id, limit=300):
+        return self._samples
+
+    def resolve_name(self, guild_id, author_id):
+        return self._name
+
+    def save_card(self, guild_id, author_id, display_name, card, sample_count, created_by=None):
+        self.saved.append((guild_id, author_id, display_name, card, sample_count))
+
+    def set_state(self, guild_id, channel_id, author_id, started_by=None):
+        self.states.append((guild_id, channel_id, author_id, started_by))
+
+    def clear_state(self, guild_id, channel_id):
+        self.cleared.append((guild_id, channel_id))
+        return True
 
 
 @pytest.fixture
@@ -321,3 +380,126 @@ class TestRemember:
         client, engine = self._client(True, None)
         resp = client.post("/remember", json={"guild_id": "g1", "text": "   "})
         assert resp.status_code == 422
+
+
+class TestChatChannelId:
+    """#49: /chat が channel_id を engine.answer へ素通しする（新フィールド正典＋user後方互換）。"""
+
+    def test_channel_id_field_passthrough(self):
+        engine = FakeEngine()
+        client = TestClient(create_app(engine=engine))
+        client.post(
+            "/chat",
+            json={"guild_id": "g1", "query": "q", "channel_id": "ch9"},
+        )
+        assert engine.last_channel_id == "ch9"
+
+    def test_channel_id_fallback_from_user(self):
+        engine = FakeEngine()
+        client = TestClient(create_app(engine=engine))
+        client.post(
+            "/chat",
+            json={"guild_id": "g1", "query": "q", "user": "ch1:u42"},
+        )
+        assert engine.last_channel_id == "ch1"
+
+    def test_channel_id_field_wins_over_user(self):
+        engine = FakeEngine()
+        client = TestClient(create_app(engine=engine))
+        client.post(
+            "/chat",
+            json={"guild_id": "g1", "query": "q", "user": "ch1:u42", "channel_id": "ch9"},
+        )
+        assert engine.last_channel_id == "ch9"
+
+
+_SUCCESS_CARD = {
+    "nicknames": ["うさ"], "personality": "明るくマイペース", "likes": ["ゲーム"],
+    "speech_style": "語尾に〜っす", "catchphrases": ["っす"], "confidence": "high",
+}
+
+
+class TestMimicEndpoints:
+    """#49: /mimic/start|stop|optout。"""
+
+    def _app(self, engine, store):
+        return TestClient(create_app(engine=engine, mimic_store=store))
+
+    def test_start_disabled_returns_not_started(self):
+        engine = FakeEngine(mimic_enabled=False, persona_card=_SUCCESS_CARD)
+        client = self._app(engine, FakeMimicStore())
+        resp = client.post(
+            "/mimic/start",
+            json={"guild_id": "g1", "target_id": "u2", "channel_id": "c1"},
+        )
+        assert resp.json()["started"] is False
+
+    def test_start_optout_blocks(self):
+        engine = FakeEngine(mimic_enabled=True, persona_card=_SUCCESS_CARD)
+        store = FakeMimicStore(consent="optout")
+        client = self._app(engine, store)
+        resp = client.post(
+            "/mimic/start",
+            json={"guild_id": "g1", "target_id": "u2", "channel_id": "c1"},
+        )
+        body = resp.json()
+        assert body["started"] is False and body["reason"]
+        # optout は素材取得もカード生成もしない（コスト0）
+        assert engine.persona_calls == []
+        assert store.saved == []
+
+    def test_start_no_samples_returns_not_started(self):
+        engine = FakeEngine(mimic_enabled=True, persona_card=_SUCCESS_CARD)
+        store = FakeMimicStore(samples=[])
+        client = self._app(engine, store)
+        resp = client.post(
+            "/mimic/start",
+            json={"guild_id": "g1", "target_id": "u2", "channel_id": "c1"},
+        )
+        assert resp.json()["started"] is False
+
+    def test_start_empty_card_returns_not_started(self):
+        engine = FakeEngine(mimic_enabled=True, persona_card=None)
+        store = FakeMimicStore()
+        client = self._app(engine, store)
+        resp = client.post(
+            "/mimic/start",
+            json={"guild_id": "g1", "target_id": "u2", "channel_id": "c1"},
+        )
+        assert resp.json()["started"] is False
+        assert store.saved == []
+
+    def test_start_success(self):
+        engine = FakeEngine(mimic_enabled=True, persona_card=_SUCCESS_CARD)
+        store = FakeMimicStore(name="うさぎ")
+        client = self._app(engine, store)
+        resp = client.post(
+            "/mimic/start",
+            json={
+                "guild_id": "g1", "target_id": "u2", "channel_id": "c1",
+                "target_name": "うさぎ", "user": "c1:admin",
+            },
+        )
+        body = resp.json()
+        assert body["started"] is True
+        assert body["declaration"] and "うさぎ" in body["declaration"]
+        assert store.saved and store.saved[0][1] == "u2"
+        assert store.states and store.states[0] == ("g1", "c1", "u2", "admin")
+
+    def test_stop_clears_state(self):
+        store = FakeMimicStore()
+        client = self._app(FakeEngine(mimic_enabled=True), store)
+        resp = client.post(
+            "/mimic/stop", json={"guild_id": "g1", "channel_id": "c1"}
+        )
+        assert resp.json()["stopped"] is True
+        assert store.cleared == [("g1", "c1")]
+
+    def test_optout_sets_consent(self):
+        store = FakeMimicStore()
+        client = self._app(FakeEngine(mimic_enabled=True), store)
+        resp = client.post(
+            "/mimic/optout", json={"guild_id": "g1", "target_id": "u2"}
+        )
+        assert resp.json()["ok"] is True
+        assert store.consent_set == [("g1", "u2", "optout")]
