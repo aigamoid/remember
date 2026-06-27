@@ -147,7 +147,8 @@ class VectorStore:
             res = self._client.query_points(
                 self.collection,
                 prefetch=[
-                    Prefetch(query=vector, using="", limit=pk, filter=flt),
+                    # using=None で無名（デフォルト）dense ベクトルを参照する。
+                    Prefetch(query=vector, using=None, limit=pk, filter=flt),
                     Prefetch(
                         query=SparseVector(indices=sparse[0], values=sparse[1]),
                         using=SPARSE_NAME,
