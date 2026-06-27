@@ -27,6 +27,7 @@ from src.rag.prompts import (
     build_memories,
 )
 from src.rag.reranker import Reranker
+from src.sparse import SparseEncoder
 from src.usage import compute_cost
 from src.vectorstore import VectorStore
 
@@ -42,6 +43,7 @@ class RagEngine:
         reranker: Reranker | None = None,
         trace_recorder: Callable[[dict], None] | None = None,
         memory_provider: Callable[[str], list[dict]] | None = None,
+        sparse_encoder: SparseEncoder | None = None,
     ) -> None:
         rag_cfg = cfg.get("rag", {})
         self.rewriter_model: str = rag_cfg.get(
@@ -85,6 +87,11 @@ class RagEngine:
         # 明示メモリ（OI-24）。enabled かつ memory_provider が渡された時のみ、
         # guild の「教わった事実」を回答プロンプトに全件注入する（既定オフ）。
         self.memory_enabled: bool = bool(rag_cfg.get("memory_enabled", False))
+        # ハイブリッド検索（#54）。enabled かつ sparse_encoder が渡された時のみ、dense と
+        # BM25 sparse を RRF 融合する（既定オフ＝dense-only で現行どおり）。本番ONは実データA/B後。
+        hybrid_cfg = rag_cfg.get("hybrid", {})
+        self.hybrid_enabled: bool = bool(hybrid_cfg.get("enabled", False))
+        self.hybrid_prefetch_k: int = hybrid_cfg.get("prefetch_k", 30)
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
         self.store = store
@@ -94,6 +101,7 @@ class RagEngine:
         self.reranker = reranker
         self.trace_recorder = trace_recorder
         self.memory_provider = memory_provider
+        self.sparse_encoder = sparse_encoder
 
     def _now_str(self) -> str:
         tz = timezone(timedelta(hours=self.tz_offset))
@@ -335,12 +343,22 @@ class RagEngine:
                 events, "embedding", emb_model, Usage(emb_tokens, 0, emb_tokens)
             )
 
+            # ハイブリッド検索（#54）。有効かつ encoder があれば、クエリの BM25 sparse を
+            # ローカル生成して dense と RRF 融合する（sparse はAPIコスト0）。
+            use_hybrid = self.hybrid_enabled and self.sparse_encoder is not None
+            sparse = self.sparse_encoder.encode(rewritten) if use_hybrid else None
+
             # リランク有効時は多め（rerank_top_n）に取って後で top_k に精選する。
             candidate_k = (
                 max(self.rerank_top_n, self.top_k) if use_rerank else self.top_k
             )
             hits = await asyncio.to_thread(
-                self.store.search, str(guild_id), vector, candidate_k
+                self.store.search,
+                str(guild_id),
+                vector,
+                candidate_k,
+                sparse,
+                self.hybrid_prefetch_k,
             )
             if use_rerank and hits:
                 hits = await self._rerank(rewritten, hits, events)
@@ -415,6 +433,7 @@ class RagEngine:
                 ],
                 "answer_model": comp.model,
                 "rerank_enabled": bool(use_rerank),
+                "hybrid_enabled": bool(self.hybrid_enabled and self.sparse_encoder),
                 "prompt_tokens": comp.usage.prompt_tokens,
                 "completion_tokens": comp.usage.completion_tokens,
                 "total_tokens": sum(e.get("total_tokens", 0) for e in events),
