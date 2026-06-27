@@ -64,7 +64,8 @@ def _patch_pipeline(monkeypatch, worker, crawled=5, chunks=3, contexts=2, indexe
     )
     monkeypatch.setattr(
         "src.worker.run_indexer",
-        lambda conn, cfg, store, embedder, guild_id: indexed,
+        lambda conn, cfg, store, embedder, guild_id, include_indexed=False,
+        sparse_encoder=None: indexed,
     )
 
 
