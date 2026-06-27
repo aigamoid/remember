@@ -2,8 +2,10 @@
 """ハイブリッド検索（#54）への移行スクリプト: Qdrant を sparse 付きで作り直して全再インデックス。
 
 既存コレクション `waiwai_chunks` は dense 単体で作られているため、BM25 sparse ベクトルを
-持たせるには「コレクション再作成 + 全ポイント再インデックス」が必要。データの正本は Postgres
-`chunk_index` なので Qdrant を破棄しても安全（再 embedding で復元できる）。
+持たせるには「コレクション再作成 + 全ポイント再インデックス」が必要。
+（Qdrant v1.16.1 は update_collection で既存コレクションに sparse 設定を後付けできない＝
+"Not existing vector name" になるため、drop→再作成が避けられない。）
+データの正本は Postgres `chunk_index` なので Qdrant を破棄しても安全（再 embedding で復元できる）。
 
 やること:
   1. Qdrant コレクションを drop
@@ -14,8 +16,16 @@
     python scripts/migrate_hybrid_reindex.py            # 確認プロンプトあり
     python scripts/migrate_hybrid_reindex.py --yes      # プロンプトなし
 
-注意: 実行中は検索結果が一時的に欠けるため、稼働サービスへの影響が小さい時間帯に行うこと。
-まず staging（remember-vm）で実施してから本番へ。
+## 運用手順（#57 Codex レビュー対応・必読）
+- **必ずメンテ時間帯に実行する。** drop から再インデックス完了までの間、検索結果が空/部分的になる
+  （回答が「覚えてないかも」になりうる）。Bot 利用が少ない時間に行う。
+- **まず staging（remember-vm）で実施・検証してから本番へ。**
+- **失敗時のリカバリ**: 本スクリプトを再実行すれば全再構築される（Postgres `chunk_index` が正本なので
+  何度でも復元可能・冪等）。途中失敗で部分インデックス状態になっても、再実行で解消する。
+  ロールバック相当も「再実行（または通常の `python indexer.py --all`）」で足りる。
+- **再 embedding コスト**: 全チャンクを OpenAI で再 embedding する（text-embedding-3-small・小規模なら僅少）。
+- 将来、無停止で切り替えたい場合は、別名コレクション（alias）にビルドしてからエイリアスを張り替える
+  blue-green 方式を検討する（本スクリプトの drop 方式は単純さ優先）。
 """
 
 import argparse
