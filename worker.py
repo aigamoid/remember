@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from src.config import load_config
 from src.db import get_connection
 from src.embedder import Embedder
+from src.sparse import SparseEncoder
 from src.vectorstore import VectorStore
 from src.worker import IngestWorker
 
@@ -49,10 +50,16 @@ def main() -> None:
     store.ensure_collection()
     conn = get_connection()
 
+    # ハイブリッド検索（#54）: rag.hybrid.enabled=true のときだけ取り込み時に BM25 sparse を生成。
+    sparse_encoder = None
+    if cfg.get("rag", {}).get("hybrid", {}).get("enabled", False):
+        sparse_encoder = SparseEncoder()
+
     worker = IngestWorker(
         conn, cfg, store, embedder, token,
         poll_interval=worker_cfg.get("poll_interval_seconds", 10),
         sync_interval_hours=worker_cfg.get("sync_interval_hours", 24),
+        sparse_encoder=sparse_encoder,
     )
     try:
         asyncio.run(worker.run_forever())
