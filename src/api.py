@@ -23,6 +23,7 @@ from src.config import load_config
 from src.embedder import Embedder
 from src.memory import MemoryProvider
 from src.rag.engine import RagEngine
+from src.sparse import SparseEncoder
 from src.rag.llm import ChatLLM
 from src.rag.reranker import Reranker
 from src.trace import TraceRecorder
@@ -190,10 +191,16 @@ def build_engine(cfg: dict) -> RagEngine:
     memory_provider = None
     if cfg.get("rag", {}).get("memory_enabled", False):
         memory_provider = MemoryProvider()
+    # ハイブリッド検索（#54）: rag.hybrid.enabled=true のときだけ encoder を渡す。
+    # engine 側も同フラグを見るので二重ガード（既定OFF＝dense-only）。
+    sparse_encoder = None
+    if cfg.get("rag", {}).get("hybrid", {}).get("enabled", False):
+        sparse_encoder = SparseEncoder()
     return RagEngine(
         cfg, store, embedder, llm,
         usage_recorder=UsageRecorder(), reranker=reranker,
         trace_recorder=trace_recorder, memory_provider=memory_provider,
+        sparse_encoder=sparse_encoder,
     )
 
 
