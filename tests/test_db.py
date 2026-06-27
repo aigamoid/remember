@@ -397,6 +397,52 @@ class TestPurge:
         assert count_chunks(conn, guild_id="g-2") == 1
         assert fetch_allowed_channels(conn, "g-1") == []
 
+    def _count(self, conn, table, guild_id):
+        return conn.execute(
+            f"SELECT count(*) FROM {table} WHERE guild_id = %s", (guild_id,)
+        ).fetchone()[0]
+
+    def test_purge_guild_removes_privacy_and_ops_data(self, conn):
+        """#31 (OI-44): memories/chat_trace/usage_log/guild_plans/run_log/ingest_jobs も削除する。"""
+        for gid in ("g-1", "g-2"):
+            insert_memory(conn, gid, "秘密の記憶", created_by="user-1")
+            insert_trace(conn, gid, "質問", answer="回答", user_id="user-1")
+            insert_usage(conn, gid, "answer", model="m", total_tokens=10, user_id="user-1")
+            log_run(conn, f"run-{gid}", "ingest", "ok", guild_id=gid)
+            enqueue_job(conn, gid, JOB_INGEST, requested_by="test")
+            conn.execute(
+                "INSERT INTO guild_plans (guild_id, plan_key) VALUES (%s, 'free') "
+                "ON CONFLICT (guild_id) DO NOTHING",
+                (gid,),
+            )
+        conn.commit()
+
+        stats = purge_guild_data(conn, "g-1")
+        assert stats["memories"] == 1
+        assert stats["traces"] == 1
+        assert stats["usage"] == 1
+
+        # g-1 のプライバシー・運用系は全て消える
+        for table in ("memories", "chat_trace", "usage_log", "guild_plans", "run_log", "ingest_jobs"):
+            assert self._count(conn, table, "g-1") == 0, f"{table} should be empty"
+
+        # 他guildは無傷
+        for table in ("memories", "chat_trace", "usage_log", "guild_plans", "run_log", "ingest_jobs"):
+            assert self._count(conn, table, "g-2") == 1, f"{table} g-2 should remain"
+
+    def test_purge_guild_keeps_running_purge_job(self, conn):
+        """進行中の purge ジョブ自身は finish_job が完了記録できるよう残す。"""
+        job_id = enqueue_job(conn, "g-1", JOB_INGEST, requested_by="test")
+        conn.execute(
+            "UPDATE ingest_jobs SET status = 'running' WHERE id = %s", (job_id,)
+        )
+        conn.commit()
+        purge_guild_data(conn, "g-1")
+        remaining = conn.execute(
+            "SELECT status FROM ingest_jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+        assert remaining is not None and remaining[0] == "running"
+
 
 # ── log_run ───────────────────────────────────────────────────
 
@@ -583,3 +629,113 @@ class TestMemories:
         mid = insert_memory(conn, "g-1", "他guildからは消せない")
         assert delete_memory(conn, "g-2", mid) is False
         assert count_memories(conn, "g-1") == 1
+
+
+# ── 真似っこモード personas / mimic_state（#49）─────────────────
+
+from src import db as _db  # noqa: E402
+
+
+class TestPersonas:
+    def test_upsert_and_fetch(self, conn):
+        card = {"personality": "明るい", "speech_style": "〜っす"}
+        _db.upsert_persona_card(conn, "g1", "u1", "うさぎ", card, 42, created_by="adm")
+        got = _db.fetch_persona_card(conn, "g1", "u1")
+        assert got["display_name"] == "うさぎ"
+        assert got["card"]["personality"] == "明るい"
+        assert got["sample_count"] == 42
+        assert got["consent"] == "unknown"
+
+    def test_fetch_missing_returns_none(self, conn):
+        assert _db.fetch_persona_card(conn, "g1", "nope") is None
+
+    def test_upsert_overwrites_card_keeps_consent(self, conn):
+        _db.set_persona_consent(conn, "g1", "u1", "optout")
+        _db.upsert_persona_card(conn, "g1", "u1", "うさぎ", {"personality": "X"}, 1)
+        got = _db.fetch_persona_card(conn, "g1", "u1")
+        assert got["card"]["personality"] == "X"
+        assert got["consent"] == "optout"  # consent は upsert で壊さない
+
+    def test_consent_row_created_when_absent(self, conn):
+        # カード未生成でも opt-out できる（consent だけの行が先に作られる）
+        _db.set_persona_consent(conn, "g1", "u9", "optout")
+        assert _db.get_persona_consent(conn, "g1", "u9") == "optout"
+
+    def test_get_consent_default_unknown(self, conn):
+        assert _db.get_persona_consent(conn, "g1", "none") == "unknown"
+
+    def test_delete_persona(self, conn):
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        assert _db.delete_persona_card(conn, "g1", "u1") is True
+        assert _db.fetch_persona_card(conn, "g1", "u1") is None
+
+
+class TestFetchMemberMessages:
+    def test_filters_guild_author_and_empty(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g1", author_id="u1",
+                                           content="あ", timestamp="2024-01-01T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m2", guild_id="g1", author_id="u1",
+                                           content="", has_attachment=True,
+                                           timestamp="2024-01-02T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m3", guild_id="g1", author_id="u2",
+                                           content="別人", timestamp="2024-01-03T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m4", guild_id="g2", author_id="u1",
+                                           content="別guild", timestamp="2024-01-04T00:00:00+00:00"))
+        rows = _db.fetch_member_messages(conn, "g1", "u1")
+        contents = [r["content"] for r in rows]
+        assert contents == ["あ"]  # 空content・別author・別guildは除外
+
+    def test_limit(self, conn):
+        for i in range(5):
+            insert_message(conn, _make_message(
+                id=f"m{i}", guild_id="g1", author_id="u1", content=f"c{i}",
+                timestamp=f"2024-01-0{i+1}T00:00:00+00:00"))
+        rows = _db.fetch_member_messages(conn, "g1", "u1", limit=3)
+        assert len(rows) == 3
+
+    def test_resolve_member_name_latest(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g1", author_id="u1",
+                                           author_name="旧名", timestamp="2024-01-01T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m2", guild_id="g1", author_id="u1",
+                                           author_name="新名", timestamp="2024-02-01T00:00:00+00:00"))
+        assert _db.resolve_member_name(conn, "g1", "u1") == "新名"
+
+
+class TestMimicState:
+    def test_set_get_clear(self, conn):
+        _db.set_mimic_state(conn, "g1", "c1", "u1", started_by="adm")
+        st = _db.get_active_mimic(conn, "g1", "c1")
+        assert st["author_id"] == "u1" and st["started_by"] == "adm"
+        assert _db.clear_mimic_state(conn, "g1", "c1") is True
+        assert _db.get_active_mimic(conn, "g1", "c1") is None
+
+    def test_no_guild_fallback(self, conn):
+        # channel 行のみ解決。別 channel には漏れない（guild fallback しない）
+        _db.set_mimic_state(conn, "g1", "c1", "u1")
+        assert _db.get_active_mimic(conn, "g1", "c2") is None
+
+    def test_one_target_per_channel(self, conn):
+        _db.set_mimic_state(conn, "g1", "c1", "u1")
+        _db.set_mimic_state(conn, "g1", "c1", "u2")  # 上書き
+        assert _db.get_active_mimic(conn, "g1", "c1")["author_id"] == "u2"
+
+
+class TestMimicPurgeIntegrity:
+    def test_purge_channel_keeps_personas_clears_state(self, conn):
+        # personas は guild 資産＝ch削除で残る。mimic_state は該当chだけ消える。
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        _db.set_mimic_state(conn, "g1", "ch-1", "u1")
+        _db.set_mimic_state(conn, "g1", "ch-2", "u1")
+        from src.db import purge_channel_data
+        purge_channel_data(conn, "g1", "ch-1")
+        assert _db.fetch_persona_card(conn, "g1", "u1") is not None   # 残る
+        assert _db.get_active_mimic(conn, "g1", "ch-1") is None       # 該当ch消える
+        assert _db.get_active_mimic(conn, "g1", "ch-2") is not None   # 他chは無傷
+
+    def test_purge_guild_clears_both(self, conn):
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        _db.set_mimic_state(conn, "g1", "ch-1", "u1")
+        from src.db import purge_guild_data
+        purge_guild_data(conn, "g1")
+        assert _db.fetch_persona_card(conn, "g1", "u1") is None
+        assert _db.get_active_mimic(conn, "g1", "ch-1") is None

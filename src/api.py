@@ -22,7 +22,9 @@ from src import db, quota
 from src.config import load_config
 from src.embedder import Embedder
 from src.memory import MemoryProvider
+from src.mimic import MimicProvider, MimicStore
 from src.rag.engine import RagEngine
+from src.rag.prompts import build_mimic_declaration
 from src.sparse import SparseEncoder
 from src.rag.llm import ChatLLM
 from src.rag.reranker import Reranker
@@ -38,6 +40,17 @@ def _parse_user_id(user: Optional[str]) -> Optional[str]:
     if not user:
         return None
     return user.rsplit(":", 1)[-1] or None
+
+
+def _parse_channel_id(user: Optional[str]) -> Optional[str]:
+    """旧 user 文字列（"channel_id:user_id"）から channel_id を取り出す（#49・移行用）。
+
+    ChatRequest.channel_id が正典（設計 §0）。未指定時の後方互換として user から復元する。
+    ":" を含まない場合は channel 情報なしとみなす（None）。
+    """
+    if not user or ":" not in user:
+        return None
+    return user.rsplit(":", 1)[0] or None
 
 
 def _verify_api_token(configured_token: Optional[str], supplied_token: Optional[str]) -> None:
@@ -130,6 +143,9 @@ class ChatRequest(BaseModel):
     history: Optional[list[dict]] = None
     # いま話しかけている人の表示名（OI-22）。回答プロンプトに差し込む（任意）。
     speaker: Optional[str] = None
+    # 発言があったチャンネルID（#49）。真似っこモードの状態解決に使う正典。
+    # 未指定なら後方互換で user（"channel_id:user_id"）から復元する。
+    channel_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -150,6 +166,40 @@ class RememberResponse(BaseModel):
     saved: bool
     subject: Optional[str] = None
     content: Optional[str] = None
+
+
+class MimicStartRequest(BaseModel):
+    guild_id: str
+    target_id: str            # 真似する対象メンバーの Discord ユーザーID
+    channel_id: str           # 真似を効かせる channel（scope=channel 固定）
+    target_name: Optional[str] = None  # 表示名（未指定なら過去ログから解決）
+    user: Optional[str] = None         # 実行者（ログ用・"channel_id:user_id"）
+
+
+class MimicStartResponse(BaseModel):
+    started: bool
+    declaration: Optional[str] = None  # 開始時の宣言文（成功時）
+    reason: Optional[str] = None       # 失敗理由（optout/素材不足/無効 等）
+    sample_count: int = 0
+
+
+class MimicStopRequest(BaseModel):
+    guild_id: str
+    channel_id: str
+
+
+class MimicStopResponse(BaseModel):
+    stopped: bool
+
+
+class MimicOptoutRequest(BaseModel):
+    guild_id: str
+    target_id: str            # opt-out する対象（通常は本人）
+    user: Optional[str] = None
+
+
+class MimicOptoutResponse(BaseModel):
+    ok: bool
 
 
 def build_engine(cfg: dict) -> RagEngine:
@@ -191,6 +241,10 @@ def build_engine(cfg: dict) -> RagEngine:
     memory_provider = None
     if cfg.get("rag", {}).get("memory_enabled", False):
         memory_provider = MemoryProvider()
+    # 真似っこ（#49）: rag.mimic_enabled=true のときだけ provider を渡す（二重ガード・既定OFF）。
+    mimic_provider = None
+    if cfg.get("rag", {}).get("mimic_enabled", False):
+        mimic_provider = MimicProvider()
     # ハイブリッド検索（#54）: rag.hybrid.enabled=true のときだけ encoder を渡す。
     # engine 側も同フラグを見るので二重ガード（既定OFF＝dense-only）。
     sparse_encoder = None
@@ -200,6 +254,7 @@ def build_engine(cfg: dict) -> RagEngine:
         cfg, store, embedder, llm,
         usage_recorder=UsageRecorder(), reranker=reranker,
         trace_recorder=trace_recorder, memory_provider=memory_provider,
+        mimic_provider=mimic_provider,
         sparse_encoder=sparse_encoder,
     )
 
@@ -208,6 +263,7 @@ def create_app(
     engine: Optional[RagEngine] = None,
     quota_checker: Optional[Callable[[str], Optional[str]]] = None,
     memory_saver: Optional[Callable[..., bool]] = None,
+    mimic_store: Optional[object] = None,
     api_token: Optional[str] | object = _ENV_API_TOKEN,
 ) -> FastAPI:
     """アプリを生成する。engine / quota_checker / memory_saver を渡すとテスト用に差し替えられる。
@@ -221,6 +277,7 @@ def create_app(
     app.state.engine = engine
     app.state.quota_checker = quota_checker
     app.state.memory_saver = memory_saver
+    app.state.mimic_store = mimic_store
     app.state.api_token = (
         os.getenv("ORACLE_API_TOKEN") if api_token is _ENV_API_TOKEN else api_token
     )
@@ -234,6 +291,8 @@ def create_app(
             app.state.quota_checker = default_quota_checker
         if app.state.memory_saver is None:
             app.state.memory_saver = default_memory_saver
+        if app.state.mimic_store is None:
+            app.state.mimic_store = MimicStore()
         # 各テーブルを用意（DB未起動でも /chat は動くので失敗は無視）
         try:
             conn = db.get_connection(init=True)
@@ -259,10 +318,12 @@ def create_app(
             message = await asyncio.to_thread(checker, req.guild_id)
             if message:
                 return ChatResponse(answer=message, rewritten_query="", sources=[])
+        # channel_id は新フィールドが正典。未指定なら旧 user 埋め込みから復元（#49・移行）。
+        channel_id = req.channel_id or _parse_channel_id(req.user)
         result = await app.state.engine.answer(
             req.guild_id, req.query, guild_name=req.guild_name,
             user_id=_parse_user_id(req.user), history=req.history,
-            speaker_name=req.speaker,
+            speaker_name=req.speaker, channel_id=channel_id,
         )
         return ChatResponse(**result)
 
@@ -300,6 +361,101 @@ def create_app(
         return RememberResponse(
             saved=True, subject=extracted["subject"], content=extracted["content"]
         )
+
+    @app.post("/mimic/start", response_model=MimicStartResponse)
+    async def mimic_start(
+        req: MimicStartRequest,
+        x_oracle_token: Optional[str] = Header(default=None),
+    ) -> MimicStartResponse:
+        """対象者をプロファイリングして真似を開始する（#49）。
+
+        mimic 無効・opt-out・素材不足のいずれも started=false（カード生成もしない＝コスト最小）。
+        """
+        _verify_api_token(app.state.api_token, x_oracle_token)
+        engine = app.state.engine
+        store = app.state.mimic_store
+        if not getattr(engine, "mimic_enabled", False) or store is None:
+            return MimicStartResponse(started=False, reason="真似っこ機能はいま無効だよ〜")
+        # opt-out 本人は真似しない（強制点・設計 §2）。
+        consent = await asyncio.to_thread(
+            store.get_consent, req.guild_id, req.target_id
+        )
+        if consent == "optout":
+            return MimicStartResponse(
+                started=False,
+                reason="この人は『真似しないで』設定にしてるみたい。やめておくね",
+            )
+        samples = await asyncio.to_thread(
+            store.fetch_samples, req.guild_id, req.target_id,
+            getattr(engine, "mimic_sample_limit", 300),
+        )
+        if not samples:
+            return MimicStartResponse(
+                started=False,
+                reason="その人の発言がまだ見つからないかも。取り込み済みか確認してね",
+            )
+        display_name = (
+            req.target_name
+            or await asyncio.to_thread(
+                store.resolve_name, req.guild_id, req.target_id
+            )
+            or "その人"
+        )
+        user_id = _parse_user_id(req.user)
+        card = await engine.build_persona_card(
+            req.guild_id, display_name, samples, user_id=user_id
+        )
+        if not card:
+            return MimicStartResponse(
+                started=False, sample_count=len(samples),
+                reason="うまく特徴がつかめなかった…発言が少ないか、似せられそうにないみたい",
+            )
+        await asyncio.to_thread(
+            store.save_card, req.guild_id, req.target_id, display_name,
+            card, len(samples), user_id,
+        )
+        await asyncio.to_thread(
+            store.set_state, req.guild_id, req.channel_id, req.target_id, user_id
+        )
+        return MimicStartResponse(
+            started=True,
+            declaration=build_mimic_declaration(card, display_name),
+            sample_count=len(samples),
+        )
+
+    @app.post("/mimic/stop", response_model=MimicStopResponse)
+    async def mimic_stop(
+        req: MimicStopRequest,
+        x_oracle_token: Optional[str] = Header(default=None),
+    ) -> MimicStopResponse:
+        """その channel の真似を解除する（#49）。"""
+        _verify_api_token(app.state.api_token, x_oracle_token)
+        store = app.state.mimic_store
+        if store is None:
+            return MimicStopResponse(stopped=False)
+        stopped = await asyncio.to_thread(
+            store.clear_state, req.guild_id, req.channel_id
+        )
+        return MimicStopResponse(stopped=bool(stopped))
+
+    @app.post("/mimic/optout", response_model=MimicOptoutResponse)
+    async def mimic_optout(
+        req: MimicOptoutRequest,
+        x_oracle_token: Optional[str] = Header(default=None),
+    ) -> MimicOptoutResponse:
+        """本人を真似対象から除外する（opt-out・#49・本人/管理者が実行）。"""
+        _verify_api_token(app.state.api_token, x_oracle_token)
+        store = app.state.mimic_store
+        if store is None:
+            return MimicOptoutResponse(ok=False)
+        try:
+            await asyncio.to_thread(
+                store.set_consent, req.guild_id, req.target_id, "optout"
+            )
+        except Exception as e:
+            print(f"[WARN] opt-out 失敗: {e}")
+            return MimicOptoutResponse(ok=False)
+        return MimicOptoutResponse(ok=True)
 
     return app
 
