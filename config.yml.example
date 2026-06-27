@@ -40,6 +40,9 @@ rag:
   debug_trace: false                          # OI-21: 質問/ヒットチャンク/回答を chat_trace に保存（デバッグ用・既定OFF）。本番はプライバシー上 false 推奨
   memory_enabled: false                       # OI-24: 「覚えておいて」で教わった事実(memories)を回答プロンプトに注入（既定OFF）
   search_gate: true                           # OI-23: 雑談/挨拶/一般質問など過去ログ参照が不要な入力は検索をスキップ（コスト/レイテンシ削減・既定ON）。Rewriterが[NO_SEARCH]判定したら検索しない
+  hybrid:                                     # #54: ハイブリッド検索（dense + BM25 sparse を RRF融合）。日本語はSudachiPyで分割
+    enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから（要: 全チャンク再インデックス）
+    prefetch_k: 30                            # 各レーン(dense/sparse)で融合前に取る候補数
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（APIキー JINA_API_KEY が必要）
     provider: "jina"                          # 現状 jina のみ対応
