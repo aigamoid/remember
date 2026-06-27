@@ -93,14 +93,16 @@ async def _run(guild_id: str, golden: list[dict]) -> None:
     print(f"guild_id={guild_id} / top_k={top_k} / prefetch_k={prefetch_k}")
     print(f"Qdrant点数(このguild): {store.count(guild_id)}\n")
 
-    dense_hits = hybrid_hits = 0
     dense_lat: list[float] = []
     hybrid_lat: list[float] = []
-    scored = 0  # expect_any のある（ヒット判定可能な）質問数
+    # カテゴリ別に [dense命中数, hybrid命中数, 採点対象数] を集計する。
+    # category 未指定の項目は "（未分類）" にまとめる。
+    cats: dict[str, list[int]] = {}
 
     for item in golden:
         q = item["question"]
         expect_any = item.get("expect_any", [])
+        category = item.get("category", "（未分類）")
         rewritten = await engine.rewrite(q)
         vector = await asyncio.to_thread(embedder.embed_one, rewritten)
         sparse = sparse_encoder.encode(rewritten)
@@ -116,35 +118,45 @@ async def _run(guild_id: str, golden: list[dict]) -> None:
         hybrid_lat.append((time.perf_counter() - t0) * 1000)
 
         print("=" * 70)
-        print(f"Q: {q}\n  書き換え: {rewritten}")
+        print(f"[{category}] Q: {q}\n  書き換え: {rewritten}")
         if expect_any:
-            scored += 1
             dh, hh = _hit(d, expect_any), _hit(h, expect_any)
-            dense_hits += int(dh)
-            hybrid_hits += int(hh)
+            agg = cats.setdefault(category, [0, 0, 0])
+            agg[0] += int(dh)
+            agg[1] += int(hh)
+            agg[2] += 1
+            mark = "  ← hybridで改善" if hh and not dh else (
+                "  ← hybridで悪化" if dh and not hh else ""
+            )
             print(f"  expect_any={expect_any}")
-            print(f"  dense  ヒット: {'○' if dh else '×'}")
-            print(f"  hybrid ヒット: {'○' if hh else '×'}")
+            print(f"  dense ヒット:{'○' if dh else '×'}  "
+                  f"hybrid ヒット:{'○' if hh else '×'}{mark}")
         print(f"  dense  上位: {[c.get('channel_name') for c in d]}")
         print(f"  hybrid 上位: {[c.get('channel_name') for c in h]}")
 
+    d_tot = sum(c[0] for c in cats.values())
+    h_tot = sum(c[1] for c in cats.values())
+    n_tot = sum(c[2] for c in cats.values())
+
     print("\n" + "=" * 70)
-    print("【集計】")
-    if scored:
-        print(
-            f"  ヒット率(top_{top_k}): "
-            f"dense={dense_hits}/{scored}={dense_hits / scored:.1%}  "
-            f"hybrid={hybrid_hits}/{scored}={hybrid_hits / scored:.1%}"
-        )
+    print("【カテゴリ別ヒット率（recall@%d)】" % top_k)
+    if n_tot:
+        print(f"  {'カテゴリ':<16}{'dense':>10}{'hybrid':>10}{'n':>5}")
+        for cat, (dn, hn, n) in cats.items():
+            print(f"  {cat:<16}{dn / n:>9.0%}{hn / n:>10.0%}{n:>5}")
+        print(f"  {'── 全体':<16}{d_tot / n_tot:>9.0%}{h_tot / n_tot:>10.0%}{n_tot:>5}")
     else:
         print("  （expect_any 付きの質問が無いためヒット率は未計測）")
     print(
-        f"  latency p95: dense={_p95(dense_lat):.0f}ms  "
+        f"\n  latency p95: dense={_p95(dense_lat):.0f}ms  "
         f"hybrid={_p95(hybrid_lat):.0f}ms"
     )
     print(
-        "\n判定: hybrid のヒット率が dense を明確に上回り、latency が許容内なら "
-        "config.yml の rag.hybrid.enabled を true にする（#54 のゲート）。"
+        "\n判定の目安（#54 のゲート）:\n"
+        "  - 固有名詞系で hybrid が dense を上回る（取りこぼし救済）\n"
+        "  - 意味系で hybrid が dense を下回らない（RRFがdenseの強みを壊さない）\n"
+        "  - latency が許容内\n"
+        "  → 満たせば config.yml の rag.hybrid.enabled を true にする。"
     )
 
 
