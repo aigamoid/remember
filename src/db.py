@@ -764,7 +764,14 @@ def purge_channel_data(
 
 
 def purge_guild_data(conn: psycopg.Connection, guild_id: str) -> dict:
-    """1サーバー分の全データ（許可チャンネル設定含む）を削除する。guilds 行は left_at を残す。"""
+    """1サーバー分の全データを削除する。guilds 行は left_at を墓標として残す。
+
+    README の「Bot退出で guild_id のデータは全削除」(#31 / OI-44) を満たすため、
+    取り込みデータ（messages/attachments/chunk_index/crawl_state/allowed_channels）に加え、
+    ユーザー由来・課金・運用系（memories/chat_trace/usage_log/guild_plans/run_log/ingest_jobs）も削除する。
+    特に memories・chat_trace はユーザー発話・明示記憶・ヒットチャンク本文を含むため必須（プライバシー）。
+    進行中の purge ジョブ自身（status='running'）だけは finish_job が完了記録できるよう残す。
+    """
     atts = conn.execute(
         """
         DELETE FROM attachments WHERE message_id IN (
@@ -781,11 +788,35 @@ def purge_guild_data(conn: psycopg.Connection, guild_id: str) -> dict:
     ).rowcount
     conn.execute("DELETE FROM crawl_state WHERE guild_id = %s", (guild_id,))
     conn.execute("DELETE FROM allowed_channels WHERE guild_id = %s", (guild_id,))
+    # --- #31 (OI-44): プライバシー上残してはいけないユーザー由来・課金・運用系データ ---
+    memories = conn.execute(
+        "DELETE FROM memories WHERE guild_id = %s", (guild_id,)
+    ).rowcount
+    traces = conn.execute(
+        "DELETE FROM chat_trace WHERE guild_id = %s", (guild_id,)
+    ).rowcount
+    usage = conn.execute(
+        "DELETE FROM usage_log WHERE guild_id = %s", (guild_id,)
+    ).rowcount
+    conn.execute("DELETE FROM guild_plans WHERE guild_id = %s", (guild_id,))
+    conn.execute("DELETE FROM run_log WHERE guild_id = %s", (guild_id,))
+    # 進行中の purge ジョブ自身は finish_job が完了記録できるよう残す
+    conn.execute(
+        "DELETE FROM ingest_jobs WHERE guild_id = %s AND status != 'running'",
+        (guild_id,),
+    )
     # 真似っこ（#49）: guild 退出/purge では人格カードと真似中状態も全削除する。
     conn.execute("DELETE FROM personas WHERE guild_id = %s", (guild_id,))
     conn.execute("DELETE FROM mimic_state WHERE guild_id = %s", (guild_id,))
     conn.commit()
-    return {"messages": msgs, "attachments": atts, "chunks": chunks}
+    return {
+        "messages": msgs,
+        "attachments": atts,
+        "chunks": chunks,
+        "memories": memories,
+        "traces": traces,
+        "usage": usage,
+    }
 
 
 # ---- run_log ----

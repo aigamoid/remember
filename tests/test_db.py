@@ -397,6 +397,52 @@ class TestPurge:
         assert count_chunks(conn, guild_id="g-2") == 1
         assert fetch_allowed_channels(conn, "g-1") == []
 
+    def _count(self, conn, table, guild_id):
+        return conn.execute(
+            f"SELECT count(*) FROM {table} WHERE guild_id = %s", (guild_id,)
+        ).fetchone()[0]
+
+    def test_purge_guild_removes_privacy_and_ops_data(self, conn):
+        """#31 (OI-44): memories/chat_trace/usage_log/guild_plans/run_log/ingest_jobs も削除する。"""
+        for gid in ("g-1", "g-2"):
+            insert_memory(conn, gid, "秘密の記憶", created_by="user-1")
+            insert_trace(conn, gid, "質問", answer="回答", user_id="user-1")
+            insert_usage(conn, gid, "answer", model="m", total_tokens=10, user_id="user-1")
+            log_run(conn, f"run-{gid}", "ingest", "ok", guild_id=gid)
+            enqueue_job(conn, gid, JOB_INGEST, requested_by="test")
+            conn.execute(
+                "INSERT INTO guild_plans (guild_id, plan_key) VALUES (%s, 'free') "
+                "ON CONFLICT (guild_id) DO NOTHING",
+                (gid,),
+            )
+        conn.commit()
+
+        stats = purge_guild_data(conn, "g-1")
+        assert stats["memories"] == 1
+        assert stats["traces"] == 1
+        assert stats["usage"] == 1
+
+        # g-1 のプライバシー・運用系は全て消える
+        for table in ("memories", "chat_trace", "usage_log", "guild_plans", "run_log", "ingest_jobs"):
+            assert self._count(conn, table, "g-1") == 0, f"{table} should be empty"
+
+        # 他guildは無傷
+        for table in ("memories", "chat_trace", "usage_log", "guild_plans", "run_log", "ingest_jobs"):
+            assert self._count(conn, table, "g-2") == 1, f"{table} g-2 should remain"
+
+    def test_purge_guild_keeps_running_purge_job(self, conn):
+        """進行中の purge ジョブ自身は finish_job が完了記録できるよう残す。"""
+        job_id = enqueue_job(conn, "g-1", JOB_INGEST, requested_by="test")
+        conn.execute(
+            "UPDATE ingest_jobs SET status = 'running' WHERE id = %s", (job_id,)
+        )
+        conn.commit()
+        purge_guild_data(conn, "g-1")
+        remaining = conn.execute(
+            "SELECT status FROM ingest_jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+        assert remaining is not None and remaining[0] == "running"
+
 
 # ── log_run ───────────────────────────────────────────────────
 
