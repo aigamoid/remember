@@ -56,7 +56,13 @@ class SparseEncoder:
 
     @staticmethod
     def _term_id(token: str) -> int:
-        """語を 31bit の安定した次元IDに変換する（プロセス間で不変）。"""
+        """語を 31bit の安定した次元IDに変換する（プロセス間で不変）。
+
+        注: 31bit 空間へのハッシュなので、語彙が非常に大きくなると別語が同一IDに衝突して
+        誤一致しうる（誕生日のパラドックス的に数万語規模から無視できない確率になる）。
+        現状の guild あたりの語彙規模では実用上問題ない想定。将来コーパスが巨大化したら
+        ビット幅拡張や fastembed Bm25（語彙管理つき）への差し替えを検討する（#57 Codex 指摘）。
+        """
         return zlib.crc32(token.encode("utf-8")) & 0x7FFFFFFF
 
     def encode(self, text: str) -> tuple[list[int], list[float]]:
