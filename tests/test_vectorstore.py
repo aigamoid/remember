@@ -88,6 +88,58 @@ class TestSearch:
         assert len(store.search("g1", _vec(1.0), top_k=3)) == 3
 
 
+class TestHybridSearch:
+    """dense + BM25 sparse の RRF 融合（#54）。"""
+
+    def test_upsert_with_sparse_and_count(self, store):
+        store.ensure_collection()
+        store.upsert(
+            [_payload("c1"), _payload("c2")],
+            [_vec(1.0), _vec(0.9)],
+            [([101, 202], [2.0, 1.0]), ([303], [1.0])],
+        )
+        assert store.count() == 2
+
+    def test_sparse_lane_boosts_keyword_match(self, store):
+        # dense はほぼ同等（共線）にして、sparse 一致の差だけで順位が決まるようにする。
+        store.ensure_collection()
+        store.upsert(
+            [_payload("c1", text="かにじる"), _payload("c2", text="別件")],
+            [_vec(0.9), _vec(0.9)],
+            [([101], [1.0]), ([303], [1.0])],
+        )
+        # クエリ sparse は c1 の語(101)だけにヒット → c1 が上位
+        hits = store.search(
+            "g1", _vec(0.9), top_k=5, sparse=([101], [1.0]), prefetch_k=10
+        )
+        assert hits[0]["chunk_id"] == "c1"
+
+    def test_empty_sparse_falls_back_to_dense(self, store):
+        store.ensure_collection()
+        store.upsert([_payload("c1")], [_vec(1.0)], [([101], [1.0])])
+        # sparse の indices が空なら dense-only パス（例外にならず結果が返る）
+        hits = store.search("g1", _vec(1.0), top_k=5, sparse=([], []))
+        assert len(hits) == 1
+        assert hits[0]["chunk_id"] == "c1"
+
+    def test_hybrid_respects_guild_filter(self, store):
+        store.ensure_collection()
+        store.upsert(
+            [_payload("c1", guild_id="g1"), _payload("c2", guild_id="g2")],
+            [_vec(1.0), _vec(1.0)],
+            [([101], [1.0]), ([101], [1.0])],
+        )
+        hits = store.search("g1", _vec(1.0), top_k=10, sparse=([101], [1.0]))
+        assert all(h["guild_id"] == "g1" for h in hits)
+
+    def test_dense_only_still_works_without_sparse(self, store):
+        # sparse 未指定なら従来どおり dense-only（後方互換）
+        store.ensure_collection()
+        store.upsert([_payload("c1")], [_vec(1.0)])
+        hits = store.search("g1", _vec(1.0), top_k=5)
+        assert len(hits) == 1
+
+
 class TestCount:
     def test_count_by_guild(self, store):
         store.ensure_collection()
