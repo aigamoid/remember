@@ -36,6 +36,7 @@ from src.db import (
 )
 from src.embedder import Embedder
 from src.indexer import run_indexer
+from src.sparse import SparseEncoder
 from src.vectorstore import VectorStore
 
 
@@ -49,6 +50,7 @@ class IngestWorker:
         token: str,
         poll_interval: float = 10.0,
         sync_interval_hours: float = 24.0,
+        sparse_encoder: SparseEncoder | None = None,
     ) -> None:
         self._conn = conn
         self._cfg = cfg
@@ -57,6 +59,8 @@ class IngestWorker:
         self._token = token
         self._poll_interval = poll_interval
         self._sync_interval_hours = sync_interval_hours
+        # ハイブリッド検索（#54）。あれば取り込み時に BM25 sparse も生成・格納する。
+        self._sparse_encoder = sparse_encoder
 
     async def run_forever(self) -> None:
         print(
@@ -128,7 +132,14 @@ class IngestWorker:
         )
         self._conn.commit()
         indexed = await asyncio.to_thread(
-            run_indexer, self._conn, self._cfg, self._store, self._embedder, guild_id
+            run_indexer,
+            self._conn,
+            self._cfg,
+            self._store,
+            self._embedder,
+            guild_id,
+            False,
+            self._sparse_encoder,
         )
         self._conn.commit()
 

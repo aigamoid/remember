@@ -45,6 +45,9 @@ rag:
     sample_limit: 300                         # 人格カード生成時に対象者の発言を最大何件まで使うか
     min_sample_count: 30                      # これ未満は confidence=low（特徴が薄ければ開始を断ることもある）
     require_optin: false                      # MVPは false。公開/課金前は true（本人の事前同意を必須化）にする
+  hybrid:                                     # #54: ハイブリッド検索（dense + BM25 sparse を RRF融合）。日本語はSudachiPyで分割
+    enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから（要: 全チャンク再インデックス）
+    prefetch_k: 30                            # 各レーン(dense/sparse)で融合前に取る候補数
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（APIキー JINA_API_KEY が必要）
     provider: "jina"                          # 現状 jina のみ対応

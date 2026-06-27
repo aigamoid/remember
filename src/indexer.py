@@ -6,6 +6,7 @@ import psycopg
 
 from src.db import fetch_chunks_for_indexing, mark_chunks_indexed
 from src.embedder import Embedder
+from src.sparse import SparseEncoder
 from src.vectorstore import VectorStore
 
 
@@ -24,11 +25,15 @@ def run_indexer(
     embedder: Embedder,
     guild_id: str | None = None,
     include_indexed: bool = False,
+    sparse_encoder: SparseEncoder | None = None,
 ) -> int:
     """未インデックスのチャンクを Qdrant に登録する。登録件数を返す。
 
     guild_id を指定すると、そのサーバーのチャンクだけを処理する（ワーカーが使用）。
     payload の guild_id は DB の行から取るため、複数サーバーが混在していても安全。
+
+    sparse_encoder を渡すと dense と一緒に BM25 sparse ベクトルも生成・格納する
+    （ハイブリッド検索用・#54）。None なら dense のみ（従来挙動）。
     """
     batch_size: int = cfg.get("embedding", {}).get("batch_size", 100)
 
@@ -50,6 +55,9 @@ def run_indexer(
             for _, _, _, _, chunk_text, context_text, _ in batch
         ]
         vectors = embedder.embed(texts)
+        sparse_vectors = (
+            sparse_encoder.encode_many(texts) if sparse_encoder is not None else None
+        )
         payloads = [
             {
                 "guild_id": row_guild_id,
@@ -62,7 +70,7 @@ def run_indexer(
             }
             for chunk_id, row_guild_id, channel_id, channel_name, chunk_text, context_text, anchor_ts in batch
         ]
-        store.upsert(payloads, vectors)
+        store.upsert(payloads, vectors, sparse_vectors)
         mark_chunks_indexed(conn, [p["chunk_id"] for p in payloads])
         conn.commit()
 

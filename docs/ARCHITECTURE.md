@@ -29,7 +29,8 @@ waiwai-oracle/
 │   ├── contextualizer.py  # LLMによる context_text 付与ロジック（Phase 2.5）
 │   ├── exporter.py        # chunk_index → output/*.txt 出力（旧Dify用・任意）
 │   ├── embedder.py        # OpenAI Embedding APIラッパー
-│   ├── vectorstore.py     # Qdrant操作（guild_idマルチテナント前提・purge対応）
+│   ├── sparse.py          # BM25 sparse 変換（SudachiPy分割・ハイブリッド検索用 #54）
+│   ├── vectorstore.py     # Qdrant操作（guild_idマルチテナント前提・purge対応・dense+sparse）
 │   ├── indexer.py         # チャンク → embedding → Qdrant 登録（Phase 4）
 │   ├── worker.py          # 取り込みワーカー（ingest_jobsキュー処理・定期sync）
 │   ├── rag/

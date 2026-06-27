@@ -20,6 +20,7 @@ from src.rag.prompts import (
     sanitize_persona_card,
 )
 from src.rag.reranker import RerankResult
+from src.sparse import SparseEncoder
 from src.vectorstore import VectorStore
 
 
@@ -894,6 +895,75 @@ class TestSearchGate:
         )
         assert result["search_skipped"] is True
         assert reranker.calls == []
+
+
+# ── ハイブリッド検索（#54：dense + BM25 sparse / RRF）─────────────────────────
+
+def _ws_sparse() -> SparseEncoder:
+    return SparseEncoder(splitter=lambda t: t.split())
+
+
+def _engine_hybrid(store, llm, enabled=True, encoder=None) -> RagEngine:
+    cfg = {"rag": {"top_k": 5, "hybrid": {"enabled": enabled, "prefetch_k": 10}}}
+    return RagEngine(
+        cfg, store, FakeEmbedder(), llm,
+        sparse_encoder=encoder if encoder is not None else _ws_sparse(),
+    )
+
+
+def _seed_with_sparse(store, channel, sparse, guild_id="g1", chunk_id=None):
+    """dense は共線（[1,0,0,0]）にして sparse 一致だけで順位が決まるよう種をまく。"""
+    store.upsert(
+        [{
+            "guild_id": guild_id,
+            "chunk_id": chunk_id or channel,
+            "channel_id": "ch1",
+            "channel_name": channel,
+            "chunk_text": f"本文{channel}",
+            "context_text": None,
+            "anchor_timestamp": "2024-01-01T00:00:00+00:00",
+        }],
+        [[1.0, 0.0, 0.0, 0.0]],
+        [sparse],
+    )
+
+
+class TestHybrid:
+    def test_keyword_match_ranked_first(self, store):
+        enc = _ws_sparse()
+        _seed_with_sparse(store, "A", enc.encode("かにじる"))
+        _seed_with_sparse(store, "B", enc.encode("別の話題"))
+        # 書き換え後クエリ "かにじる" の sparse が A の語にヒット → A が上位
+        llm = FakeLLM(["かにじる", "答え"])
+        result = asyncio.run(_engine_hybrid(store, llm, encoder=enc).answer("g1", "q"))
+        assert result["sources"][0]["channel_name"] == "A"
+
+    def test_disabled_uses_dense_only(self, store):
+        # hybrid 無効なら sparse があっても dense-only 経路（クラッシュせず回答）
+        enc = _ws_sparse()
+        _seed_with_sparse(store, "A", enc.encode("かにじる"))
+        llm = FakeLLM(["かにじる", "答え"])
+        result = asyncio.run(
+            _engine_hybrid(store, llm, enabled=False, encoder=enc).answer("g1", "q")
+        )
+        assert result["answer"] == "答え"
+
+    def test_no_encoder_uses_dense_only(self, store):
+        # encoder 未注入なら enabled でも dense-only（二重ガード）
+        _seed(store)
+        cfg = {"rag": {"top_k": 5, "hybrid": {"enabled": True}}}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(cfg, store, FakeEmbedder(), llm, sparse_encoder=None)
+        result = asyncio.run(engine.answer("g1", "q"))
+        assert result["answer"] == "答え"
+
+    def test_hybrid_respects_guild_filter(self, store):
+        enc = _ws_sparse()
+        _seed_with_sparse(store, "A", enc.encode("かにじる"), guild_id="g1")
+        _seed_with_sparse(store, "B", enc.encode("かにじる"), guild_id="g2")
+        llm = FakeLLM(["かにじる", "答え"])
+        result = asyncio.run(_engine_hybrid(store, llm, encoder=enc).answer("g1", "q"))
+        assert all(s["channel_name"] == "A" for s in result["sources"])
 
 
 def _engine_mimic(store, llm, provider, enabled=True) -> RagEngine:

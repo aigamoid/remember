@@ -1,0 +1,54 @@
+[
+  {
+    "category": "固有名詞",
+    "question": "moltbookってアカウント停止されてた？",
+    "expect_any": ["Offense", "停止", "moltbook"],
+    "note": "固有名詞(moltbook)の完全一致。dense取りこぼし→hybrid救済を狙う"
+  },
+  {
+    "category": "固有名詞",
+    "question": "Nightly Buildって何？",
+    "expect_any": ["Nightly Build", "深夜ビルド"]
+  },
+  {
+    "category": "固有名詞",
+    "question": "ハコマリマックスが起こした事件は？",
+    "expect_any": ["ハコマリマックス", "本番環境インシデント"]
+  },
+  {
+    "category": "固有名詞",
+    "question": "かにじるって誰？",
+    "expect_any": ["かにじる"]
+  },
+  {
+    "category": "意味",
+    "question": "社内向けにFAQを自動で作るシステムの相談ってあった？",
+    "expect_any": ["QAポータル", "Dify", "SharePoint"],
+    "note": "言い換え質問。denseが活きる側面。hybridで悪化しないことを確認"
+  },
+  {
+    "category": "意味",
+    "question": "今まででいちばんひどかった障害の話を教えて",
+    "expect_any": ["本番環境インシデント", "ハコマリマックス", "やばかった"]
+  },
+  {
+    "category": "意味",
+    "question": "チャンネルをトピックごとに分ける案はどうなった？",
+    "expect_any": ["フォーラム", "話題別チャンネル"]
+  },
+  {
+    "category": "意味",
+    "question": "許可していないチャンネルも読まれちゃう？",
+    "expect_any": ["許可されたチャンネル", "/oracle allow"]
+  },
+  {
+    "category": "時系列",
+    "question": "ボットといちばん最初に話したのはいつ？",
+    "expect_any": ["ファーストコンタクト", "2026-02-11", "くもちゃんの誕生"]
+  },
+  {
+    "category": "時系列",
+    "question": "セマンティック検索を有効にしたときの話",
+    "expect_any": ["セマンティック検索", "OpenClaw"]
+  }
+]

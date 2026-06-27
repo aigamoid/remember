@@ -7,6 +7,7 @@ from qdrant_client import QdrantClient
 
 from src.db import fetch_chunks_for_indexing, insert_chunk
 from src.indexer import build_embed_text, run_indexer
+from src.sparse import SparseEncoder
 from src.vectorstore import VectorStore
 
 
@@ -149,6 +150,29 @@ class TestRunIndexerMultiTenant:
         run_indexer(conn, CFG, store, FakeEmbedder())  # guild指定なし=全件
         assert store.count("g-A") == 1
         assert store.count("g-B") == 1
+
+
+class TestRunIndexerHybrid:
+    """sparse_encoder を渡すと dense と一緒に BM25 sparse も格納される（#54）。"""
+
+    def test_sparse_stored_and_searchable(self, conn, store):
+        _insert_chunk_with_msg(conn, "c1", "m1")  # chunk_text="チャンクc1"
+        conn.commit()
+
+        enc = SparseEncoder(splitter=lambda t: t.split())
+        run_indexer(conn, CFG, store, FakeEmbedder(), sparse_encoder=enc)
+
+        # クエリ sparse（同じトークナイズ）でハイブリッド検索してヒットする
+        sparse = enc.encode("チャンクc1")
+        hits = store.search("12345", [1.0, 0.0, 0.0, 0.0], top_k=5, sparse=sparse)
+        assert any(h["chunk_id"] == "c1" for h in hits)
+
+    def test_without_encoder_is_dense_only(self, conn, store):
+        _insert_chunk_with_msg(conn, "c1", "m1")
+        conn.commit()
+        # encoder 無し＝従来どおり（例外なく登録できる）
+        done = run_indexer(conn, CFG, store, FakeEmbedder())
+        assert done == 1
 
 
 class TestFetchChunksForIndexing:

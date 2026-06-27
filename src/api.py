@@ -25,6 +25,7 @@ from src.memory import MemoryProvider
 from src.mimic import MimicProvider, MimicStore
 from src.rag.engine import RagEngine
 from src.rag.prompts import build_mimic_declaration
+from src.sparse import SparseEncoder
 from src.rag.llm import ChatLLM
 from src.rag.reranker import Reranker
 from src.trace import TraceRecorder
@@ -244,11 +245,17 @@ def build_engine(cfg: dict) -> RagEngine:
     mimic_provider = None
     if cfg.get("rag", {}).get("mimic_enabled", False):
         mimic_provider = MimicProvider()
+    # ハイブリッド検索（#54）: rag.hybrid.enabled=true のときだけ encoder を渡す。
+    # engine 側も同フラグを見るので二重ガード（既定OFF＝dense-only）。
+    sparse_encoder = None
+    if cfg.get("rag", {}).get("hybrid", {}).get("enabled", False):
+        sparse_encoder = SparseEncoder()
     return RagEngine(
         cfg, store, embedder, llm,
         usage_recorder=UsageRecorder(), reranker=reranker,
         trace_recorder=trace_recorder, memory_provider=memory_provider,
         mimic_provider=mimic_provider,
+        sparse_encoder=sparse_encoder,
     )
 
 
