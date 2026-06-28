@@ -28,7 +28,6 @@
 | OI-26 | [#37](https://github.com/aigamoid/waiwai-oracle/issues/37) | CDデプロイ完了をDiscordに通知する | P2 |
 | OI-28〜43 | [#33](https://github.com/aigamoid/waiwai-oracle/issues/33) | 魅力強化（リテンション）アイデア群（**epic**） | — |
 | OI-44 | [#31](https://github.com/aigamoid/waiwai-oracle/issues/31) | Bot退出/purge時の削除範囲が不完全 | P0 |
-| OI-45 | [#38](https://github.com/aigamoid/waiwai-oracle/issues/38) | /chat・/remember が無認証・guild_id クライアント指定 | P0 |
 | OI-46 | [#39](https://github.com/aigamoid/waiwai-oracle/issues/39) | /remember が quota 管理外でコスト発生・記憶汚染 | P1 |
 | OI-47 | [#40](https://github.com/aigamoid/waiwai-oracle/issues/40) | 明示メモリの安全弁が薄い | P1 |
 | OI-48 | [#41](https://github.com/aigamoid/waiwai-oracle/issues/41) | 公開/課金前の同意ログが未実装 | P1 |
@@ -92,3 +91,4 @@
 | OI-24 | 明示メモリ機能（「覚えておいて」） | PR #27 |
 | OI-25 | 全チャンネル一括許可コマンド `/oracle allowall` | 2026-06-20 |
 | OI-27 | オンボーディング `/oracle help` | 2026-06-21 |
+| OI-45 | /chat・/remember の Bot→API 共有シークレット認証（#38 / PR #50） | ✅ 完了 (2026-06-24) |
