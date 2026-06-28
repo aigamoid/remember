@@ -228,6 +228,7 @@ CREATE TABLE chat_trace (
     sources           JSONB,                 -- ヒットしたチャンク（channel/anchor/score/chunk_text 等）
     answer_model      TEXT,
     rerank_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでリランクが効いたか
+    hybrid_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでハイブリッド検索が効いたか（#54/#58）
     prompt_tokens     INTEGER DEFAULT 0,     -- 回答LLMの入力トークン
     completion_tokens INTEGER DEFAULT 0,     -- 回答LLMの出力トークン
     total_tokens      INTEGER DEFAULT 0,     -- 全LLM/embeddingの合計トークン
