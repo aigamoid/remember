@@ -1,5 +1,7 @@
 """src/db.py のテスト（実Postgresを使用・tests/conftest.py の conn フィクスチャ）"""
 
+import inspect
+
 from src.db import (
     JOB_INGEST,
     JOB_PURGE_CHANNEL,
@@ -566,6 +568,56 @@ class TestChatTrace:
         assert row[1] is None
         assert row[2] is None
         assert row[3] is False
+
+    def test_hybrid_enabled_round_trip(self, conn):
+        # #54/#58: hybrid_enabled を渡すと保存・読み戻しできる。既定は False。
+        insert_trace(conn, "g-1", "固有名詞の質問", hybrid_enabled=True)
+        insert_trace(conn, "g-2", "既定の質問")
+        conn.commit()
+        rows = dict(
+            conn.execute(
+                "SELECT guild_id, hybrid_enabled FROM chat_trace"
+            ).fetchall()
+        )
+        assert rows["g-1"] is True
+        assert rows["g-2"] is False
+
+    def test_engine_trace_row_keys_accepted(self, conn):
+        """engine が出すトレース行のキーをすべて insert_trace が受け付ける（#58 回帰）。
+
+        src/trace.py は `db.insert_trace(conn, **row)` で engine の dict をそのまま
+        kwargs 展開する。engine 側にキーを足して insert_trace の対応を忘れると
+        TypeError で全件記録失敗する（#54 マージで実際に起きた semantic conflict）。
+        この経路をテストで固定し、再発を防ぐ。
+        """
+        # src/rag/engine.py の trace 行が出すキー（増減したらここも更新する契約）
+        row = {
+            "guild_id": "g-1",
+            "user_id": "u1",
+            "question": "質問",
+            "rewritten_query": "書き換え",
+            "answer": "回答",
+            "sources": [{"channel_name": "general", "score": 0.5}],
+            "answer_model": "deepseek/deepseek-v3.2",
+            "rerank_enabled": False,
+            "hybrid_enabled": True,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost_usd": 0.001,
+            "latency_ms": 1234,
+        }
+        # 署名レベルの契約チェック（不一致キーを名指しで失敗させる）
+        accepted = set(inspect.signature(insert_trace).parameters) - {"conn"}
+        unexpected = set(row) - accepted
+        assert not unexpected, f"insert_trace が受け付けないキー: {unexpected}"
+        # 実際の **row 展開経路（trace.py と同一）も通す
+        insert_trace(conn, **row)
+        conn.commit()
+        saved = conn.execute(
+            "SELECT hybrid_enabled FROM chat_trace WHERE guild_id = 'g-1'"
+        ).fetchone()
+        assert saved[0] is True
 
 
 # ── memories（明示メモリ「覚えておいて」・OI-24）────────────────────
