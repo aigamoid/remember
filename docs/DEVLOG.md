@@ -4,6 +4,39 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-24 — #38 API認証対応（/chat・/remember の Bot→API 共有シークレット）
+
+公開/課金前の P0 セキュリティ課題 #38（旧 OI-45）として、`/chat`・`/remember` が無認証で
+`guild_id` をクライアント指定できる問題を修正した。PR #50 を `develop` にマージ済み。
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/api.py` | `ORACLE_API_TOKEN` 設定時に `X-Oracle-Token` を検証し、`/chat`・`/remember` を 401 で保護。`/health` は無認証維持 |
+| 2 | `moimoichan_Discordbot/oracle_client.py`・`bot.py` | Bot 側から `ORACLE_API_TOKEN` を読み、API呼び出し時に `X-Oracle-Token` を送信 |
+| 3 | `src/cli.py`・`chat_cli.py` | CLI 動作確認時も `ORACLE_API_TOKEN` を送信可能に変更 |
+| 4 | `docker-compose.yml` | API/admin のホスト公開を `127.0.0.1` bind に変更し、外部到達を既定で抑止 |
+| 5 | `.env.example`・`docs/CONFIG.md`・Bot config example | `ORACLE_API_TOKEN` の運用方法を追記 |
+| 6 | `tests/test_api.py`・`tests/test_cli.py` | token 無し/誤 token の 401、正 token 成功、CLI header 送信を検証 |
+
+### 決定事項
+- `ORACLE_API_TOKEN` 未設定時はローカル開発・既存テスト互換のため fail-open とする。
+- 本番/共有環境では `.env` に長いランダム文字列を設定し、api/bot の両方へ同じ値を渡す。
+- `/health` はヘルスチェック用途のため無認証で維持する。
+
+### ハマりポイント
+- PR本文の `Closes #38` は `develop` マージでは自動クローズされなかったため、マージ後に `gh issue close 38` で手動クローズした。
+- ローカル `develop` は OI移行ドキュメント9コミット分 ahead していたため、#50 マージ分を merge commit で取り込み、まとめて `origin/develop` へ push した。
+
+### 実行結果
+- `pytest`: **225 passed, 151 skipped**
+- PR: #50 / Issue: #38（クローズ済み）
+
+### 次のステップ
+- 次の P0 は #31（Bot退出/purge時の削除範囲不足）。
+- `ORACLE_API_TOKEN` を実運用 `.env` に設定し、API/Bot を再起動して認証必須状態で動作確認する。
+
+---
+
 ## 2026-06-22 — OI管理を GitHub Issues へハイブリッド移行（採番 #NN・OPEN_ISSUES 1024→94行）
 
 肥大化した `docs/OPEN_ISSUES.md`（1024行/OI 54件・手動採番 `OI-44` が2系統で衝突）を、
