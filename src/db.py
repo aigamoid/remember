@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS chat_trace (
     sources           JSONB,                 -- ヒットしたチャンク（channel/anchor/score/chunk_text 等）
     answer_model      TEXT,
     rerank_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでリランクが効いたか
+    hybrid_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでハイブリッド検索が効いたか（#54）
     prompt_tokens     INTEGER DEFAULT 0,     -- 回答LLMの入力トークン
     completion_tokens INTEGER DEFAULT 0,     -- 回答LLMの出力トークン
     total_tokens      INTEGER DEFAULT 0,     -- 全LLM/embeddingの合計トークン
@@ -231,6 +232,10 @@ CREATE INDEX IF NOT EXISTS idx_mimic_state_guild
 -- 人格カード生成時の対象者発言取得を速くする（#49）。
 CREATE INDEX IF NOT EXISTS idx_messages_guild_author_timestamp
     ON messages (guild_id, author_id, timestamp DESC);
+
+-- 後付けマイグレーション（既存DB向け・冪等）。CREATE TABLE IF NOT EXISTS は既存テーブルに
+-- 列を足さないため、後から増えた列はここで ADD COLUMN IF NOT EXISTS する。
+ALTER TABLE chat_trace ADD COLUMN IF NOT EXISTS hybrid_enabled BOOLEAN DEFAULT FALSE;  -- #54/#58
 """
 
 # ingest_jobs.kind の取りうる値
@@ -873,6 +878,7 @@ def insert_trace(
     sources: list[dict] | None = None,
     answer_model: str | None = None,
     rerank_enabled: bool = False,
+    hybrid_enabled: bool = False,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
@@ -885,13 +891,13 @@ def insert_trace(
         """
         INSERT INTO chat_trace
             (guild_id, user_id, created_at, question, rewritten_query, answer,
-             sources, answer_model, rerank_enabled, prompt_tokens,
+             sources, answer_model, rerank_enabled, hybrid_enabled, prompt_tokens,
              completion_tokens, total_tokens, cost_usd, latency_ms)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (guild_id, user_id, _now(), question, rewritten_query, answer,
          Json(sources) if sources is not None else None,
-         answer_model, rerank_enabled, prompt_tokens,
+         answer_model, rerank_enabled, hybrid_enabled, prompt_tokens,
          completion_tokens, total_tokens, cost_usd, latency_ms),
     )
 
