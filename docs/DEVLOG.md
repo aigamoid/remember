@@ -4,6 +4,38 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-28 — ハイブリッド検索(#54)を staging で本番ON＋トレース記録修正(#58)
+
+案A ハイブリッド検索(dense+BM25 sparse/RRF・#54/PR #57)を検証機 remember-vm で有効化した。
+
+- `scripts/migrate_hybrid_reindex.py` で全 2,238 チャンクを dense+sparse で再インデックス
+  （collection `waiwai_chunks` の `sparse_config={bm25:{modifier:idf}}` を確認）。
+- VM の `config.yml` に `rag.hybrid: {enabled:true, prefetch_k:30}` を手動追記
+  （config.yml は gitignore＝`git reset --hard` では入らない既知の落とし穴）→ api/bot/worker を再起動。
+- 実機検索で RRF 融合スコアが返ることを確認（cosine ではなくランク融合値）。回答品質は正常。
+
+### トレース記録バグ修正（#58 / PR #59）
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/db.py` | `chat_trace` に `hybrid_enabled BOOLEAN` 列追加（CREATE TABLE）＋既存DB向け冪等 `ALTER ... ADD COLUMN IF NOT EXISTS`。`insert_trace` に引数追加し INSERT に含める |
+| 2 | `tests/test_db.py` | engine の trace 行キーを `insert_trace` がすべて受け付けることを署名契約＋実 `**row` 展開で固定する回帰テスト |
+| 3 | `docs/SCHEMA.md` | `hybrid_enabled` 列を追記 |
+
+- 症状: api ログで `/chat` のたび `insert_trace() got an unexpected keyword argument 'hybrid_enabled'` が出て
+  トレースが**全件記録失敗**（回答は握り潰し設計のため 200 OK で正常）。
+- 原因: #54 マージ時の semantic conflict。engine 側だけ trace 行に `hybrid_enabled` を足し、
+  db.py（`insert_trace`）と `chat_trace` テーブル列の対応が抜けていた。テストは `insert_trace` を
+  直接 hybrid_enabled 無しで呼ぶため緑のまま、`**row` 経路が未カバーですり抜けた。
+- 結果: ローカル(tmpfs Postgres 5433) `test_db`+`test_rag` **169 passed**・CI 緑。
+
+### ハマりポイント
+- `Closes #58` は `develop` マージでは自動クローズされず、`gh issue close 58` で手動クローズ。
+- #57(hybrid) の自動 deploy は手動 `docker compose up` と競合して failure になったが、
+  手動 bringup で実機は #57 コードで正常稼働していた（実害なし）。
+
+---
+
 ## 2026-06-24 — #38 API認証対応（/chat・/remember の Bot→API 共有シークレット）
 
 公開/課金前の P0 セキュリティ課題 #38（旧 OI-45）として、`/chat`・`/remember` が無認証で
