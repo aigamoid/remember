@@ -1125,3 +1125,96 @@ class TestMimicBuilders:
         low = dict(_CARD, confidence="low")
         dec = build_mimic_declaration(low, "うさぎ")
         assert "自信ない" in dec
+
+
+# ── 自動記憶の抽出＋突合（#56 案C・reconcile_memories） ──────────────────────
+
+class TestReconcileMemories:
+    def test_parses_add_ops(self, store):
+        llm = FakeLLM([
+            '[{"op":"add","subject":"かに","content":"プリンが好き","target_id":null,'
+            '"reason":"新事実"}]'
+        ])
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "会話ログ", existing=[])
+        )
+        assert ops == [{
+            "op": "add", "subject": "かに", "content": "プリンが好き",
+            "target_id": None, "reason": "新事実",
+        }]
+        # 安価な rewriter_model で実行している
+        assert llm.calls[0]["model"] == _engine(store, llm).rewriter_model
+
+    def test_drops_noop_and_unknown_ops(self, store):
+        llm = FakeLLM([
+            '[{"op":"noop"},{"op":"???","content":"x"},'
+            '{"op":"add","content":"覚える"}]'
+        ])
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "log", existing=[])
+        )
+        assert [o["op"] for o in ops] == ["add"]
+        assert ops[0]["content"] == "覚える"
+
+    def test_drops_add_without_content(self, store):
+        llm = FakeLLM(['[{"op":"add","content":""},{"op":"add","content":null}]'])
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "log", existing=[])
+        )
+        assert ops == []
+
+    def test_update_requires_existing_target(self, store):
+        # target_id が existing に無い update は捨てる（ID幻覚ガード）
+        llm = FakeLLM([
+            '[{"op":"update","content":"新","target_id":999},'
+            '{"op":"update","content":"正","target_id":12}]'
+        ])
+        existing = [{"id": 12, "subject": "かに", "content": "旧"}]
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "log", existing=existing)
+        )
+        assert len(ops) == 1
+        assert ops[0]["target_id"] == 12 and ops[0]["content"] == "正"
+
+    def test_delete_requires_existing_target(self, store):
+        llm = FakeLLM(['[{"op":"delete","target_id":777}]'])
+        existing = [{"id": 1, "content": "x"}]
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "log", existing=existing)
+        )
+        assert ops == []
+
+    def test_existing_ids_rendered_in_prompt(self, store):
+        llm = FakeLLM(["[]"])
+        existing = [{"id": 42, "subject": "ぽち", "content": "猫を飼っている"}]
+        asyncio.run(
+            _engine(store, llm).reconcile_memories(
+                "g1", "log", existing=existing, guild_name="テスト鯖"
+            )
+        )
+        system = llm.calls[0]["system"]
+        assert "[42]" in system and "猫を飼っている" in system
+        assert "テスト鯖" in system
+        assert "{existing}" not in system and "{conversation}" not in system
+
+    def test_llm_failure_returns_empty(self, store):
+        llm = FakeLLM([RuntimeError("API down")])
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "log", existing=[])
+        )
+        assert ops == []
+
+    def test_broken_json_returns_empty(self, store):
+        llm = FakeLLM(["これはJSONじゃない"])
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "log", existing=[])
+        )
+        assert ops == []
+
+    def test_empty_conversation_skips_llm(self, store):
+        llm = FakeLLM([])  # 呼ばれたら IndexError
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "   ", existing=[])
+        )
+        assert ops == []
+        assert llm.calls == []
