@@ -48,6 +48,10 @@ rag:
   hybrid:                                     # #54: ハイブリッド検索（dense + BM25 sparse を RRF融合）。日本語はSudachiPyで分割
     enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから（要: 全チャンク再インデックス）
     prefetch_k: 30                            # 各レーン(dense/sparse)で融合前に取る候補数
+  auto_memory:                                # #56 案C: 会話から記憶を自動抽出して育てる（mem0方式）
+    enabled: false                            # 既定OFF。ONでも抽出は全件pending（admin承認待ち）として着地し、承認するまで回答に出ない
+    max_chunks: 30                            # 1回の取り込み後抽出で見る最近チャンク数（許可ch限定）
+    max_tokens: 800                           # 突合LLMの出力上限（JSON配列が途中で切れると抽出0件になるため広めに取る）
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（APIキー JINA_API_KEY が必要）
     provider: "jina"                          # 現状 jina のみ対応
