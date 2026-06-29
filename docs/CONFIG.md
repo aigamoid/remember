@@ -66,6 +66,13 @@ rag:
                                               # リランクをスキップして素の雑談として回答する（コスト/レイテンシ削減）。
                                               # 誤スキップを避けるため判定は「迷ったら検索」に倒している。
                                               # false にすると常に検索する（従来動作）。
+  auto_memory:                                # #56 案C: 会話から記憶を自動抽出して育てる（mem0方式・既定OFF）
+    enabled: false                            # true で有効化。worker が取り込み後に許可chの最近チャンクから
+                                              # 永続事実を抽出し ADD/UPDATE/DELETE 候補を memories に pending 投入する。
+                                              # **承認するまで回答に出ない**（admin /memories で人が承認）。DELETEはsoft-deleteのみ。
+                                              # 回答への注入自体は memory_enabled も true である必要がある（二重ガード）。
+    max_chunks: 30                            # 1回の抽出で見る最近チャンク数（許可ch限定）
+    max_tokens: 800                           # 突合LLMの出力上限。JSON配列が途中で切れると抽出0件になるため広めに取る
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（要 .env の JINA_API_KEY）
     provider: "jina"                          # 現状 jina のみ対応
