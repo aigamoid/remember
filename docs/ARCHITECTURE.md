@@ -64,7 +64,8 @@ waiwai-oracle/
 │   ├── ab_*.py            # 各種A/B評価（prompt/cost/rerank/search_skip/memory・実データ検証用）
 │   ├── migrate_hybrid_reindex.py # ハイブリッド検索ON化のための全チャンク再インデックス（#54）
 │   ├── migrate_sqlite_to_pg.py # 旧SQLiteデータのPostgres移行（1回だけ実行）
-│   └── migrate_oi_to_issues.py # 旧OI→GitHub Issues移行（1回だけ実行・冪等）
+│   ├── migrate_oi_to_issues.py # 旧OI→GitHub Issues移行（1回だけ実行・冪等）
+│   └── migrate_exclude_bots_68.py # 既存データからBot/Webhook発言を除外し再ビルド（自家中毒対策・#68）
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
 ├── crawler.py             # Phase 1 エントリポイント（手動実行用）
 ├── chunker.py             # Phase 2 エントリポイント（手動実行用）
