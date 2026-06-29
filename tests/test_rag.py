@@ -272,6 +272,33 @@ class TestRewrite:
         asyncio.run(_engine(store, llm).rewrite("query"))
         assert llm.calls[0]["max_tokens"] == 256
 
+    def test_long_persona_output_falls_back(self, store):
+        # #64: rewriter が検索語でなくペルソナ口調の長文応答を返したら元クエリで検索する
+        persona = (
+            "もいもいさん、こんにちは！れみだよ〜。"
+            "過去の発言を調べてみましょうか？それとも今日はおしゃべりしたい気分かな？"
+            "どっちでもいいよ、れみに教えてね〜！"
+        )
+        assert len(persona) > 60  # ガード閾値超を担保
+        llm = FakeLLM([persona])
+        out = asyncio.run(_engine(store, llm).rewrite("私はもいもいだ"))
+        assert out == "私はもいもいだ"
+
+    def test_long_output_with_no_search_passes(self, store):
+        # [NO_SEARCH] を含む出力は長くてもフォールバックさせない（誤検知防止）
+        long_no_search = "[NO_SEARCH] " + "あ" * 80
+        llm = FakeLLM([long_no_search])
+        out = asyncio.run(_engine(store, llm).rewrite("こんにちは"))
+        assert out == long_no_search
+
+    def test_normal_length_query_passes(self, store):
+        # 60字以下の通常クエリは素通り（境界の回帰防止）
+        normal = "UserA API制限 2026-03-16〜2026-03-22 盛り上がった話題"
+        assert len(normal) <= 60
+        llm = FakeLLM([normal])
+        out = asyncio.run(_engine(store, llm).rewrite("あれどうなった？"))
+        assert out == normal
+
 
 # ── RagEngine.answer ────────────────────────────────────────────────────────
 
@@ -306,6 +333,22 @@ class TestAnswer:
         engine = RagEngine(CFG, store, embedder, llm)
         asyncio.run(engine.answer("g1", "元の質問"))
         assert embedder.embedded == ["書き換えクエリ"]
+
+    def test_fallback_still_searches(self, store):
+        # #64: rewriter が長文ペルソナ応答を返しても検索はスキップされず、
+        # 元クエリで埋め込み・検索が継続される（非破壊フォールバック）
+        _seed(store)
+        persona = (
+            "もいもいさん、こんにちは！れみだよ〜。"
+            "過去の発言を調べてみましょうか？それとも今日はおしゃべりしたい気分かな？"
+            "どっちでもいいよ、れみに教えてね〜！"
+        )
+        llm = FakeLLM([persona, "答え"])
+        embedder = FakeEmbedder()
+        engine = RagEngine(CFG, store, embedder, llm)
+        result = asyncio.run(engine.answer("g1", "私はもいもいだ"))
+        assert embedder.embedded == ["私はもいもいだ"]  # 元クエリで検索した
+        assert result["rewritten_query"] == "私はもいもいだ"  # フォールバック後の値
 
     def test_other_guild_data_not_visible(self, store):
         _seed(store, guild_id="other-guild", chunk_text="他サーバーの秘密")

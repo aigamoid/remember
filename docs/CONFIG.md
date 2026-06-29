@@ -46,6 +46,8 @@ rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
   answer_model: "deepseek/deepseek-v3.2"      # 回答生成LLM（OpenRouter経由・OI-16でKimi K2から変更）
   rewriter_max_tokens: 256                    # 書き換え出力の上限（過大なtoken要求で残高不足になるのを防ぐ）
+  rewriter_max_query_chars: 60                # #64: 書き換え結果がこの字数を超え [NO_SEARCH] でなければ
+                                              # 応答文混入とみなし元クエリで検索（非破壊フォールバック・既定60）
   answer_max_tokens: 1500                     # 回答出力の上限（OI-16: completionの暴走を防ぐ安全弁）
   top_k: 5                                    # 回答に渡すチャンク数（OI-16で10→5に削減・リランク/recency有効時は精選後の件数）
   history_max_turns: 5                        # マルチターン会話で渡す直近やり取りの上限ペア数（OI-10）

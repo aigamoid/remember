@@ -75,6 +75,12 @@ class RagEngine:
         # 書き換え結果は短いので出力上限を絞る。未指定だとモデル既定の
         # 巨大な max_tokens を要求し、OpenRouterの残高確保で弾かれることがある。
         self.rewriter_max_tokens: int = rag_cfg.get("rewriter_max_tokens", 256)
+        # 出力長ガード（#64）。rewriter が検索語でなくペルソナ口調の応答文を返すことが
+        # 約4-5%あり、いずれも長文（実測 len>=74・正常な検索語は最長49字）。[NO_SEARCH] でない
+        # のにこの字数を超える出力は「応答への滑り」とみなし、元クエリで検索する（非破壊フォールバック）。
+        self.rewriter_max_query_chars: int = rag_cfg.get(
+            "rewriter_max_query_chars", 60
+        )
         # 回答出力の上限（OI-16: completionの暴走を防ぐ安全弁）。
         self.answer_max_tokens: int = rag_cfg.get("answer_max_tokens", 1500)
         # マルチターン会話で渡す直近やり取りの上限（user+assistant のペア数・OI-10）。
@@ -271,7 +277,21 @@ class RagEngine:
             print(f"[WARN] Query Rewriter 失敗（元クエリで検索続行）: {e}")
             return query
         self._record(events, "rewrite", comp.model, comp.usage)
-        return comp.text.strip() or query
+        rewritten = comp.text.strip() or query
+        # 出力長ガード（#64）: rewriter がペルソナ応答文を返すことがある（約4-5%）。
+        # [NO_SEARCH] でないのに極端に長い出力は「応答への滑り」とみなし、元クエリで検索する。
+        # フォールバック先は元のユーザー入力なので検索は継続される（非破壊）。固定タグ付き WARN で
+        # 監視可能にする（trace の rewritten_query は元クエリに戻るため SQL 長さ監視では拾えない）。
+        if (
+            NO_SEARCH_SENTINEL not in rewritten
+            and len(rewritten) > self.rewriter_max_query_chars
+        ):
+            print(
+                f"[WARN][rewriter_fallback_too_long] 出力が長すぎ（{len(rewritten)}字）。"
+                f"応答文混入とみなし元クエリで検索: {rewritten[:30]}…"
+            )
+            return query
+        return rewritten
 
     @staticmethod
     def _parse_memory_json(text: str) -> dict | None:

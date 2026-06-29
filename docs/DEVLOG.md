@@ -4,6 +4,38 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-29 — auto memory(#56)実機検証・自家中毒対策(#68)実装/デプロイ・自動承認Issue化(#71)
+
+自動記憶(#56・案C)を検証機で有効化して実データ検証 → **Bot発言が記憶対象に混入する自家中毒(self-poisoning)を発見** → #68 で除去、までを1セッションで実施。
+
+### #56 実機検証
+- VM `config.yml` に `rag.auto_memory: {enabled:true, max_chunks:30, max_tokens:800}` を追記し worker 再起動。4ギルドで取り込み→自動抽出を確認（全件 pending 着地・承認するまで回答に出ない）。あいがもいどVRC は永続事実なしで NOOP＝安全側。
+- **実データA/B**（実会話 transcript＋`scripts/ab_auto_memory.py`）で 事実再現率 **0%→75%** / 誤事実率 **33%→0%**。合成フィクスチャと同傾向を再現。
+
+### #68 Bot発言の取り込み除外（自家中毒対策）— MAGI 3者(Codex/Aider/codex-fugu)PASS / PR #69
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/models.py` / `src/collectors/text_channel.py` | RawMessage に is_bot 追加・`_to_raw_message` で `is_bot=msg.author.bot` 取得 |
+| 2 | `src/db.py` | `messages.is_bot` 列(冪等ALTER)＋`insert_message`14列化＋後始末ヘルパー5本 |
+| 3 | `src/chunker.py` / `src/contextualizer.py` | 取得SQL**両方**に `AND is_bot=0`（context_text 経由の再注入も遮断） |
+| 4 | `scripts/migrate_exclude_bots_68.py` | 既存データ後始末（Discord API判定マーク→再ビルド＋Qdrant作り直し→Bot由来記憶却下） |
+| 5 | `tests/*`（4ファイル） | is_bot取得/chunker除外/contextualizer除外/ヘルパー（全 **493 passed**・CI緑） |
+
+- 検証機クリーンアップ: Bot/Webhook **14author・1227 messages** を is_bot=1 マーク → 全4ギルド再ビルド（**Qdrant 2225点**・/health 200）。`@moi-rag` への人間の言及は話者が人間なので正しく残存。
+
+### ハマりポイント
+- 後始末スクリプトが `run_contextualizer`（内部で `asyncio.run`）を `asyncio.run` 配下から直接呼びクラッシュ（`asyncio.run() cannot be called from a running event loop`）。1ギルド目の再index前に落ち Qdrant 部分欠損 → 同型の同期ロジックで即復旧。恒久修正は `worker._ingest` 同様 `await asyncio.to_thread(...)`（**PR #70**・人間マージ待ち）。
+
+### 決定事項
+- **#68（Bot除外）は将来の「①全自動承認」より先に入れる**（MAGI全員合意）。Bot除外なしで自動承認すると自家中毒が自動化するため。
+- 新規メッセージは `author.bot` で自動除外＝Bot面はノーメンテ。ただし**抽出は自動でも反映は手動承認のまま**。
+
+### 次のステップ
+- PR #70（asyncioバグ修正）を人間マージ。
+- **#71（自動記憶の自動承認＋精度ガード）** を起票済み（確信度しきい値/op絞り込み/レート等とセットで段階導入）。Issue #56 のクローズ判断。
+
+---
+
 ## 2026-06-28 — ハイブリッド検索(#54)を staging で本番ON＋トレース記録修正(#58)
 
 案A ハイブリッド検索(dense+BM25 sparse/RRF・#54/PR #57)を検証機 remember-vm で有効化した。
