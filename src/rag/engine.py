@@ -20,6 +20,7 @@ from src.rag.prompts import (
     MEMORY_EXTRACT_PROMPT,
     MEMORY_RECONCILE_PROMPT,
     MEMORY_SECTION,
+    _contains_sensitive,
     NO_SEARCH_SENTINEL,
     PERSONA_EXTRACT_PROMPT,
     REWRITER_SYSTEM_PROMPT,
@@ -369,6 +370,10 @@ class RagEngine:
             subject = str(raw.get("subject") or "").strip() or None
             if subject and subject.lower() == "null":
                 subject = None
+            # センシティブ属性の二重ガード（#56）: プロンプト指示だけに頼らず、保存前にも
+            # denylist で弾く（persona の sanitize_persona_card と同じ思想）。違反は破棄。
+            if _contains_sensitive(content) or (subject and _contains_sensitive(subject)):
+                continue
             ops.append({
                 "op": op,
                 "subject": subject,
