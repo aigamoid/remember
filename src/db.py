@@ -997,14 +997,9 @@ def fetch_memories(conn: psycopg.Connection, guild_id: str) -> list[dict]:
     ]
 
 
-def delete_memory(conn: psycopg.Connection, guild_id: str, memory_id: int) -> bool:
-    """1件削除する（guild 内のみ）。削除できたら True（書き込み系なので内部で commit）。"""
-    cur = conn.execute(
-        "DELETE FROM memories WHERE guild_id = %s AND id = %s",
-        (guild_id, memory_id),
-    )
-    conn.commit()
-    return cur.rowcount > 0
+# 記憶の削除は #56 で soft-delete（soft_delete_memory）に一本化した。
+# 物理削除は guild purge / Bot退出時の purge_guild_data のみが行う（方針逸脱を防ぐため
+# 旧 delete_memory（ハード削除・実呼び出し無し）は廃止）。
 
 
 def count_memories(conn: psycopg.Connection, guild_id: str) -> int:
@@ -1067,7 +1062,8 @@ def fetch_pending_memories(
         SELECT m.id, m.guild_id, m.subject, m.content, m.proposed_op,
                m.target_memory_id, m.evidence, m.created_at, t.content
         FROM memories m
-        LEFT JOIN memories t ON t.id = m.target_memory_id
+        LEFT JOIN memories t
+          ON t.id = m.target_memory_id AND t.guild_id = m.guild_id  -- 他guild本文を参照しない
         {where}
         ORDER BY m.created_at DESC, m.id DESC
         """,
@@ -1110,29 +1106,33 @@ def approve_memory_candidate(conn: psycopg.Connection, candidate_id: int) -> boo
         if not content:
             return False
         conn.execute(
-            "UPDATE memories SET status = 'active' WHERE id = %s", (candidate_id,)
+            "UPDATE memories SET status = 'active' WHERE id = %s AND guild_id = %s",
+            (candidate_id, guild_id),
         )
     elif op == "update":
         if not content or not _target_is_active(conn, guild_id, target_id):
             return False
         conn.execute(
             "UPDATE memories SET status = 'archived', deleted_at = %s, "
-            "superseded_by = %s WHERE id = %s",
-            (now, candidate_id, target_id),
+            "superseded_by = %s WHERE id = %s AND guild_id = %s",
+            (now, candidate_id, target_id, guild_id),
         )
         conn.execute(
-            "UPDATE memories SET status = 'active' WHERE id = %s", (candidate_id,)
+            "UPDATE memories SET status = 'active' WHERE id = %s AND guild_id = %s",
+            (candidate_id, guild_id),
         )
     elif op == "delete":
         if not _target_is_active(conn, guild_id, target_id):
             return False
         conn.execute(
-            "UPDATE memories SET status = 'archived', deleted_at = %s WHERE id = %s",
-            (now, target_id),
+            "UPDATE memories SET status = 'archived', deleted_at = %s "
+            "WHERE id = %s AND guild_id = %s",
+            (now, target_id, guild_id),
         )
         conn.execute(
-            "UPDATE memories SET status = 'archived', deleted_at = %s WHERE id = %s",
-            (now, candidate_id),
+            "UPDATE memories SET status = 'archived', deleted_at = %s "
+            "WHERE id = %s AND guild_id = %s",
+            (now, candidate_id, guild_id),
         )
     else:
         return False
