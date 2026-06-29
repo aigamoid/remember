@@ -1218,3 +1218,16 @@ class TestReconcileMemories:
         )
         assert ops == []
         assert llm.calls == []
+
+    def test_drops_sensitive_content(self, store):
+        # プロンプト逸脱でセンシティブ属性が来てもコード側 denylist で破棄（#56・二重ガード）
+        llm = FakeLLM([
+            '[{"op":"add","subject":"X","content":"持病があり通院している"},'
+            '{"op":"add","subject":"支持政党は自民","content":"普通の事実"},'
+            '{"op":"add","subject":"Y","content":"プリンが好き"}]'
+        ])
+        ops = asyncio.run(
+            _engine(store, llm).reconcile_memories("g1", "log", existing=[])
+        )
+        # 健全な1件のみ残る
+        assert [o["content"] for o in ops] == ["プリンが好き"]
