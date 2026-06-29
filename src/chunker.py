@@ -70,7 +70,7 @@ def _process_channel(
     """1チャンネル分を時間ギャップ方式で処理し、生成チャンク数を返す。"""
     rows = conn.execute(
         "SELECT id, author_name, content, timestamp, has_attachment FROM messages "
-        "WHERE channel_id = %s ORDER BY timestamp ASC",
+        "WHERE channel_id = %s AND is_bot = 0 ORDER BY timestamp ASC",  # #68: Bot発言を除外
         (channel_id,),
     ).fetchall()
 

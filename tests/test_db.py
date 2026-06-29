@@ -15,6 +15,11 @@ from src.db import (
     fetch_guilds_overview,
     count_memories,
     approve_memory_candidate,
+    delete_chunks_for_guild,
+    distinct_message_authors,
+    guild_ids_with_bot_messages,
+    mark_authors_as_bot,
+    reject_auto_memories_by_subject,
     fetch_active_memories,
     fetch_last_job,
     fetch_memories,
@@ -889,4 +894,72 @@ class TestMimicPurgeIntegrity:
         from src.db import purge_guild_data
         purge_guild_data(conn, "g1")
         assert _db.fetch_persona_card(conn, "g1", "u1") is None
+
+
+# ── #68: Bot/Webhook 除外（後始末ヘルパー）──────────────────────────────────
+
+class TestBotExclusion:
+    def test_insert_message_persists_is_bot(self, conn):
+        insert_message(conn, _make_message(id="b1", author_id="bot-1", is_bot=True))
+        insert_message(conn, _make_message(id="h1", author_id="hum-1", is_bot=False))
+        conn.commit()
+        rows = dict(conn.execute(
+            "SELECT id, is_bot FROM messages WHERE id IN ('b1','h1')"
+        ).fetchall())
+        assert rows["b1"] == 1
+        assert rows["h1"] == 0
+
+    def test_distinct_message_authors(self, conn):
+        insert_message(conn, _make_message(id="m1", author_id="a1", author_name="Alice"))
+        insert_message(conn, _make_message(id="m2", author_id="a1", author_name="Alice"))
+        insert_message(conn, _make_message(id="m3", author_id="a2", author_name="Bot"))
+        conn.commit()
+        authors = set(distinct_message_authors(conn, "g-1"))
+        assert ("a1", "Alice") in authors
+        assert ("a2", "Bot") in authors
+
+    def test_mark_authors_as_bot(self, conn):
+        insert_message(conn, _make_message(id="m1", author_id="botA"))
+        insert_message(conn, _make_message(id="m2", author_id="botA"))
+        insert_message(conn, _make_message(id="m3", author_id="human"))
+        conn.commit()
+        marked = mark_authors_as_bot(conn, ["botA"])
+        assert marked == 2
+        flags = dict(conn.execute(
+            "SELECT id, is_bot FROM messages WHERE id IN ('m1','m2','m3')"
+        ).fetchall())
+        assert flags["m1"] == 1 and flags["m2"] == 1 and flags["m3"] == 0
+        # 冪等: 再実行は0件（既に is_bot=1）
+        assert mark_authors_as_bot(conn, ["botA"]) == 0
+
+    def test_mark_authors_as_bot_empty_is_noop(self, conn):
+        assert mark_authors_as_bot(conn, []) == 0
+
+    def test_guild_ids_with_bot_messages(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="gA", author_id="b", is_bot=True))
+        insert_message(conn, _make_message(id="m2", guild_id="gB", author_id="h", is_bot=False))
+        conn.commit()
+        guilds = guild_ids_with_bot_messages(conn)
+        assert "gA" in guilds
+        assert "gB" not in guilds
+
+    def test_delete_chunks_for_guild(self, conn):
+        insert_chunk(conn, "c1", "gA", "anc1", "ch1", "本文A")
+        insert_chunk(conn, "c2", "gB", "anc2", "ch2", "本文B")
+        conn.commit()
+        removed = delete_chunks_for_guild(conn, "gA")
+        assert removed == 1
+        assert count_chunks(conn) == 1  # gB のみ残る
+
+    def test_reject_auto_memories_by_subject(self, conn):
+        # subject=moi-rag(Bot由来) と human の pending 候補を作る
+        insert_memory_candidate(conn, "g-1", "add", content="AI機能", subject="moi-rag")
+        insert_memory_candidate(conn, "g-1", "add", content="誕生日3/25", subject="かにじる")
+        conn.commit()
+        rejected = reject_auto_memories_by_subject(conn, ["moi-rag"])
+        assert rejected == 1
+        # moi-rag は pending から消え、人間subjectの候補は残る
+        pending = {m["subject"] for m in fetch_pending_memories(conn)}
+        assert "moi-rag" not in pending
+        assert "かにじる" in pending
         assert _db.get_active_mimic(conn, "g1", "ch-1") is None
