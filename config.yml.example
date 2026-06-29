@@ -48,6 +48,13 @@ rag:
   hybrid:                                     # #54: ハイブリッド検索（dense + BM25 sparse を RRF融合）。日本語はSudachiPyで分割
     enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから（要: 全チャンク再インデックス）
     prefetch_k: 30                            # 各レーン(dense/sparse)で融合前に取る候補数
+  recency:                                    # #55: 時間減衰で検索を時系列に強くする（過去ログのみ・memoriesは検索を通らないので対象外）
+    enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから（半減期は実測でチューニング）
+    half_life_days: 30                        # 半減期(日)。この日数経過でスコア寄与が半減。小さいほど新しい話を優先
+    recent_half_life_days: 7                  # 「最近」系クエリ検出時の短い半減期（時系列依存質問で減衰を強める）
+    score_floor: 0.1                          # 減衰係数の下限（古くても高関連チャンクを完全には捨てない・0で床なし）
+    candidate_k: 30                           # 減衰で再ランクする前に取る候補数（→ top_k 件に精選）
+    recent_boost: true                        # 「最近」系キーワード検出で recent_half_life_days に切り替える
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（APIキー JINA_API_KEY が必要）
     provider: "jina"                          # 現状 jina のみ対応
