@@ -20,12 +20,13 @@ def _insert_msg(
     author: str = "user",
     has_attachment: int = 0,
     guild_id: str = "g1",
+    is_bot: int = 0,
 ) -> None:
     conn.execute(
         "INSERT INTO messages "
-        "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (msg_id, guild_id, channel_id, "ch-test", "u1", author, content, timestamp, has_attachment),
+        "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment, is_bot) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (msg_id, guild_id, channel_id, "ch-test", "u1", author, content, timestamp, has_attachment, is_bot),
     )
 
 
@@ -73,6 +74,19 @@ class TestGetPrecedingMessages:
         text, ts = _get_preceding_messages(conn, "m1", "ch1", n=10)
 
         assert text == "（直前の会話なし）"
+
+    def test_excludes_bot_messages(self, conn):  # #68
+        """Bot発言は context_text の前方メッセージから除外される（self-poisoning 防止）。"""
+        _insert_msg(conn, "m1", "ch1", "人間の発言です", "2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "ボットの自動発言です",
+                    "2024-01-01T00:01:00+00:00", is_bot=1)
+        _insert_msg(conn, "m3", "ch1", "アンカー発言", "2024-01-01T00:02:00+00:00")
+        conn.commit()
+
+        text, _ = _get_preceding_messages(conn, "m3", "ch1", n=10)
+
+        assert "人間の発言です" in text
+        assert "ボットの自動発言" not in text
 
     def test_respects_n_limit(self, conn):
         for i in range(15):
