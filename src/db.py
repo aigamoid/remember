@@ -236,6 +236,17 @@ CREATE INDEX IF NOT EXISTS idx_messages_guild_author_timestamp
 -- 後付けマイグレーション（既存DB向け・冪等）。CREATE TABLE IF NOT EXISTS は既存テーブルに
 -- 列を足さないため、後から増えた列はここで ADD COLUMN IF NOT EXISTS する。
 ALTER TABLE chat_trace ADD COLUMN IF NOT EXISTS hybrid_enabled BOOLEAN DEFAULT FALSE;  -- #54/#58
+-- #56 案C: 会話から自動抽出した記憶を承認フロー経由で育てる。既定OFF・全件pending着地・soft-delete。
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';        -- pending|active|archived|rejected
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'explicit';      -- explicit|auto
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS proposed_op TEXT;                             -- pending時の提案 add|update|delete
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS target_memory_id BIGINT;                      -- update/delete の対象既存memory id
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS superseded_by BIGINT;                         -- update適用時、旧→新リンク
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS deleted_at TEXT;                              -- soft-delete時刻
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS evidence TEXT;                                -- 自動抽出の根拠
+-- delete 候補は content を持たないため NOT NULL を解除（active な記憶の content 必須はアプリ層で担保）。
+ALTER TABLE memories ALTER COLUMN content DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_guild_status ON memories (guild_id, status);
 """
 
 # ingest_jobs.kind の取りうる値
@@ -615,6 +626,38 @@ def fetch_chunks_by_channel(
     return [(row[0], row[1]) for row in rows]
 
 
+def fetch_recent_chunk_texts(
+    conn: psycopg.Connection, guild_id: str, limit: int = 30
+) -> list[dict]:
+    """guild の最近のチャンクを新しい順に返す（#56・自動記憶の抽出元）。
+
+    **取り込み許可中のチャンネルに限定**する（allowed_channels と JOIN・DM/未許可chは構造的に対象外）。
+    戻り値: 新しい順の [{"chunk_text","context_text","channel_id","timestamp"}, ...]。
+    """
+    rows = conn.execute(
+        """
+        SELECT ci.chunk_text, ci.context_text, ci.channel_id, m.timestamp
+        FROM chunk_index ci
+        JOIN messages m ON ci.anchor_msg_id = m.id
+        JOIN allowed_channels a
+          ON a.guild_id = ci.guild_id AND a.channel_id = ci.channel_id
+        WHERE ci.guild_id = %s
+        ORDER BY m.timestamp DESC, m.id DESC
+        LIMIT %s
+        """,
+        (guild_id, limit),
+    ).fetchall()
+    return [
+        {
+            "chunk_text": r[0],
+            "context_text": r[1],
+            "channel_id": r[2],
+            "timestamp": r[3],
+        }
+        for r in rows
+    ]
+
+
 def update_chunk_context(
     conn: psycopg.Connection, chunk_id: str, context_text: str
 ) -> None:
@@ -927,11 +970,16 @@ def insert_memory(
 
 
 def fetch_memories(conn: psycopg.Connection, guild_id: str) -> list[dict]:
-    """guild の教わった事実を全件返す（新しい順）。回答時のプロンプト注入に使う。"""
+    """guild の有効な記憶（status='active'）を新しい順に返す。回答時のプロンプト注入に使う。
+
+    #56: pending（自動抽出の承認待ち）・archived（soft-delete/差し替え済み）・rejected は除外する。
+    明示メモリ（origin='explicit'）も保存時 active なので従来挙動は変わらない。
+    """
     rows = conn.execute(
         """
         SELECT id, guild_id, subject, content, created_by, source_channel_id, created_at
-        FROM memories WHERE guild_id = %s ORDER BY created_at DESC, id DESC
+        FROM memories WHERE guild_id = %s AND status = 'active'
+        ORDER BY created_at DESC, id DESC
         """,
         (guild_id,),
     ).fetchall()
@@ -960,11 +1008,208 @@ def delete_memory(conn: psycopg.Connection, guild_id: str, memory_id: int) -> bo
 
 
 def count_memories(conn: psycopg.Connection, guild_id: str) -> int:
-    """guild の memories 件数を返す。"""
+    """guild の active な memories 件数を返す（回答に出る件数）。"""
     row = conn.execute(
-        "SELECT count(*) FROM memories WHERE guild_id = %s", (guild_id,)
+        "SELECT count(*) FROM memories WHERE guild_id = %s AND status = 'active'",
+        (guild_id,),
     ).fetchone()
     return row[0]
+
+
+# ---- 自動記憶（#56 案C）。会話から抽出した候補を pending で着地させ、admin で手動承認する ----
+
+def insert_memory_candidate(
+    conn: psycopg.Connection,
+    guild_id: str,
+    op: str,
+    content: str | None = None,
+    subject: str | None = None,
+    target_memory_id: int | None = None,
+    evidence: str | None = None,
+    created_by: str | None = None,
+    source_channel_id: str | None = None,
+) -> int:
+    """自動抽出した記憶操作を status='pending' で1件積む（#56・書き込み）。
+
+    op は 'add' | 'update' | 'delete'。承認されるまで回答には一切出ない（fetch_memories は
+    active のみ）。update/delete は target_memory_id（差し替え/削除対象の既存 active memory）必須。
+    """
+    row = conn.execute(
+        """
+        INSERT INTO memories
+            (guild_id, subject, content, created_by, source_channel_id, created_at,
+             status, origin, proposed_op, target_memory_id, evidence)
+        VALUES (%s,%s,%s,%s,%s,%s,'pending','auto',%s,%s,%s)
+        RETURNING id
+        """,
+        (guild_id, subject, content, created_by, source_channel_id, _now(),
+         op, target_memory_id, evidence),
+    ).fetchone()
+    conn.commit()
+    return row[0]
+
+
+def fetch_pending_memories(
+    conn: psycopg.Connection, guild_id: str | None = None
+) -> list[dict]:
+    """承認待ち（status='pending'）の自動記憶候補を新しい順に返す（#56）。
+
+    guild_id を省略すると全 guild 横断（admin 一覧用）。update/delete 時は対象既存memoryの
+    現在の本文を target_content に添える（承認者が差分を見て判断できるように）。
+    """
+    where = "WHERE m.status = 'pending'"
+    params: tuple = ()
+    if guild_id is not None:
+        where += " AND m.guild_id = %s"
+        params = (guild_id,)
+    rows = conn.execute(
+        f"""
+        SELECT m.id, m.guild_id, m.subject, m.content, m.proposed_op,
+               m.target_memory_id, m.evidence, m.created_at, t.content
+        FROM memories m
+        LEFT JOIN memories t ON t.id = m.target_memory_id
+        {where}
+        ORDER BY m.created_at DESC, m.id DESC
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "guild_id": r[1],
+            "subject": r[2],
+            "content": r[3],
+            "proposed_op": r[4],
+            "target_memory_id": r[5],
+            "evidence": r[6],
+            "created_at": r[7],
+            "target_content": r[8],
+        }
+        for r in rows
+    ]
+
+
+def approve_memory_candidate(conn: psycopg.Connection, candidate_id: int) -> bool:
+    """pending 候補を承認して op を適用する（#56・書き込み）。適用できたら True。
+
+    - add: 候補を active 化
+    - update: 対象を archived（superseded_by=候補）にし、候補を active 化
+    - delete: 対象を archived + deleted_at（**物理削除しない soft-delete**）。候補自体は archived
+    guild 跨ぎや対象消失など不整合時は False を返し何もしない（commit しない）。
+    """
+    cand = conn.execute(
+        "SELECT guild_id, proposed_op, target_memory_id, content FROM memories "
+        "WHERE id = %s AND status = 'pending'",
+        (candidate_id,),
+    ).fetchone()
+    if not cand:
+        return False
+    guild_id, op, target_id, content = cand
+    now = _now()
+    if op == "add":
+        if not content:
+            return False
+        conn.execute(
+            "UPDATE memories SET status = 'active' WHERE id = %s", (candidate_id,)
+        )
+    elif op == "update":
+        if not content or not _target_is_active(conn, guild_id, target_id):
+            return False
+        conn.execute(
+            "UPDATE memories SET status = 'archived', deleted_at = %s, "
+            "superseded_by = %s WHERE id = %s",
+            (now, candidate_id, target_id),
+        )
+        conn.execute(
+            "UPDATE memories SET status = 'active' WHERE id = %s", (candidate_id,)
+        )
+    elif op == "delete":
+        if not _target_is_active(conn, guild_id, target_id):
+            return False
+        conn.execute(
+            "UPDATE memories SET status = 'archived', deleted_at = %s WHERE id = %s",
+            (now, target_id),
+        )
+        conn.execute(
+            "UPDATE memories SET status = 'archived', deleted_at = %s WHERE id = %s",
+            (now, candidate_id),
+        )
+    else:
+        return False
+    conn.commit()
+    return True
+
+
+def _target_is_active(
+    conn: psycopg.Connection, guild_id: str, target_id: int | None
+) -> bool:
+    """target_id が同一 guild の active memory を指しているか（guild_id 分離厳守）。"""
+    if target_id is None:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM memories WHERE id = %s AND guild_id = %s AND status = 'active'",
+        (target_id, guild_id),
+    ).fetchone()
+    return row is not None
+
+
+def fetch_active_memories(
+    conn: psycopg.Connection, guild_id: str | None = None
+) -> list[dict]:
+    """有効な記憶（status='active'）を新しい順に返す（#56・admin 一覧/soft-delete用）。
+
+    guild_id を省略すると全 guild 横断。origin（explicit/auto）も返し、明示/自動を区別表示できる。
+    """
+    where = "WHERE status = 'active'"
+    params: tuple = ()
+    if guild_id is not None:
+        where += " AND guild_id = %s"
+        params = (guild_id,)
+    rows = conn.execute(
+        f"""
+        SELECT id, guild_id, subject, content, origin, created_at
+        FROM memories {where}
+        ORDER BY created_at DESC, id DESC
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "guild_id": r[1],
+            "subject": r[2],
+            "content": r[3],
+            "origin": r[4],
+            "created_at": r[5],
+        }
+        for r in rows
+    ]
+
+
+def reject_memory_candidate(conn: psycopg.Connection, candidate_id: int) -> bool:
+    """pending 候補を却下する（status='rejected'）。却下できたら True（#56）。"""
+    cur = conn.execute(
+        "UPDATE memories SET status = 'rejected' WHERE id = %s AND status = 'pending'",
+        (candidate_id,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def soft_delete_memory(
+    conn: psycopg.Connection, guild_id: str, memory_id: int
+) -> bool:
+    """active な記憶を soft-delete する（archived + deleted_at・物理削除しない・#56）。
+
+    guild 内の active のみが対象。削除できたら True（書き込み系なので内部で commit）。
+    """
+    cur = conn.execute(
+        "UPDATE memories SET status = 'archived', deleted_at = %s "
+        "WHERE guild_id = %s AND id = %s AND status = 'active'",
+        (_now(), guild_id, memory_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 # ---- personas / mimic_state（真似っこモード・#49。src/mimic.py / engine が使用）----
