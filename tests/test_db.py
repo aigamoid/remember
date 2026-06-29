@@ -15,8 +15,14 @@ from src.db import (
     fetch_guilds_overview,
     count_memories,
     delete_memory,
+    approve_memory_candidate,
+    fetch_active_memories,
     fetch_last_job,
     fetch_memories,
+    fetch_pending_memories,
+    insert_memory_candidate,
+    reject_memory_candidate,
+    soft_delete_memory,
     fetch_mention_map,
     fetch_recent_jobs,
     fetch_usage_summary,
@@ -681,6 +687,96 @@ class TestMemories:
         mid = insert_memory(conn, "g-1", "他guildからは消せない")
         assert delete_memory(conn, "g-2", mid) is False
         assert count_memories(conn, "g-1") == 1
+
+
+# ── 自動記憶 案C（#56）: 候補→承認/却下/soft-delete ───────────────
+
+
+class TestAutoMemory:
+    def test_candidate_is_pending_and_hidden(self, conn):
+        # pending 候補は fetch_memories（active限定）に出ない＝回答に使われない
+        insert_memory_candidate(conn, "g-1", "add", content="ケーキが好き", subject="かに")
+        assert fetch_memories(conn, "g-1") == []
+        assert count_memories(conn, "g-1") == 0
+        pend = fetch_pending_memories(conn, "g-1")
+        assert len(pend) == 1
+        assert pend[0]["proposed_op"] == "add"
+        assert pend[0]["content"] == "ケーキが好き"
+
+    def test_approve_add_activates(self, conn):
+        cid = insert_memory_candidate(conn, "g-1", "add", content="プリンが好き")
+        assert approve_memory_candidate(conn, cid) is True
+        rows = fetch_memories(conn, "g-1")
+        assert [r["content"] for r in rows] == ["プリンが好き"]
+        assert fetch_pending_memories(conn, "g-1") == []
+
+    def test_approve_update_archives_target(self, conn):
+        target = insert_memory(conn, "g-1", "ケーキが好き", subject="かに")
+        cid = insert_memory_candidate(
+            conn, "g-1", "update", content="プリンが好き",
+            subject="かに", target_memory_id=target,
+        )
+        assert approve_memory_candidate(conn, cid) is True
+        rows = fetch_memories(conn, "g-1")  # active のみ
+        assert [r["content"] for r in rows] == ["プリンが好き"]
+        # 旧メモリは archived（物理削除されない）
+        active = fetch_active_memories(conn, "g-1")
+        assert target not in [r["id"] for r in active]
+
+    def test_approve_delete_soft_deletes_target(self, conn):
+        target = insert_memory(conn, "g-1", "もう違う事実")
+        cid = insert_memory_candidate(
+            conn, "g-1", "delete", target_memory_id=target,
+        )
+        assert approve_memory_candidate(conn, cid) is True
+        assert fetch_memories(conn, "g-1") == []  # 回答に出ない
+        # 物理削除されず行は残っている（soft-delete）
+        row = conn.execute(
+            "SELECT status, deleted_at FROM memories WHERE id = %s", (target,)
+        ).fetchone()
+        assert row[0] == "archived"
+        assert row[1] is not None
+
+    def test_update_with_missing_target_is_rejected(self, conn):
+        # target が active に無い update は適用しない（ID幻覚ガード）
+        cid = insert_memory_candidate(
+            conn, "g-1", "update", content="x", target_memory_id=999999,
+        )
+        assert approve_memory_candidate(conn, cid) is False
+        assert fetch_memories(conn, "g-1") == []
+
+    def test_approve_guild_isolation_for_target(self, conn):
+        # 別 guild の memory を target にした update は適用しない
+        other = insert_memory(conn, "g-2", "別guildの事実")
+        cid = insert_memory_candidate(
+            conn, "g-1", "update", content="侵入", target_memory_id=other,
+        )
+        assert approve_memory_candidate(conn, cid) is False
+
+    def test_reject(self, conn):
+        cid = insert_memory_candidate(conn, "g-1", "add", content="却下される")
+        assert reject_memory_candidate(conn, cid) is True
+        assert fetch_pending_memories(conn, "g-1") == []
+        assert fetch_memories(conn, "g-1") == []
+        # 二重却下は False
+        assert reject_memory_candidate(conn, cid) is False
+
+    def test_soft_delete_active(self, conn):
+        mid = insert_memory(conn, "g-1", "無効化する")
+        assert soft_delete_memory(conn, "g-1", mid) is True
+        assert fetch_memories(conn, "g-1") == []
+        # 物理削除しない
+        row = conn.execute(
+            "SELECT status FROM memories WHERE id = %s", (mid,)
+        ).fetchone()
+        assert row[0] == "archived"
+        # 別 guild からは消せない・二重実行も False
+        assert soft_delete_memory(conn, "g-2", mid) is False
+
+    def test_explicit_memory_still_active_by_default(self, conn):
+        # 既存の明示メモリ（insert_memory）は status=active で従来どおり出る
+        insert_memory(conn, "g-1", "明示の事実")
+        assert [r["content"] for r in fetch_memories(conn, "g-1")] == ["明示の事実"]
 
 
 # ── 真似っこモード personas / mimic_state（#49）─────────────────
