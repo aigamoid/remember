@@ -248,29 +248,44 @@ CREATE INDEX idx_trace_created       ON chat_trace (created_at);
 > **既定オフ**。`config.yml` の `rag.debug_trace: true` のときだけ記録する（質問・回答本文を
 > 保存するため、本番ではプライバシー上 false 運用が前提）。
 
-### memories（明示メモリ「覚えておいて」・OI-24）
+### memories（明示メモリ「覚えておいて」・OI-24 ＋ 自動記憶 案C・#56）
 
 ```sql
 CREATE TABLE memories (
     id                BIGSERIAL PRIMARY KEY,
     guild_id          TEXT NOT NULL,
     subject           TEXT,              -- 誰/何についての事実か（例: かにじる／本人。任意）
-    content           TEXT NOT NULL,     -- 覚えておく事実本文（例: ケーキが好き）
-    created_by        TEXT,              -- 教えたユーザーID（任意）
+    content           TEXT,              -- 覚えておく事実本文（例: ケーキが好き。delete候補はNULL・#56でNOT NULL解除）
+    created_by        TEXT,              -- 教えたユーザーID（自動抽出は 'auto'。任意）
     source_channel_id TEXT,              -- 教わったチャンネルID（任意）
-    created_at        TEXT NOT NULL      -- ISO8601 (UTC)
+    created_at        TEXT NOT NULL,     -- ISO8601 (UTC)
+    -- 以下 #56 案C（自動記憶）で追加。ALTER ... ADD COLUMN IF NOT EXISTS で後付け migration。
+    status            TEXT NOT NULL DEFAULT 'active',   -- active|pending|archived|rejected
+    origin            TEXT NOT NULL DEFAULT 'explicit', -- explicit（明示）|auto（自動抽出）
+    proposed_op       TEXT,              -- pending時の提案操作 add|update|delete
+    target_memory_id  BIGINT,            -- update/delete の対象既存memory id
+    superseded_by     BIGINT,            -- update適用時、旧→新リンク
+    deleted_at        TEXT,              -- soft-delete時刻（archived化したISO8601）
+    evidence          TEXT               -- 自動抽出の根拠（理由）
 );
 
 CREATE INDEX idx_memories_guild ON memories (guild_id);
+CREATE INDEX idx_memories_guild_status ON memories (guild_id, status);
 ```
 
-> ユーザーが「覚えておいて」と**明示的に教えた事実**を保持する、Discord過去ログ（`chunk_index`/
-> Qdrant）とは**別の記憶領域**（OI-24）。回答時に guild 単位で**全件**をプロンプトへ注入する
-> （少数前提＝ベクトル検索を使わない。件数が増えたら別Qdrantコレクション化を検討）。
-> `src/db.py` の `insert_memory` / `fetch_memories` / `delete_memory` / `count_memories` が
-> 読み書きし、`src/memory.py` の `MemoryProvider` 経由で `src/rag/engine.py` の `answer()` が
-> プロンプトへ注入する。**既定オフ**（`config.yml` の `rag.memory_enabled: true` のときだけ注入）。
-> 書き込みUI（「覚えておいて」検知）は A/B で効果確認後に実装予定。
+> ユーザーが「覚えておいて」と**明示的に教えた事実**（OI-24）に加え、**会話から自動抽出した事実**
+> （#56 案C・mem0方式）を保持する記憶領域。Discord過去ログ（`chunk_index`/Qdrant）とは別。
+> 回答時に guild 単位で **`status='active'` の全件**をプロンプトへ注入する（少数前提＝ベクトル検索なし）。
+>
+> **自動記憶のライフサイクル（#56・安全優先）**: worker が取り込み後に許可chの最近チャンクから
+> `src/rag/engine.py` の `reconcile_memories()` で ADD/UPDATE/DELETE 候補を抽出し、全件
+> `status='pending'`（`origin='auto'`）で着地させる。**承認するまで `active` にならず回答に出ない**。
+> 管理ポータル `/memories` で人が承認すると、add→`active`化 / update→旧を`archived`+`superseded_by`し
+> 新を`active`化 / delete→対象を`archived`+`deleted_at`（**物理削除しない soft-delete**）。
+> `src/db.py` の `insert_memory`(明示) / `insert_memory_candidate`(自動) / `approve_memory_candidate` /
+> `reject_memory_candidate` / `soft_delete_memory` / `fetch_memories`(active限定) / `fetch_pending_memories` /
+> `fetch_active_memories` が読み書きする。**既定オフ**（注入は `rag.memory_enabled`、自動抽出は
+> `rag.auto_memory.enabled` のときだけ。どちらも二重ガード）。
 
 ### personas（真似っこモードの人格カード・#49）
 

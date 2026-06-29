@@ -41,9 +41,9 @@ waiwai-oracle/
 │   ├── trace.py           # 回答デバッグトレース TraceRecorder（chat_trace書き込み・既定OFF・OI-21）
 │   ├── quota.py           # プラン上限の判定・JST日次境界・案内文（純ロジック・OI-14 C-2）
 │   ├── admin/             # 管理者向けポータル（FastAPI + Jinja2・パスワード認証）
-│   │   ├── app.py         # ダッシュボード + /billing（プラン管理）
+│   │   ├── app.py         # ダッシュボード + /billing（プラン管理）+ /memories（自動記憶の承認・#56）
 │   │   ├── auth.py        # 簡易パスワード認証（HMAC署名トークン）
-│   │   └── templates/     # base/login/dashboard/error/billing.html
+│   │   └── templates/     # base/login/dashboard/error/billing/memories.html
 │   ├── api.py             # FastAPI APIサーバ（POST /chat[quota判定], GET /health）
 │   └── cli.py             # CLIチャットロジック（/chat クライアント）
 ├── moimoichan_Discordbot/

@@ -16,6 +16,7 @@ import sys
 
 from dotenv import load_dotenv
 
+from src.api import build_engine
 from src.config import load_config
 from src.db import get_connection
 from src.embedder import Embedder
@@ -55,11 +56,18 @@ def main() -> None:
     if cfg.get("rag", {}).get("hybrid", {}).get("enabled", False):
         sparse_encoder = SparseEncoder()
 
+    # 自動記憶（#56 案C）: rag.auto_memory.enabled=true のときだけ engine を組み立てて渡す。
+    # engine 側も同フラグを見るので二重ガード（既定OFF＝従来どおり明示メモリのみ）。
+    engine = None
+    if cfg.get("rag", {}).get("auto_memory", {}).get("enabled", False):
+        engine = build_engine(cfg)
+
     worker = IngestWorker(
         conn, cfg, store, embedder, token,
         poll_interval=worker_cfg.get("poll_interval_seconds", 10),
         sync_interval_hours=worker_cfg.get("sync_interval_hours", 24),
         sparse_encoder=sparse_encoder,
+        engine=engine,
     )
     try:
         asyncio.run(worker.run_forever())

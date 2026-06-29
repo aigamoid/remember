@@ -18,7 +18,9 @@ from src.rag.llm import ChatLLM, Usage
 from src.rag.prompts import (
     ANSWER_SYSTEM_PROMPT,
     MEMORY_EXTRACT_PROMPT,
+    MEMORY_RECONCILE_PROMPT,
     MEMORY_SECTION,
+    _contains_sensitive,
     NO_SEARCH_SENTINEL,
     PERSONA_EXTRACT_PROMPT,
     REWRITER_SYSTEM_PROMPT,
@@ -107,6 +109,14 @@ class RagEngine:
         mimic_cfg = rag_cfg.get("mimic", {})
         self.mimic_sample_limit: int = mimic_cfg.get("sample_limit", 300)
         self.mimic_min_sample: int = mimic_cfg.get("min_sample_count", 30)
+        # 自動記憶（#56 案C）。enabled の時だけ worker が会話から事実を抽出し pending 候補を積む。
+        # 既定オフ＝従来どおり明示メモリのみ。誤抽出は重大なので全件 admin 承認を経て初めて有効化する。
+        auto_mem_cfg = rag_cfg.get("auto_memory", {})
+        self.auto_memory_enabled: bool = bool(auto_mem_cfg.get("enabled", False))
+        self.auto_memory_max_chunks: int = auto_mem_cfg.get("max_chunks", 30)
+        # 突合は複数操作を JSON 配列で返すため rewriter_max_tokens(256) では途中で切れる。
+        # 専用に広めの上限を取る（既定800・出力が切れると配列が壊れて 0 件になる）。
+        self.auto_memory_max_tokens: int = auto_mem_cfg.get("max_tokens", 800)
         # ハイブリッド検索（#54）。enabled かつ sparse_encoder が渡された時のみ、dense と
         # BM25 sparse を RRF 融合する（既定オフ＝dense-only で現行どおり）。本番ONは実データA/B後。
         hybrid_cfg = rag_cfg.get("hybrid", {})
@@ -313,6 +323,100 @@ class RagEngine:
         if subject and subject.lower() == "null":
             subject = None
         return {"subject": subject, "content": content}
+
+    @staticmethod
+    def _parse_memory_ops(text: str) -> list[dict]:
+        """突合LLMの出力からJSON配列を取り出す。崩れていれば []（#56）。"""
+        t = text.strip()
+        if t.startswith("```"):
+            t = t.strip("`")
+        i, j = t.find("["), t.rfind("]")
+        if i < 0 or j < 0:
+            return []
+        try:
+            data = json.loads(t[i:j + 1])
+        except Exception:
+            return []
+        return [op for op in data if isinstance(op, dict)] if isinstance(data, list) else []
+
+    async def reconcile_memories(
+        self,
+        guild_id: str,
+        conversation_text: str,
+        existing: list[dict],
+        guild_name: str | None = None,
+        user_id: str | None = None,
+    ) -> list[dict]:
+        """会話から永続事実を抽出し、既存メモリと突合して操作の配列を返す（#56 案C・書き込みはしない）。
+
+        戻り値: 検証済みの操作 [{"op","subject","content","target_id","reason"}, ...]。
+        op は add/update/delete のみ（noop と不正は除外）。update/delete は target_id が existing に
+        存在する時のみ採用する（誤爆の二重ガード）。LLM失敗・JSON崩れ・該当なしは []。
+        rewriter_model（安価）で実行し usage を記録する。**ここでは保存しない**（呼び出し側が pending 投入）。
+        """
+        if not conversation_text.strip():
+            return []
+        valid_ids = {m["id"] for m in existing}
+        if existing:
+            existing_text = "\n".join(
+                f"[{m['id']}] "
+                + (f"{m['subject']}: " if m.get("subject") else "")
+                + str(m.get("content") or "")
+                for m in existing
+            )
+        else:
+            existing_text = "（まだ何も覚えていない）"
+        system = (
+            MEMORY_RECONCILE_PROMPT
+            .replace("{guild_name}", guild_name or self.guild_name)
+            .replace("{existing}", existing_text)
+            .replace("{conversation}", conversation_text)
+        )
+        events: list[dict] = []
+        try:
+            comp = await self.llm.complete(
+                self.rewriter_model, system,
+                "上記の会話から記憶操作をJSON配列で出力して。",
+                temperature=0.1, max_tokens=self.auto_memory_max_tokens,
+            )
+        except Exception as e:
+            print(f"[WARN] 記憶突合失敗（候補を作らない）: {e}")
+            return []
+        self._record(events, "memory_reconcile", comp.model, comp.usage)
+        await self._flush(events, guild_id, user_id)
+
+        ops: list[dict] = []
+        for raw in self._parse_memory_ops(comp.text):
+            op = str(raw.get("op") or "").strip().lower()
+            if op not in ("add", "update", "delete"):
+                continue  # noop・不明は捨てる
+            content = str(raw.get("content") or "").strip()
+            if content.lower() == "null":
+                content = ""
+            if op in ("add", "update") and not content:
+                continue  # 本文が無い add/update は無効
+            target_id = raw.get("target_id")
+            try:
+                target_id = int(target_id) if target_id is not None else None
+            except (TypeError, ValueError):
+                target_id = None
+            if op in ("update", "delete") and target_id not in valid_ids:
+                continue  # 対象が既存に無い update/delete は捨てる（ID幻覚ガード）
+            subject = str(raw.get("subject") or "").strip() or None
+            if subject and subject.lower() == "null":
+                subject = None
+            # センシティブ属性の二重ガード（#56）: プロンプト指示だけに頼らず、保存前にも
+            # denylist で弾く（persona の sanitize_persona_card と同じ思想）。違反は破棄。
+            if _contains_sensitive(content) or (subject and _contains_sensitive(subject)):
+                continue
+            ops.append({
+                "op": op,
+                "subject": subject,
+                "content": content or None,
+                "target_id": target_id,
+                "reason": str(raw.get("reason") or "").strip() or None,
+            })
+        return ops
 
     async def build_persona_card(
         self,
