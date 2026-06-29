@@ -14,7 +14,10 @@ from src.db import (
     count_messages,
     enqueue_job,
     fetch_last_job,
+    fetch_memories,
+    fetch_pending_memories,
     insert_chunk,
+    insert_memory,
     insert_message,
     upsert_guild,
 )
@@ -82,7 +85,8 @@ class TestRunOnce:
 
         job = fetch_last_job(conn, "g1")
         assert job["status"] == "done"
-        assert job["result"] == "crawled=5 chunks=3 contexts=2 indexed=3"
+        # engine 未注入なので auto_mem=0（自動記憶OFF）
+        assert job["result"] == "crawled=5 chunks=3 contexts=2 indexed=3 auto_mem=0"
 
     def test_failed_job_records_error_and_keeps_connection_usable(self, conn, monkeypatch):
         enqueue_job(conn, "g1", JOB_INGEST)
@@ -140,6 +144,88 @@ class TestPurgeJobs:
         assert store.deleted_guilds == ["g1"]
         assert count_messages(conn, guild_id="g1") == 0
         assert count_messages(conn, guild_id="g2") == 1  # 他guildは無傷
+
+
+class FakeEngine:
+    """reconcile_memories だけ持つフェイク engine（#56・auto-memory 発火テスト用）。"""
+
+    def __init__(self, ops, enabled=True, max_chunks=30):
+        self.auto_memory_enabled = enabled
+        self.auto_memory_max_chunks = max_chunks
+        self._ops = ops
+        self.seen_conversation = None
+
+    async def reconcile_memories(self, guild_id, conversation_text, existing,
+                                 guild_name=None, user_id=None):
+        self.seen_conversation = conversation_text
+        return self._ops
+
+
+def _seed_allowed_chunk(conn, guild_id="g1", channel_id="ch1", msg_id="m1"):
+    upsert_guild(conn, guild_id, "server")
+    allow_channel(conn, guild_id, channel_id, "general", "admin")
+    _insert_message(conn, msg_id, guild_id, channel_id)
+    insert_chunk(conn, f"c-{msg_id}", guild_id, msg_id, channel_id, "本文だよ")
+    conn.commit()
+
+
+class TestAutoMemoryExtraction:
+    def test_disabled_creates_no_candidates(self, conn, monkeypatch):
+        _seed_allowed_chunk(conn)
+        enqueue_job(conn, "g1", JOB_INGEST)
+        engine = FakeEngine([{"op": "add", "content": "x", "subject": None,
+                              "target_id": None, "reason": "r"}], enabled=False)
+        worker = IngestWorker(conn, cfg={}, store=FakeStore(), embedder=None,
+                              token="t", engine=engine)
+        _patch_pipeline(monkeypatch, worker)
+
+        asyncio.run(worker.run_once())
+
+        assert fetch_pending_memories(conn, "g1") == []
+        assert "auto_mem=0" in fetch_last_job(conn, "g1")["result"]
+
+    def test_enabled_inserts_pending_candidates(self, conn, monkeypatch):
+        _seed_allowed_chunk(conn)
+        enqueue_job(conn, "g1", JOB_INGEST)
+        ops = [
+            {"op": "add", "content": "プリンが好き", "subject": "かに",
+             "target_id": None, "reason": "新事実"},
+        ]
+        engine = FakeEngine(ops, enabled=True)
+        worker = IngestWorker(conn, cfg={}, store=FakeStore(), embedder=None,
+                              token="t", engine=engine)
+        _patch_pipeline(monkeypatch, worker)
+
+        asyncio.run(worker.run_once())
+
+        pend = fetch_pending_memories(conn, "g1")
+        assert len(pend) == 1
+        assert pend[0]["content"] == "プリンが好き"
+        assert pend[0]["proposed_op"] == "add"
+        # 候補は active ではない（承認するまで回答に出ない）
+        assert fetch_memories(conn, "g1") == []
+        assert "auto_mem=1" in fetch_last_job(conn, "g1")["result"]
+        # 抽出元の会話テキストにチャンク本文が渡っている
+        assert "本文だよ" in engine.seen_conversation
+
+    def test_extraction_failure_does_not_break_ingest(self, conn, monkeypatch):
+        _seed_allowed_chunk(conn)
+        enqueue_job(conn, "g1", JOB_INGEST)
+
+        class BoomEngine(FakeEngine):
+            async def reconcile_memories(self, *a, **k):
+                raise RuntimeError("LLM down")
+
+        worker = IngestWorker(conn, cfg={}, store=FakeStore(), embedder=None,
+                              token="t", engine=BoomEngine([]))
+        _patch_pipeline(monkeypatch, worker)
+
+        asyncio.run(worker.run_once())
+
+        # ingest 自体は成功扱い（抽出失敗で止めない）・候補なし
+        job = fetch_last_job(conn, "g1")
+        assert job["status"] == "done"
+        assert "auto_mem=0" in job["result"]
 
 
 class TestScheduleSyncs:
