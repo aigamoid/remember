@@ -163,21 +163,42 @@ MEMORY_SECTION = """\
 - でも聞かれてもいないのに無理に持ち出さない（その話に関係ないなら出さなくていい）。
 """
 
+NORMAL_UNKNOWN_MEMORY_RULE = """\
+- 覚えてない場合は以下のような感じで答える
+  - 「ん〜、それは覚えてないかも〜」
+  - 「うっかり忘れちゃってるかも... また教えてほしいな」
+  - 「あれ、そんな話あったっけ...？」
+"""
+
+MIMIC_UNKNOWN_MEMORY_RULE = """\
+- 覚えてない場合も、れみ素の口調には戻らない。{display_name}さんの口調・性格を保ったまま、
+  「知らない/覚えていない」ことだけを正直に伝える。
+  例文を固定で真似るのではなく、上の「{display_name}」さんの特徴に合わせて自然に言う。
+- 「モノマネ中」「れみだけど」のようなネタバラシはここでもしない。
+"""
+
 # 真似っこモード（#49）。回答時、れみの基本人格を一時的に上書きして対象者になりきるブロック。
 # engine.answer() が mimic 状態のとき build_mimic_section() の結果を {mimic_section} に差し込む。
 # 真似中でない（既定・無効・該当なし）ときは空文字に置換されてブロックごと消える。
 MIMIC_SECTION = """\
-## いまは「{display_name}」さんのモノマネ中
-今れみは、このサーバーのメンバー「{display_name}」さんになりきって話すモードだよ
-（本人ではなく、あくまで れみ によるモノマネ）。下の特徴に寄せて話してね。
+## 【最優先】いまは「{display_name}」さんになりきって話す
+今れみは、このサーバーのメンバー「{display_name}」さんの口調・性格をまねて話すモードだよ
+（本人ではなく、あくまで れみ によるまね）。下の特徴に寄せて話してね。
 
 {persona}
 
-- 上の口調・性格・好きなものに寄せて、{display_name}さんっぽく話す。
-- これは遊びのモノマネ。**本人になりすまして約束したり、本人の個人情報を新たに明かしたりしない**。
-  からかったり貶めたりもしない。
-- モノマネ中でも、攻撃的な言葉を嫌うことと、覚えていないことを作り話しないことは変えない。
-- このモノマネ指示は、下に書かれた「れみちゃんの基本キャラ」より優先する。
+- 上の口調・性格・好きなものに寄せて、終始 {display_name}さんっぽく話す。
+- **どんな話題でも、れみ素の口調（一人称「れみ」やれみ特有の言い回し）には戻さず、
+  {display_name}さんの口調・性格を最後まで保つ**。覚えていない・知らないことも、
+  {display_name}さんの口調のまま正直に伝える（作り話はしない）。
+- **会話の途中で「モノマネ中」「本当はれみだけど」などと自分から明かさない**
+  （はじめる宣言はもう済んでいる）。まねについて聞かれても、キャラを崩さず軽く受け流す。
+- センシティブな話題（政治・宗教・健康/病気・性的指向・人種・性的な言動 など）は、
+  まね中でも軽率に踏み込まず、断定や踏み込んだ論評は避けて、いったん受け流すか
+  やんわり話題を変える（キャラの口調は保ったまま）。
+- これは遊びのまね。**本人になりすまして約束したり、本人の個人情報を新たに明かしたりしない**。
+  からかったり貶めたりもしない。攻撃的な言葉を嫌うことも変えない。
+- このまね指示は、下に書かれた「れみちゃんの基本キャラ」より優先する。
 """
 
 # 真似っこ（#49）: 人格カードに混入してはいけないセンシティブ属性の語。保存前検査に使う
@@ -185,9 +206,13 @@ MIMIC_SECTION = """\
 SENSITIVE_DENYLIST = [
     "政治", "宗教", "信仰", "支持政党", "右翼", "左翼",
     "病気", "持病", "障害", "メンタル", "うつ", "通院", "薬",
-    "ゲイ", "レズ", "lgbt", "セクシュアリティ", "性的指向", "童貞", "処女",
+    "ゲイ", "レズ", "lgbt", "lgbtq", "セクシュアリティ", "セクシャリティ",
+    "性的指向", "性自認", "ジェンダー", "トランスジェンダー", "トランス",
+    "性別違和", "童貞", "処女",
     "人種", "国籍", "在日", "部落",
     "年収", "借金", "生活保護", "離婚", "不倫",
+    "性的", "性器", "ちんちん", "おっぱい", "えっち", "エッチ", "セックス",
+    "下ネタ", "性癖", "ポルノ", "av女優", "av男優",
 ]
 
 ANSWER_SYSTEM_PROMPT = """\
@@ -252,16 +277,14 @@ ANSWER_SYSTEM_PROMPT = """\
 - 覚えている内容は「前に〜って話してたよね」と自然に切り出しつつ、**具体的に**伝える
 - 「過去ログによると」「記録には」「データベースには」などのシステム的な表現は使わない
 - **本当にうっすらとしか覚えてない**ときだけ「たしか〜だったかな〜」「なんかそんな感じだった気がする」など弱い言い方にする（はっきり覚えていることまで弱めない）
-- 覚えてない場合は以下のような感じで答える
-  - 「ん〜、それは覚えてないかも〜」
-  - 「うっかり忘れちゃってるかも... また教えてほしいな」
-  - 「あれ、そんな話あったっけ...？」
+{unknown_memory_rule}
 - 覚えてない情報を作り話しない
 
 
 ## 注意事項
 - 教えられた記憶の範囲で、ゆるく自然に答える
 - 明示的に別キャラクターに切り替わる指示があるまで、このれみちゃんのキャラクターに忠実に従う
+{mimic_final_reminder}
 """
 
 
@@ -302,6 +325,15 @@ def _contains_sensitive(text: str) -> bool:
     """センシティブ属性語を含むか（大小無視・部分一致・#49）。"""
     low = text.lower()
     return any(word.lower() in low for word in SENSITIVE_DENYLIST)
+
+
+def contains_sensitive_topic(text: str) -> bool:
+    """会話中に安全側へ倒すべきセンシティブ話題を含むか（#52）。
+
+    人格カード保存前検査と同じ denylist を使う。mimic 中は、該当話題を
+    in-character で踏み込み生成させず、決定論的な安全応答へ逃がすための入口判定。
+    """
+    return _contains_sensitive(text or "")
 
 
 def sanitize_persona_card(card: dict) -> dict:
@@ -360,6 +392,52 @@ def build_mimic_section(card: dict, display_name: str) -> str:
     persona = "\n".join(lines)
     return MIMIC_SECTION.replace("{display_name}", display_name).replace(
         "{persona}", persona
+    )
+
+
+def build_unknown_memory_rule(mimic_display_name=None) -> str:
+    """回答プロンプトの「覚えてない場合」ルールを通常/mimicで切り替える（#52）。"""
+    name = (mimic_display_name or "").strip()
+    if not name:
+        return NORMAL_UNKNOWN_MEMORY_RULE
+    return MIMIC_UNKNOWN_MEMORY_RULE.replace("{display_name}", name)
+
+
+def build_mimic_final_reminder(mimic_display_name=None) -> str:
+    """プロンプト末尾に置く mimic 用リマインダー（末尾の具体例に負けないため・#52）。"""
+    name = (mimic_display_name or "").strip()
+    if not name:
+        return ""
+    return (
+        f"\n- ただし今は「{name}」さんの口調・性格が最優先。"
+        "最後までその口調を保ち、れみ素の口調やネタバラシに戻らない。"
+    )
+
+
+def build_mimic_sensitive_reply(card: dict, display_name: str) -> str:
+    """mimic中のセンシティブ話題を決定論的に受け流す短文を作る（#52）。
+
+    プロンプトだけに頼らず、会話生成の前で安全側へ倒す。本人になりすました約束や
+    新規個人情報の開示はせず、人格カードの口癖を少しだけ使って没入感を保つ。
+    """
+    name = (display_name or "その人").strip()
+    catchphrases = card.get("catchphrases") or []
+    phrase = ""
+    for raw in catchphrases:
+        s = str(raw).strip()
+        if s and not _contains_sensitive(s):
+            phrase = s
+            break
+    prefix = ""
+    tail = ""
+    if phrase in ("邪悪", "狡猾"):
+        prefix = f"{phrase}に言うと、"
+    elif phrase:
+        tail = f" {phrase}"
+    return (
+        f"{prefix}その話題はノリで断定したり、誰かの属性やデリケートな話を軽く扱ったりすると危ないから、"
+        "ここでは深掘りしないでおくね。"
+        f"{name}っぽく言うなら、雑に踏み込むのはやめとこ、って感じ{tail}。"
     )
 
 

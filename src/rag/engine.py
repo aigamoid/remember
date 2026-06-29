@@ -26,9 +26,13 @@ from src.rag.prompts import (
     REWRITER_SYSTEM_PROMPT,
     SKIP_CONTEXT,
     SPEAKER_SECTION,
+    build_mimic_final_reminder,
+    build_mimic_sensitive_reply,
     build_context,
     build_memories,
     build_mimic_section,
+    build_unknown_memory_rule,
+    contains_sensitive_topic,
     persona_is_empty,
     sanitize_persona_card,
 )
@@ -655,6 +659,8 @@ class RagEngine:
         # 取得して {mimic_section} に注入する。真似中でない・取得失敗・実質空ならブロックごと
         # 消す（回答は止めない）。scope=channel 固定なので channel_id 必須。
         mimic_section = ""
+        mimic_card: dict | None = None
+        mimic_display_name = ""
         if self.mimic_enabled and self.mimic_provider and channel_id:
             try:
                 mimic = await asyncio.to_thread(
@@ -664,29 +670,11 @@ class RagEngine:
                 print(f"[WARN] mimic 取得失敗（真似なしで続行）: {e}")
                 mimic = None
             if mimic:
+                mimic_card = mimic.get("card") or {}
+                mimic_display_name = str(mimic.get("display_name") or "")
                 mimic_section = build_mimic_section(
-                    mimic.get("card") or {}, mimic.get("display_name") or ""
+                    mimic_card, mimic_display_name
                 )
-
-        system = ANSWER_SYSTEM_PROMPT.replace(
-            "{guild_name}", guild_name or self.guild_name
-        ).replace("{current_datetime}", self._now_str()).replace(
-            "{speaker_section}", speaker_section
-        ).replace(
-            "{mimic_section}", mimic_section
-        ).replace(
-            "{taught_memories}", memory_section
-        ).replace(
-            "{context}", context
-        )
-        comp = await self.llm.complete(
-            self.answer_model, system, query,
-            temperature=0.7, max_tokens=self.answer_max_tokens,
-            history=hist_ans,
-        )
-        self._record(events, "answer", comp.model, comp.usage)
-
-        await self._flush(events, guild_id, user_id)
 
         sources = [
             {
@@ -698,6 +686,78 @@ class RagEngine:
             }
             for h in hits
         ]
+
+        # 真似っこ中のセンシティブ話題は、プロンプトだけに任せず決定論的に受け流す（#52）。
+        # 人格カード生成時の sanitize だけでは会話中の出力を防げないため、回答LLMの前で止める。
+        guard_text = "\n".join(
+            [query] + [str(h.get("content") or "") for h in hist_ans[-4:]]
+        )
+        if mimic_section and mimic_card and contains_sensitive_topic(guard_text):
+            answer = build_mimic_sensitive_reply(mimic_card, mimic_display_name)
+            await self._flush(events, guild_id, user_id)
+            if self.trace_enabled and self.trace_recorder:
+                await self._flush_trace({
+                    "guild_id": str(guild_id),
+                    "user_id": user_id,
+                    "question": query,
+                    "rewritten_query": rewritten,
+                    "answer": answer,
+                    "sources": [
+                        {
+                            "channel_name": h.get("channel_name"),
+                            "anchor_timestamp": h.get("anchor_timestamp"),
+                            "score": h.get("score"),
+                            "base_score": h.get("base_score"),
+                            "recency_factor": h.get("recency_factor"),
+                            "chunk_text": h.get("chunk_text"),
+                            "context_text": h.get("context_text"),
+                        }
+                        for h in hits
+                    ],
+                    "answer_model": "mimic-sensitive-guard",
+                    "rerank_enabled": bool(use_rerank),
+                    "hybrid_enabled": bool(self.hybrid_enabled and self.sparse_encoder),
+                    "recency_enabled": bool(self.recency_enabled),
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": sum(e.get("total_tokens", 0) for e in events),
+                    "cost_usd": sum(e.get("cost_usd", 0.0) for e in events),
+                    "latency_ms": int((time.perf_counter() - t0) * 1000),
+                })
+            return {
+                "answer": answer,
+                "rewritten_query": rewritten,
+                "sources": sources,
+                "search_skipped": search_skipped,
+            }
+
+        system = ANSWER_SYSTEM_PROMPT.replace(
+            "{guild_name}", guild_name or self.guild_name
+        ).replace("{current_datetime}", self._now_str()).replace(
+            "{speaker_section}", speaker_section
+        ).replace(
+            "{mimic_section}", mimic_section
+        ).replace(
+            "{taught_memories}", memory_section
+        ).replace(
+            "{context}", context
+        ).replace(
+            "{unknown_memory_rule}",
+            build_unknown_memory_rule(mimic_display_name if mimic_section else None)
+        ).replace(
+            "{mimic_final_reminder}",
+            build_mimic_final_reminder(
+                mimic_display_name if mimic_section else None
+            )
+        )
+        comp = await self.llm.complete(
+            self.answer_model, system, query,
+            temperature=0.7, max_tokens=self.answer_max_tokens,
+            history=hist_ans,
+        )
+        self._record(events, "answer", comp.model, comp.usage)
+
+        await self._flush(events, guild_id, user_id)
 
         # デバッグトレース（OI-21）。有効時のみ、質問・ヒットチャンク本文・回答を
         # まとめて chat_trace に残す（記録失敗は回答を止めない）。
