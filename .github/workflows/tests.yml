@@ -47,13 +47,41 @@ jobs:
       - name: pytest を実行
         run: python -m pytest -q
 
+  # ── 変更がドキュメントだけかを判定 ───────────────────────────────
+  # docs（*.md / docs/ 配下）だけの push では deploy を走らせない（無駄な再ビルド/再デプロイを防ぐ）。
+  # コード（.py 等）が1つでも変わっていれば code_changed=true となり deploy が走る。
+  detect-changes:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.filter.outputs.code_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                            # 差分判定のため履歴を全部取る
+      - name: コード変更の有無を判定（.md / docs/ 以外が変わったか）
+        id: filter
+        run: |
+          set -euo pipefail
+          base="${{ github.event.before }}"
+          # before が無効（初回 push 等）なら安全側に倒して deploy する
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$base" "${{ github.sha }}" | grep -qvE '(\.md$|^docs/)'; then
+            echo "code_changed=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "code_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ── CD（自動デプロイ）─────────────────────────────────────────
-  # develop に push（＝PR マージ）され、かつ pytest が緑のときだけ走る。
+  # develop に push（＝PR マージ）され、pytest が緑で、かつ docs 以外の変更があるときだけ走る。
   # 実行場所は GCP 検証機 remember-vm 上の self-hosted runner（Tailnet 内側）。
   # PR の更新や main への push では走らない（if 条件で develop の push に限定）。
   deploy:
-    needs: pytest                                   # pytest 成功が前提
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: [pytest, detect-changes]                 # pytest 成功＋docs以外の変更が前提
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop' && needs.detect-changes.outputs.code_changed == 'true'
     runs-on: [self-hosted, remember-vm]             # VM 上の常駐 runner（remember-vm ラベル）
 
     # 同時に複数のデプロイが走らないよう直列化（前のデプロイは中断しない）
