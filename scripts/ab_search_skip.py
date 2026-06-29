@@ -30,6 +30,7 @@ from src.rag.prompts import (
     ANSWER_SYSTEM_PROMPT,
     REWRITER_SYSTEM_PROMPT,
     build_context,
+    build_unknown_memory_rule,
 )
 from src.usage import compute_cost
 from src.vectorstore import VectorStore
@@ -136,6 +137,11 @@ class Runner:
             system_tpl.replace("{guild_name}", GUILD_NAME)
             .replace("{current_datetime}", self.now)
             .replace("{context}", context)
+            .replace("{speaker_section}", "")
+            .replace("{mimic_section}", "")
+            .replace("{taught_memories}", "")
+            .replace("{unknown_memory_rule}", build_unknown_memory_rule())
+            .replace("{mimic_final_reminder}", "")
         )
         comp = await self.llm.complete(
             self.answer_model, system, query, temperature=0.7, max_tokens=1500,

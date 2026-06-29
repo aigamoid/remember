@@ -20,7 +20,11 @@ load_dotenv()
 from src.api import build_engine
 from src.config import load_config
 from src.rag.llm import Usage
-from src.rag.prompts import ANSWER_SYSTEM_PROMPT, build_context
+from src.rag.prompts import (
+    ANSWER_SYSTEM_PROMPT,
+    build_context,
+    build_unknown_memory_rule,
+)
 from src.usage import compute_cost
 
 GUILD_ID = "1464840187061338317"
@@ -54,6 +58,10 @@ async def run_one(engine, cfg, question: str) -> None:
 
     system = ANSWER_SYSTEM_PROMPT.replace("{guild_name}", GUILD_NAME).replace(
         "{context}", build_context(hits)
+    ).replace(
+        "{unknown_memory_rule}", build_unknown_memory_rule()
+    ).replace(
+        "{mimic_final_reminder}", ""
     )
     pricing = cfg.get("pricing", {})
 

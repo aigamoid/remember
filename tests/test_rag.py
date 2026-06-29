@@ -12,10 +12,13 @@ from src.rag.llm import ChatLLM, Completion, Usage, strip_think
 from src.rag.prompts import (
     NO_SEARCH_SENTINEL,
     SKIP_CONTEXT,
+    build_mimic_sensitive_reply,
     build_context,
     build_memories,
     build_mimic_declaration,
     build_mimic_section,
+    build_unknown_memory_rule,
+    contains_sensitive_topic,
     persona_is_empty,
     sanitize_persona_card,
 )
@@ -1160,7 +1163,10 @@ class TestMimicInjection:
         )
         system = llm.calls[1]["system"]
         assert "{mimic_section}" not in system
-        assert "うさぎ" in system and "モノマネ" in system
+        assert "うさぎ" in system and "なりきって" in system
+        assert "ん〜、それは覚えてないかも〜" not in system
+        assert "うさぎさんの口調・性格を保ったまま" in system
+        assert "最後までその口調を保ち" in system
 
     def test_provider_receives_guild_and_channel(self, store):
         _seed(store)
@@ -1185,7 +1191,7 @@ class TestMimicInjection:
         )
         system = llm.calls[1]["system"]
         assert "{mimic_section}" not in system
-        assert "モノマネ" not in system
+        assert "なりきって" not in system
 
     def test_section_removed_without_channel_id(self, store):
         # channel_id 未指定（CLI等）なら mimic は効かずブロックも消える
@@ -1195,7 +1201,7 @@ class TestMimicInjection:
         asyncio.run(_engine_mimic(store, llm, provider).answer("g1", "q"))
         system = llm.calls[1]["system"]
         assert "{mimic_section}" not in system
-        assert "モノマネ" not in system
+        assert "なりきって" not in system
 
     def test_section_removed_when_none(self, store):
         _seed(store)
@@ -1206,7 +1212,7 @@ class TestMimicInjection:
             )
         )
         assert "{mimic_section}" not in llm.calls[1]["system"]
-        assert "モノマネ" not in llm.calls[1]["system"]
+        assert "なりきって" not in llm.calls[1]["system"]
 
     def test_provider_failure_does_not_break_answer(self, store):
         _seed(store)
@@ -1219,7 +1225,35 @@ class TestMimicInjection:
             _engine_mimic(store, llm, boom).answer("g1", "q", channel_id="c1")
         )
         assert result["answer"] == "答えだよ"
-        assert "モノマネ" not in llm.calls[1]["system"]
+        assert "なりきって" not in llm.calls[1]["system"]
+
+    def test_sensitive_topic_short_circuits_answer_llm(self, store):
+        _seed(store)
+        llm = FakeLLM(["ジェンダーの話"])  # rewrite だけ呼ばれ、answer LLM は呼ばれない
+        provider = lambda gid, cid: {"display_name": "うさぎ", "card": _CARD}
+        result = asyncio.run(
+            _engine_mimic(store, llm, provider).answer(
+                "g1", "ジェンダーについてどう思う？", channel_id="c1"
+            )
+        )
+        assert len(llm.calls) == 1
+        assert result["answer"].endswith("って感じ っす。")
+        assert "深掘りしない" in result["answer"]
+
+    def test_sensitive_topic_in_history_is_guarded(self, store):
+        _seed(store)
+        llm = FakeLLM(["それについて"])
+        provider = lambda gid, cid: {"display_name": "うさぎ", "card": _CARD}
+        result = asyncio.run(
+            _engine_mimic(store, llm, provider).answer(
+                "g1",
+                "それについてどう思う？",
+                history=[{"role": "user", "content": "ジェンダーについて"}],
+                channel_id="c1",
+            )
+        )
+        assert len(llm.calls) == 1
+        assert "深掘りしない" in result["answer"]
 
 
 class TestBuildPersonaCard:
@@ -1267,14 +1301,18 @@ class TestMimicBuilders:
 
     def test_sanitize_removes_sensitive(self):
         out = sanitize_persona_card({
-            "personality": "明るい", "speech_style": "宗教の話が多い",
-            "likes": ["ゲーム", "政治"], "nicknames": ["うさ"],
-            "catchphrases": [], "confidence": "high",
+            "personality": "明るい",
+            "speech_style": "宗教の話が多い",
+            "likes": ["ゲーム", "政治", "ジェンダー"],
+            "nicknames": ["うさ"],
+            "catchphrases": ["っす", "ちんちん"],
+            "confidence": "high",
         })
         assert out["personality"] == "明るい"
         assert out["speech_style"] == ""        # センシティブ語で除去
-        assert out["likes"] == ["ゲーム"]        # 「政治」だけ落ちる
+        assert out["likes"] == ["ゲーム"]        # センシティブ話題だけ落ちる
         assert out["nicknames"] == ["うさ"]
+        assert out["catchphrases"] == ["っす"]
 
     def test_persona_is_empty(self):
         assert persona_is_empty({"personality": "", "likes": [], "nicknames": [],
@@ -1287,6 +1325,22 @@ class TestMimicBuilders:
     def test_build_section_contains_traits(self):
         sec = build_mimic_section(_CARD, "うさぎ")
         assert "うさぎ" in sec and "明るい" in sec and "〜っす" in sec
+        assert "自分から明かさない" in sec
+
+    def test_unknown_memory_rule_switches_for_mimic(self):
+        normal = build_unknown_memory_rule()
+        mimic = build_unknown_memory_rule("うさぎ")
+        assert "ん〜、それは覚えてないかも〜" in normal
+        assert "ん〜、それは覚えてないかも〜" not in mimic
+        assert "うさぎさんの口調・性格を保ったまま" in mimic
+
+    def test_sensitive_topic_helpers(self):
+        assert contains_sensitive_topic("ジェンダーについて")
+        assert contains_sensitive_topic("えっちな話")
+        assert not contains_sensitive_topic("ゲームの話")
+        reply = build_mimic_sensitive_reply(_CARD, "うさぎ")
+        assert reply.endswith("って感じ っす。")
+        assert "深掘りしない" in reply
 
     def test_declaration_mentions_name(self):
         dec = build_mimic_declaration(_CARD, "うさぎ")

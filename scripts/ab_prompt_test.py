@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 
 from src.rag.llm import ChatLLM
-from src.rag.prompts import build_context
+from src.rag.prompts import build_context, build_unknown_memory_rule
 
 
 def _now_str(tz_offset: int = 9) -> str:
@@ -35,6 +35,11 @@ def _fill(prompt: str, guild_name: str, context: str) -> str:
         prompt.replace("{guild_name}", guild_name)
         .replace("{current_datetime}", _now_str())
         .replace("{context}", context)
+        .replace("{speaker_section}", "")
+        .replace("{mimic_section}", "")
+        .replace("{taught_memories}", "")
+        .replace("{unknown_memory_rule}", build_unknown_memory_rule())
+        .replace("{mimic_final_reminder}", "")
     )
 
 
