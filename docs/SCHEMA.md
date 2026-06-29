@@ -229,6 +229,7 @@ CREATE TABLE chat_trace (
     answer_model      TEXT,
     rerank_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでリランクが効いたか
     hybrid_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでハイブリッド検索が効いたか（#54/#58）
+    recency_enabled   BOOLEAN DEFAULT FALSE, -- このリクエストで recency 時間減衰が効いたか（#55）
     prompt_tokens     INTEGER DEFAULT 0,     -- 回答LLMの入力トークン
     completion_tokens INTEGER DEFAULT 0,     -- 回答LLMの出力トークン
     total_tokens      INTEGER DEFAULT 0,     -- 全LLM/embeddingの合計トークン

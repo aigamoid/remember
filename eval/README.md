@@ -46,3 +46,22 @@ dense / hybrid のカテゴリ別 recall@k と latency p95 が出力される。
 - **本番「わいわい」で評価する際は、実サーバーの実際の話題に基づいて作り直す**こと
   （`golden_waiwai.json` 等を別途用意）。質問は実在の話題から、`expect_any` は実在の語から取る。
 - 一度作れば 案B（recency #55）・案C のA/Bや、プロンプト/モデル変更時の回帰チェックにも再利用できる。
+
+## 案B（recency 時間減衰 #55）のA/B
+
+案A（ハイブリッド）マージ後の**積み上げ評価**。`scripts/eval_recency.py` で
+**hybrid（ベースライン）と hybrid+recency** を比較する（dense 比較は eval_retrieval.py の役割）。
+
+```sh
+# 既定の半減期で採点
+python scripts/eval_recency.py <guild_id> eval/golden_recency.example.json
+# 半減期を変えてチューニング（例: 7日）
+python scripts/eval_recency.py <guild_id> eval/golden_recency.example.json 7
+```
+
+- golden は **時系列(最近)系**（「最近」「直近」など）と **話題(不変)系** を混ぜる
+  （`golden_recency.example.json` 参照）。
+- 見る指標: 時系列系で **top_k の平均age（日）が下がる**（新しめの話が上位に来る）／
+  話題系で **ヒット率が baseline を下回らない**／latency 増が許容内。
+- recency は検索の並べ替えだけを変える（再インデックス不要）。**本番ONは config.yml の
+  `rag.recency.enabled: true`**。半減期は実データで要チューニング。

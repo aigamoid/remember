@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS chat_trace (
     answer_model      TEXT,
     rerank_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでリランクが効いたか
     hybrid_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでハイブリッド検索が効いたか（#54）
+    recency_enabled   BOOLEAN DEFAULT FALSE, -- このリクエストで recency 時間減衰が効いたか（#55）
     prompt_tokens     INTEGER DEFAULT 0,     -- 回答LLMの入力トークン
     completion_tokens INTEGER DEFAULT 0,     -- 回答LLMの出力トークン
     total_tokens      INTEGER DEFAULT 0,     -- 全LLM/embeddingの合計トークン
@@ -236,6 +237,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_guild_author_timestamp
 -- 後付けマイグレーション（既存DB向け・冪等）。CREATE TABLE IF NOT EXISTS は既存テーブルに
 -- 列を足さないため、後から増えた列はここで ADD COLUMN IF NOT EXISTS する。
 ALTER TABLE chat_trace ADD COLUMN IF NOT EXISTS hybrid_enabled BOOLEAN DEFAULT FALSE;  -- #54/#58
+ALTER TABLE chat_trace ADD COLUMN IF NOT EXISTS recency_enabled BOOLEAN DEFAULT FALSE;  -- #55
 -- #56 案C: 会話から自動抽出した記憶を承認フロー経由で育てる。既定OFF・全件pending着地・soft-delete。
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';        -- pending|active|archived|rejected
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'explicit';      -- explicit|auto
@@ -922,6 +924,7 @@ def insert_trace(
     answer_model: str | None = None,
     rerank_enabled: bool = False,
     hybrid_enabled: bool = False,
+    recency_enabled: bool = False,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
@@ -934,14 +937,14 @@ def insert_trace(
         """
         INSERT INTO chat_trace
             (guild_id, user_id, created_at, question, rewritten_query, answer,
-             sources, answer_model, rerank_enabled, hybrid_enabled, prompt_tokens,
-             completion_tokens, total_tokens, cost_usd, latency_ms)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             sources, answer_model, rerank_enabled, hybrid_enabled, recency_enabled,
+             prompt_tokens, completion_tokens, total_tokens, cost_usd, latency_ms)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (guild_id, user_id, _now(), question, rewritten_query, answer,
          Json(sources) if sources is not None else None,
-         answer_model, rerank_enabled, hybrid_enabled, prompt_tokens,
-         completion_tokens, total_tokens, cost_usd, latency_ms),
+         answer_model, rerank_enabled, hybrid_enabled, recency_enabled,
+         prompt_tokens, completion_tokens, total_tokens, cost_usd, latency_ms),
     )
 
 

@@ -37,6 +37,14 @@ from src.sparse import SparseEncoder
 from src.usage import compute_cost
 from src.vectorstore import VectorStore
 
+# recency 時間減衰（#55）で「最近」系の質問を検出して半減期を短くするための既定キーワード。
+# config の rag.recency.recent_keywords で上書きできる。書き換え後クエリ（rewritten）に対して
+# 部分一致で判定する。誤検出してもブロックではなく半減期が短くなるだけなので安全側。
+_DEFAULT_RECENT_KEYWORDS = [
+    "最近", "さっき", "この前", "この間", "近頃", "近況", "最新",
+    "今週", "昨日", "今日", "直近", "いまどうなって", "今どうなって",
+]
+
 
 class RagEngine:
     def __init__(
@@ -114,6 +122,33 @@ class RagEngine:
         hybrid_cfg = rag_cfg.get("hybrid", {})
         self.hybrid_enabled: bool = bool(hybrid_cfg.get("enabled", False))
         self.hybrid_prefetch_k: int = hybrid_cfg.get("prefetch_k", 30)
+        # recency 時間減衰（#55）。enabled のとき、検索ヒット（=過去ログチャンクのみ）に
+        # anchor_timestamp ベースの半減期減衰を掛けて並べ替える（既定オフ）。永続事実
+        # （memories）は memory_provider 経由で別注入され検索を通らないため、構造的に減衰対象外。
+        # 案A（ハイブリッド #54）の RRF 融合スコアにも dense の cosine にも乗算で効く
+        # （どちらも単調なので順位入れ替えとして機能する）。
+        recency_cfg = rag_cfg.get("recency", {})
+        self.recency_enabled: bool = bool(recency_cfg.get("enabled", False))
+        # 半減期（日）。この日数が経過するごとにスコア寄与が半分になる。小さいほど新しい話を優先。
+        self.recency_half_life_days: float = float(
+            recency_cfg.get("half_life_days", 30)
+        )
+        # 「最近」系クエリ検出時に使う短い半減期（時系列依存質問で減衰を強める）。
+        self.recency_recent_half_life_days: float = float(
+            recency_cfg.get("recent_half_life_days", 7)
+        )
+        # 減衰係数の下限。古くても高関連のチャンクを完全には捨てないための床（0で床なし）。
+        self.recency_score_floor: float = float(recency_cfg.get("score_floor", 0.1))
+        # 減衰で再ランクする前に取る候補数（→ top_k 件に精選）。多めに取らないと
+        # 減衰が top_k 内の入れ替えしかできず「埋もれた新しめのチャンク」を拾えない。
+        self.recency_candidate_k: int = int(recency_cfg.get("candidate_k", 30))
+        # 「最近」系キーワード検出で recent_half_life_days に切り替えるか。
+        self.recency_recent_boost: bool = bool(
+            recency_cfg.get("recent_boost", True)
+        )
+        self.recency_recent_keywords: list[str] = list(
+            recency_cfg.get("recent_keywords", _DEFAULT_RECENT_KEYWORDS)
+        )
         self.tz_offset: int = cfg.get("chunk", {}).get("timezone_offset", 9)
         self.pricing: dict = cfg.get("pricing", {})
         self.store = store
@@ -453,6 +488,65 @@ class RagEngine:
         reranked = [hits[i] for i in result.order if 0 <= i < len(hits)]
         return reranked or hits[: self.top_k]
 
+    @staticmethod
+    def _parse_anchor_ts(value: object) -> datetime | None:
+        """anchor_timestamp（ISO8601・UTC想定）を aware datetime にする。崩れていれば None。
+
+        naive（tz情報なし）の値は UTC とみなす。"Z" サフィックスも受ける。
+        """
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _is_recent_query(self, text: str) -> bool:
+        """「最近」系の時系列クエリかどうか（recent_boost 有効時のみ true になりうる）。"""
+        if not self.recency_recent_boost:
+            return False
+        t = text or ""
+        return any(kw in t for kw in self.recency_recent_keywords)
+
+    def _apply_recency(self, hits: list[dict], rewritten: str) -> list[dict]:
+        """検索ヒットに anchor_timestamp の半減期減衰を掛けて並べ替え、top_k 件を返す（#55）。
+
+        new_score = base_score * max(score_floor, 0.5 ** (age_days / half_life))。
+        age は「今」との差（日）。anchor_timestamp が壊れている/無い点は減衰係数 1.0
+        （= 減衰させない・安全側）。「最近」系クエリなら半減期を短くして新しさを強める。
+        各 hit に recency_factor / base_score を残し、score を減衰後値に置き換える
+        （sources・chat_trace でA/B観測できるように）。
+        """
+        if not hits:
+            return hits
+        now = datetime.now(timezone.utc)
+        half_life = (
+            self.recency_recent_half_life_days
+            if self._is_recent_query(rewritten)
+            else self.recency_half_life_days
+        )
+        scored: list[dict] = []
+        for h in hits:
+            base = h.get("score")
+            base = float(base) if base is not None else 0.0
+            ts = self._parse_anchor_ts(h.get("anchor_timestamp"))
+            if ts is None or half_life <= 0:
+                factor = 1.0
+            else:
+                age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
+                factor = max(self.recency_score_floor, 0.5 ** (age_days / half_life))
+            scored.append({
+                **h,
+                "base_score": base,
+                "recency_factor": factor,
+                "score": base * factor,
+            })
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[: self.top_k]
+
     async def answer(
         self,
         guild_id: str,
@@ -511,10 +605,15 @@ class RagEngine:
             use_hybrid = self.hybrid_enabled and self.sparse_encoder is not None
             sparse = self.sparse_encoder.encode(rewritten) if use_hybrid else None
 
-            # リランク有効時は多め（rerank_top_n）に取って後で top_k に精選する。
-            candidate_k = (
-                max(self.rerank_top_n, self.top_k) if use_rerank else self.top_k
-            )
+            # リランク／recency 有効時は多めに取って後で top_k に精選する。
+            # （リランク優先。recency は top_k 内の入れ替えだけだと埋もれた新しめの
+            #  チャンクを拾えないので候補を広げる・#55）。
+            if use_rerank:
+                candidate_k = max(self.rerank_top_n, self.top_k)
+            elif self.recency_enabled:
+                candidate_k = max(self.recency_candidate_k, self.top_k)
+            else:
+                candidate_k = self.top_k
             hits = await asyncio.to_thread(
                 self.store.search,
                 str(guild_id),
@@ -525,6 +624,10 @@ class RagEngine:
             )
             if use_rerank and hits:
                 hits = await self._rerank(rewritten, hits, events)
+            # recency 時間減衰（#55）。検索（＋リランク）後のヒットに減衰を掛けて
+            # 並べ替え、top_k 件に精選する。memories は検索を通らないので対象外。
+            if self.recency_enabled and hits:
+                hits = self._apply_recency(hits, rewritten)
             context = build_context(hits)
 
         # 発言者名（OI-22）。あればブロックを差し込み、無ければ空文字で消す。
@@ -590,6 +693,8 @@ class RagEngine:
                 "channel_name": h.get("channel_name"),
                 "anchor_timestamp": h.get("anchor_timestamp"),
                 "score": h.get("score"),
+                # recency 適用時のみ減衰係数が入る（未適用なら None・#55）。
+                "recency_factor": h.get("recency_factor"),
             }
             for h in hits
         ]
@@ -608,6 +713,8 @@ class RagEngine:
                         "channel_name": h.get("channel_name"),
                         "anchor_timestamp": h.get("anchor_timestamp"),
                         "score": h.get("score"),
+                        "base_score": h.get("base_score"),
+                        "recency_factor": h.get("recency_factor"),
                         "chunk_text": h.get("chunk_text"),
                         "context_text": h.get("context_text"),
                     }
@@ -616,6 +723,7 @@ class RagEngine:
                 "answer_model": comp.model,
                 "rerank_enabled": bool(use_rerank),
                 "hybrid_enabled": bool(self.hybrid_enabled and self.sparse_encoder),
+                "recency_enabled": bool(self.recency_enabled),
                 "prompt_tokens": comp.usage.prompt_tokens,
                 "completion_tokens": comp.usage.completion_tokens,
                 "total_tokens": sum(e.get("total_tokens", 0) for e in events),

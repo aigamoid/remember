@@ -966,6 +966,177 @@ class TestHybrid:
         assert all(s["channel_name"] == "A" for s in result["sources"])
 
 
+# ── recency 時間減衰（#55：過去ログのみ・memories除外）──────────────────────
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+def _engine_recency(
+    store, llm, enabled=True, half_life=30, score_floor=0.1,
+    candidate_k=30, top_k=5, recent_boost=True,
+) -> RagEngine:
+    cfg = {"rag": {
+        "top_k": top_k,
+        "recency": {
+            "enabled": enabled, "half_life_days": half_life,
+            "score_floor": score_floor, "candidate_k": candidate_k,
+            "recent_boost": recent_boost,
+        },
+    }}
+    return RagEngine(cfg, store, FakeEmbedder(), llm)
+
+
+def _iso(days_ago: float) -> str:
+    """いまから days_ago 日前の anchor_timestamp（ISO8601・UTC）。"""
+    return (
+        datetime.now(timezone.utc) - timedelta(days=days_ago)
+    ).isoformat()
+
+
+def _seed_ts(store, channel, vector, ts, guild_id="g1"):
+    """anchor_timestamp と dense ベクトルを指定して1チャンク登録する。"""
+    store.upsert(
+        [{
+            "guild_id": guild_id,
+            "chunk_id": channel,
+            "channel_id": "ch1",
+            "channel_name": channel,
+            "chunk_text": f"本文{channel}",
+            "context_text": None,
+            "anchor_timestamp": ts,
+        }],
+        [vector],
+    )
+
+
+class TestParseAnchorTs:
+    def test_iso_with_offset(self):
+        dt = RagEngine._parse_anchor_ts("2026-01-01T00:00:00+00:00")
+        assert dt is not None and dt.tzinfo is not None
+
+    def test_z_suffix(self):
+        dt = RagEngine._parse_anchor_ts("2026-01-01T00:00:00Z")
+        assert dt is not None and dt.utcoffset().total_seconds() == 0
+
+    def test_naive_treated_as_utc(self):
+        dt = RagEngine._parse_anchor_ts("2026-01-01T00:00:00")
+        assert dt is not None and dt.tzinfo is not None
+
+    def test_garbage_returns_none(self):
+        assert RagEngine._parse_anchor_ts("not-a-date") is None
+
+    def test_empty_returns_none(self):
+        assert RagEngine._parse_anchor_ts(None) is None
+
+
+class TestIsRecentQuery:
+    def test_detects_keyword(self, store):
+        eng = _engine_recency(store, FakeLLM([]))
+        assert eng._is_recent_query("最近どうなった？") is True
+
+    def test_non_recent(self, store):
+        eng = _engine_recency(store, FakeLLM([]))
+        assert eng._is_recent_query("かにじるって誰？") is False
+
+    def test_boost_disabled_never_recent(self, store):
+        eng = _engine_recency(store, FakeLLM([]), recent_boost=False)
+        assert eng._is_recent_query("最近どうなった？") is False
+
+
+class TestRecency:
+    # 古いチャンクほど高い base スコア（cosine）になる種。query=[1,0,0,0]。
+    # A: cosine=1.0（最も関連）だが古い / B: cosine≈0.7 だが新しい。
+    _OLD_VEC = [1.0, 0.0, 0.0, 0.0]
+    _NEW_VEC = [0.7, 0.714, 0.0, 0.0]
+
+    def test_newer_chunk_promoted_when_enabled(self, store):
+        _seed_ts(store, "old", self._OLD_VEC, _iso(2000))   # 約5.5年前
+        _seed_ts(store, "new", self._NEW_VEC, _iso(1))       # 昨日
+        llm = FakeLLM(["q", "答え"])
+        result = asyncio.run(_engine_recency(store, llm).answer("g1", "質問"))
+        # base順なら old(1.0)が先頭だが、減衰で new が先頭に来る
+        assert result["sources"][0]["channel_name"] == "new"
+
+    def test_disabled_keeps_base_order(self, store):
+        _seed_ts(store, "old", self._OLD_VEC, _iso(2000))
+        _seed_ts(store, "new", self._NEW_VEC, _iso(1))
+        llm = FakeLLM(["q", "答え"])
+        result = asyncio.run(
+            _engine_recency(store, llm, enabled=False).answer("g1", "質問")
+        )
+        # 減衰なしなら cosine が高い old が先頭のまま
+        assert result["sources"][0]["channel_name"] == "old"
+
+    def test_recency_factor_recorded_in_sources(self, store):
+        _seed_ts(store, "new", self._OLD_VEC, _iso(0))   # ほぼ今
+        llm = FakeLLM(["q", "答え"])
+        result = asyncio.run(_engine_recency(store, llm).answer("g1", "質問"))
+        f = result["sources"][0]["recency_factor"]
+        assert f is not None and f > 0.9   # 新しいチャンクは減衰しない
+
+    def test_factor_none_when_disabled(self, store):
+        _seed_ts(store, "x", self._OLD_VEC, _iso(10))
+        llm = FakeLLM(["q", "答え"])
+        result = asyncio.run(
+            _engine_recency(store, llm, enabled=False).answer("g1", "質問")
+        )
+        assert result["sources"][0]["recency_factor"] is None
+
+    def test_missing_timestamp_not_decayed(self, store):
+        # anchor_timestamp が無い点は factor=1.0（安全側で減衰させない）
+        hits = [{"score": 0.5, "anchor_timestamp": None, "channel_name": "x"}]
+        eng = _engine_recency(store, FakeLLM([]))
+        out = eng._apply_recency(hits, "質問")
+        assert out[0]["recency_factor"] == 1.0
+        assert out[0]["score"] == 0.5
+
+    def test_score_floor_applied(self, store):
+        # 非常に古くても score_floor 未満には減衰しない
+        hits = [{"score": 1.0, "anchor_timestamp": _iso(100000), "channel_name": "x"}]
+        eng = _engine_recency(store, FakeLLM([]), score_floor=0.1)
+        out = eng._apply_recency(hits, "質問")
+        assert abs(out[0]["recency_factor"] - 0.1) < 1e-9
+
+    def test_recent_query_decays_harder(self, store):
+        # 「最近」系クエリは半減期が短くなり、同じ古さでも factor が小さくなる
+        eng = _engine_recency(store, FakeLLM([]), half_life=30)
+        old = [{"score": 1.0, "anchor_timestamp": _iso(30), "channel_name": "x"}]
+        normal = eng._apply_recency(old, "かにじるの話")[0]["recency_factor"]
+        recent = eng._apply_recency(old, "最近の話")[0]["recency_factor"]
+        assert recent < normal
+
+    def test_candidate_pool_enlarged_for_recency(self, store):
+        # recency 有効時は候補を candidate_k まで広げてから top_k に精選する。
+        # 古い高cosineを top_k 個 + 新しい低cosineを1個。top_k=2, candidate_k=10。
+        # 候補を広げないと新しいチャンクは取れない（base順で圏外）。
+        for i in range(5):
+            # cosineを少しずつ下げた古いチャンク（base上位を埋める）
+            v = [1.0 - i * 0.01, (2 * i * 0.01) ** 0.5, 0.0, 0.0]
+            _seed_ts(store, f"old{i}", v, _iso(1000 + i))
+        _seed_ts(store, "new", [0.6, 0.8, 0.0, 0.0], _iso(0))  # 新しいが低cosine
+        llm = FakeLLM(["q", "答え"])
+        result = asyncio.run(
+            _engine_recency(store, llm, top_k=2, candidate_k=10).answer("g1", "質問")
+        )
+        names = [s["channel_name"] for s in result["sources"]]
+        assert "new" in names   # 候補拡張のおかげで新チャンクが top_k に入る
+
+    def test_recency_enabled_flag_in_trace(self, store):
+        _seed_ts(store, "x", self._OLD_VEC, _iso(5))
+        captured: list[dict] = []
+        cfg = {"rag": {
+            "top_k": 5, "debug_trace": True,
+            "recency": {"enabled": True, "half_life_days": 30},
+        }}
+        llm = FakeLLM(["q", "答え"])
+        engine = RagEngine(
+            cfg, store, FakeEmbedder(), llm, trace_recorder=captured.append
+        )
+        asyncio.run(engine.answer("g1", "質問"))
+        assert captured[0]["recency_enabled"] is True
+        assert captured[0]["sources"][0]["recency_factor"] is not None
+
+
 def _engine_mimic(store, llm, provider, enabled=True) -> RagEngine:
     cfg = {"rag": {"top_k": 5, "mimic_enabled": enabled}}
     return RagEngine(cfg, store, FakeEmbedder(), llm, mimic_provider=provider)

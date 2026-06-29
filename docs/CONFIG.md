@@ -78,6 +78,13 @@ rag:
     provider: "jina"                          # 現状 jina のみ対応
     model: "jina-reranker-v2-base-multilingual"
     top_n: 30                                 # リランク前に dense で取る候補数（→ top_k 件に精選）
+  recency:                                    # #55: 時間減衰で検索を時系列に強くする（過去ログのみ・既定オフ）
+    enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから
+    half_life_days: 30                        # 半減期(日)。この日数経過でスコア寄与が半減。小さいほど新しい話を優先
+    recent_half_life_days: 7                  # 「最近」系クエリ検出時の短い半減期（時系列依存質問で減衰を強める）
+    score_floor: 0.1                          # 減衰係数の下限（古くても高関連チャンクを完全には捨てない・0で床なし）
+    candidate_k: 30                           # 減衰で再ランクする前に取る候補数（→ top_k 件に精選）
+    recent_boost: true                        # 「最近」系キーワード検出で recent_half_life_days に切り替える
 
 pricing:                              # usage_log のコスト推定に使う単価（USD/100万トークン）
   "google/gemini-2.5-flash": {input: 0.30, output: 2.50}
@@ -95,6 +102,12 @@ worker:
 
 > Dify / Ollama 関連のセクションは廃止した（2026-06-11）。
 > 旧設定は git 履歴と `dify/waiwai-oracle.yml`（移行元プロンプトの記録）を参照。
+
+> `rag.recency`（#55）は検索ヒット（過去ログチャンク）に anchor_timestamp ベースの半減期減衰を
+> 掛けて時系列に強くする。永続事実（memories）は `memory_provider` 経由で別注入され検索を通らないため
+> 構造的に減衰対象外。案A（ハイブリッド #54）の RRF 融合スコアの上に乗算で重ねる設計で、enabled が
+> true でも検索の並べ替えが変わるだけ（再インデックス不要）。本番ONは `scripts/eval_recency.py` で
+> 実データA/B（時系列で平均ageが下がる／話題でヒット率が落ちない）を確認してから。半減期は要チューニング。
 
 ## .env
 

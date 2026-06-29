@@ -1,0 +1,37 @@
+[
+  {
+    "category": "時系列(最近)",
+    "question": "最近このサーバーで何があった？",
+    "expect_any": ["わいわいちゃん", "過去ログ"]
+  },
+  {
+    "category": "時系列(最近)",
+    "question": "直近の話題を教えて",
+    "expect_any": ["わいわいちゃん", "過去ログ"]
+  },
+  {
+    "category": "時系列(最近)",
+    "question": "いま一番新しい出来事は？",
+    "expect_any": ["わいわいちゃん", "過去ログ"]
+  },
+  {
+    "category": "話題(不変)",
+    "question": "moltbookの話はどうなった？",
+    "expect_any": ["moltbook", "moltboo"]
+  },
+  {
+    "category": "話題(不変)",
+    "question": "かにじるって誰？",
+    "expect_any": ["かにじる"]
+  },
+  {
+    "category": "話題(不変)",
+    "question": "社内QAポータルを作る相談ってあった？",
+    "expect_any": ["QAポータル", "社内QA", "QA"]
+  },
+  {
+    "category": "話題(不変)",
+    "question": "セマンティック検索を設定したときの話",
+    "expect_any": ["セマンティック検索"]
+  }
+]
