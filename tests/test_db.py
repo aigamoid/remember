@@ -14,7 +14,6 @@ from src.db import (
     fetch_allowed_channels,
     fetch_guilds_overview,
     count_memories,
-    delete_memory,
     approve_memory_candidate,
     fetch_active_memories,
     fetch_last_job,
@@ -676,17 +675,7 @@ class TestMemories:
         assert count_memories(conn, "g-1") == 2
         assert count_memories(conn, "g-2") == 1
 
-    def test_delete(self, conn):
-        mid = insert_memory(conn, "g-1", "消す対象")
-        assert delete_memory(conn, "g-1", mid) is True
-        assert count_memories(conn, "g-1") == 0
-        # 既に無い／別 guild の id は False（消えない）
-        assert delete_memory(conn, "g-1", mid) is False
-
-    def test_delete_wrong_guild_keeps_row(self, conn):
-        mid = insert_memory(conn, "g-1", "他guildからは消せない")
-        assert delete_memory(conn, "g-2", mid) is False
-        assert count_memories(conn, "g-1") == 1
+    # 記憶削除は #56 で soft-delete に一本化（TestAutoMemory.test_soft_delete_active で検証）。
 
 
 # ── 自動記憶 案C（#56）: 候補→承認/却下/soft-delete ───────────────
