@@ -71,7 +71,8 @@ CREATE TABLE messages (
     is_pinned      INTEGER DEFAULT 0,
     reaction_count INTEGER DEFAULT 0,
     thread_id     TEXT,                     -- スレッド起点でなければNULL
-    thread_name   TEXT
+    thread_name   TEXT,
+    is_bot        INTEGER NOT NULL DEFAULT 0 -- #68: Bot/Webhook発言。chunker/contextualizer が除外（self-poisoning防止）
 );
 
 -- chunkerが頻繁に発行するクエリ用インデックス
