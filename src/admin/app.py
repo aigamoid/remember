@@ -140,6 +140,64 @@ def create_app() -> FastAPI:
             conn.close()
         return RedirectResponse("/billing", status_code=303)
 
+    # ---- 自動記憶の承認（#56 案C）。自動抽出は全件 pending で着地し、ここで人が承認する ----
+
+    @app.get("/memories", response_class=HTMLResponse)
+    def memories(request: Request):
+        if not _is_authed(request):
+            return RedirectResponse("/login", status_code=303)
+        try:
+            conn = db.get_connection(init=True)
+        except Exception as e:
+            return _TEMPLATES.TemplateResponse(
+                request, "error.html", {"message": str(e)}, status_code=503
+            )
+        try:
+            ctx = {
+                "pending": db.fetch_pending_memories(conn),
+                "active": db.fetch_active_memories(conn),
+            }
+        finally:
+            conn.close()
+        return _TEMPLATES.TemplateResponse(request, "memories.html", ctx)
+
+    @app.post("/memories/approve")
+    def memories_approve(request: Request, candidate_id: int = Form(...)):
+        if not _is_authed(request):
+            return RedirectResponse("/login", status_code=303)
+        conn = db.get_connection(init=True)
+        try:
+            db.approve_memory_candidate(conn, candidate_id)
+        finally:
+            conn.close()
+        return RedirectResponse("/memories", status_code=303)
+
+    @app.post("/memories/reject")
+    def memories_reject(request: Request, candidate_id: int = Form(...)):
+        if not _is_authed(request):
+            return RedirectResponse("/login", status_code=303)
+        conn = db.get_connection(init=True)
+        try:
+            db.reject_memory_candidate(conn, candidate_id)
+        finally:
+            conn.close()
+        return RedirectResponse("/memories", status_code=303)
+
+    @app.post("/memories/delete")
+    def memories_delete(
+        request: Request,
+        guild_id: str = Form(...),
+        memory_id: int = Form(...),
+    ):
+        if not _is_authed(request):
+            return RedirectResponse("/login", status_code=303)
+        conn = db.get_connection(init=True)
+        try:
+            db.soft_delete_memory(conn, guild_id, memory_id)  # 物理削除しない
+        finally:
+            conn.close()
+        return RedirectResponse("/memories", status_code=303)
+
     return app
 
 
