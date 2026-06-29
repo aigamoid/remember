@@ -18,6 +18,7 @@ class RawMessage:
     reaction_count: int
     thread_id: str | None
     thread_name: str | None
+    is_bot: bool = False    # #68: Bot/Webhook 発言。取り込み（チャンク化・文脈付与）から除外する
 
 
 @dataclass
