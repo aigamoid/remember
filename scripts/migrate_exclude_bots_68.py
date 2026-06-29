@@ -147,9 +147,15 @@ async def main_async(args: argparse.Namespace) -> None:
         removed = delete_chunks_for_guild(conn, g)
         print(f"  旧チャンク削除: {removed} 件（Qdrantも削除）")
         run_id = str(uuid.uuid4())
-        n_chunks = run_chunker(conn, cfg, run_id, g)
-        run_contextualizer(conn, cfg, g)
-        n_idx = run_indexer(conn, cfg, store, embedder, g, False, sparse)
+        # run_contextualizer は内部で asyncio.run する（worker._ingest と同様）。
+        # ここは既に asyncio.run 配下のループ内なので、ブロッキング呼び出しは
+        # to_thread で別スレッドに逃がす（さもないと "asyncio.run() cannot be
+        # called from a running event loop" でクラッシュする）。
+        n_chunks = await asyncio.to_thread(run_chunker, conn, cfg, run_id, g)
+        await asyncio.to_thread(run_contextualizer, conn, cfg, g)
+        n_idx = await asyncio.to_thread(
+            run_indexer, conn, cfg, store, embedder, g, False, sparse
+        )
         print(f"  再チャンク {n_chunks} / 再index {n_idx}")
 
     conn.close()
