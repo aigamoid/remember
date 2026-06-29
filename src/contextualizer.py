@@ -58,6 +58,7 @@ def _get_preceding_messages(
         SELECT author_name, content, timestamp, has_attachment
         FROM messages
         WHERE channel_id = %s
+          AND is_bot = 0  -- #68: Bot発言を文脈(context_text)から除外＝self-poisoning防止
           AND (timestamp < %s OR (timestamp = %s AND id < %s))
         ORDER BY timestamp DESC, id DESC
         LIMIT %s
