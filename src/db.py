@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS messages (
     is_pinned      INTEGER DEFAULT 0,
     reaction_count INTEGER DEFAULT 0,
     thread_id      TEXT,
-    thread_name    TEXT
+    thread_name    TEXT,
+    is_bot         INTEGER NOT NULL DEFAULT 0   -- #68: Bot/Webhook発言。取り込み(チャンク化/文脈付与)から除外
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_channel_timestamp
@@ -238,6 +239,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_guild_author_timestamp
 -- 列を足さないため、後から増えた列はここで ADD COLUMN IF NOT EXISTS する。
 ALTER TABLE chat_trace ADD COLUMN IF NOT EXISTS hybrid_enabled BOOLEAN DEFAULT FALSE;  -- #54/#58
 ALTER TABLE chat_trace ADD COLUMN IF NOT EXISTS recency_enabled BOOLEAN DEFAULT FALSE;  -- #55
+-- #68: Bot/Webhook 発言フラグ。チャンク化・文脈付与から除外して self-poisoning を防ぐ。
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_bot INTEGER NOT NULL DEFAULT 0;
 -- #56 案C: 会話から自動抽出した記憶を承認フロー経由で育てる。既定OFF・全件pending着地・soft-delete。
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';        -- pending|active|archived|rejected
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'explicit';      -- explicit|auto
@@ -521,15 +524,15 @@ def insert_message(conn: psycopg.Connection, msg: RawMessage) -> None:
         INSERT INTO messages
             (id, guild_id, channel_id, channel_name, author_id, author_name,
              content, timestamp, has_attachment, is_pinned, reaction_count,
-             thread_id, thread_name)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             thread_id, thread_name, is_bot)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (id) DO NOTHING
         """,
         (
             msg.id, msg.guild_id, msg.channel_id, msg.channel_name,
             msg.author_id, msg.author_name, msg.content,
             msg.timestamp, int(msg.has_attachment), int(msg.is_pinned),
-            msg.reaction_count, msg.thread_id, msg.thread_name,
+            msg.reaction_count, msg.thread_id, msg.thread_name, int(msg.is_bot),
         ),
     )
 
@@ -867,6 +870,72 @@ def purge_guild_data(conn: psycopg.Connection, guild_id: str) -> dict:
         "traces": traces,
         "usage": usage,
     }
+
+
+# ---- #68: 既存データからの Bot/Webhook 除外（後始末スクリプト用） ----
+
+def distinct_message_authors(
+    conn: psycopg.Connection, guild_id: str | None = None
+) -> list[tuple[str, str]]:
+    """messages に出現する (author_id, author_name) の重複なしリストを返す（#68）。"""
+    if guild_id is None:
+        rows = conn.execute(
+            "SELECT DISTINCT author_id, author_name FROM messages"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT author_id, author_name FROM messages WHERE guild_id = %s",
+            (guild_id,),
+        ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def mark_authors_as_bot(conn: psycopg.Connection, author_ids: list[str]) -> int:
+    """指定 author_id の既存 messages を is_bot=1 にマークする。更新件数を返す（#68）。
+
+    既存行は再クロールでは更新されない（ON CONFLICT DO NOTHING＋増分取得）ため、
+    Discord API で判定した Bot/Webhook の author_id をここで一括是正する。
+    """
+    if not author_ids:
+        return 0
+    cur = conn.execute(
+        "UPDATE messages SET is_bot = 1 WHERE author_id = ANY(%s) AND is_bot = 0",
+        (list(author_ids),),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def delete_chunks_for_guild(conn: psycopg.Connection, guild_id: str) -> int:
+    """1ギルドの chunk_index を全削除する（#68・再チャンク前の作り直し用）。"""
+    cur = conn.execute(
+        "DELETE FROM chunk_index WHERE guild_id = %s", (guild_id,)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def guild_ids_with_bot_messages(conn: psycopg.Connection) -> list[str]:
+    """is_bot=1 の messages を持つギルドの guild_id を返す（#68・再ビルド対象の特定）。"""
+    rows = conn.execute(
+        "SELECT DISTINCT guild_id FROM messages WHERE is_bot = 1"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def reject_auto_memories_by_subject(
+    conn: psycopg.Connection, subjects: list[str]
+) -> int:
+    """subject が一致する pending の自動記憶を却下する（#68・Bot由来記憶の一掃）。"""
+    if not subjects:
+        return 0
+    cur = conn.execute(
+        "UPDATE memories SET status = 'rejected' "
+        "WHERE origin = 'auto' AND status = 'pending' AND subject = ANY(%s)",
+        (list(subjects),),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 # ---- run_log ----
