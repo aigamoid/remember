@@ -582,6 +582,19 @@ class TestChatTrace:
         assert rows["g-1"] is True
         assert rows["g-2"] is False
 
+    def test_recency_enabled_round_trip(self, conn):
+        # #55: recency_enabled を渡すと保存・読み戻しできる。既定は False。
+        insert_trace(conn, "g-1", "最近の質問", recency_enabled=True)
+        insert_trace(conn, "g-2", "既定の質問")
+        conn.commit()
+        rows = dict(
+            conn.execute(
+                "SELECT guild_id, recency_enabled FROM chat_trace"
+            ).fetchall()
+        )
+        assert rows["g-1"] is True
+        assert rows["g-2"] is False
+
     def test_engine_trace_row_keys_accepted(self, conn):
         """engine が出すトレース行のキーをすべて insert_trace が受け付ける（#58 回帰）。
 
@@ -601,6 +614,7 @@ class TestChatTrace:
             "answer_model": "deepseek/deepseek-v3.2",
             "rerank_enabled": False,
             "hybrid_enabled": True,
+            "recency_enabled": True,
             "prompt_tokens": 10,
             "completion_tokens": 5,
             "total_tokens": 15,
