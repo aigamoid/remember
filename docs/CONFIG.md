@@ -44,8 +44,10 @@ embedding:
 
 rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
-  answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
-  top_k: 10                                   # 回答に渡すチャンク数（リランク有効時はリランク後の件数）
+  answer_model: "deepseek/deepseek-v3.2"      # 回答生成LLM（OpenRouter経由・OI-16でKimi K2から変更）
+  rewriter_max_tokens: 256                    # 書き換え出力の上限（過大なtoken要求で残高不足になるのを防ぐ）
+  answer_max_tokens: 1500                     # 回答出力の上限（OI-16: completionの暴走を防ぐ安全弁）
+  top_k: 5                                    # 回答に渡すチャンク数（OI-16で10→5に削減・リランク/recency有効時は精選後の件数）
   history_max_turns: 5                        # マルチターン会話で渡す直近やり取りの上限ペア数（OI-10）
                                               # 0で無効（1問1答に戻す）。大きいほど文脈を保てるがprompt tokenが増える
   history_max_chars: 4000                      # 履歴の合計文字数バジェット（回答LLM向け・超過分は古い方から落とす）
@@ -73,6 +75,15 @@ rag:
                                               # 回答への注入自体は memory_enabled も true である必要がある（二重ガード）。
     max_chunks: 30                            # 1回の抽出で見る最近チャンク数（許可ch限定）
     max_tokens: 800                           # 突合LLMの出力上限。JSON配列が途中で切れると抽出0件になるため広めに取る
+  mimic_enabled: false                        # #49: 「真似っこ」モード（/oracle mimic）を有効化（既定OFF）
+                                              # 対象メンバーの口調・性格を真似て回答する（channel単位・本人保護あり）
+  mimic:                                      # #49: 真似っこの調整（mimic_enabled=true のときだけ効く）
+    sample_limit: 300                         # 人格カード生成時に対象者の発言を最大何件まで使うか
+    min_sample_count: 30                      # これ未満は confidence=low（特徴が薄ければ開始を断ることもある）
+    require_optin: false                      # MVPは false。公開/課金前は true（本人の事前同意を必須化）にする
+  hybrid:                                     # #54: ハイブリッド検索（dense + BM25 sparse を RRF融合・日本語はSudachiPyで分割）
+    enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから（要: 全チャンク再インデックス）
+    prefetch_k: 30                            # 各レーン(dense/sparse)で融合前に取る候補数
   reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
     enabled: false                            # true で有効化（要 .env の JINA_API_KEY）
     provider: "jina"                          # 現状 jina のみ対応
@@ -88,7 +99,8 @@ rag:
 
 pricing:                              # usage_log のコスト推定に使う単価（USD/100万トークン）
   "google/gemini-2.5-flash": {input: 0.30, output: 2.50}
-  "moonshotai/kimi-k2-0905": {input: 0.60, output: 2.50}
+  "deepseek/deepseek-v3.2":  {input: 0.27, output: 0.40}  # OI-16で採用（Kimi K2比 約1/3）
+  "gpt-4.1-nano":            {input: 0.10, output: 0.40}  # contextualizer
   "text-embedding-3-small":  {input: 0.02, output: 0.0}
   "jina-reranker-v2-base-multilingual": {input: 0.02, output: 0.0}  # ※概算・要更新
 
@@ -108,6 +120,15 @@ worker:
 > 構造的に減衰対象外。案A（ハイブリッド #54）の RRF 融合スコアの上に乗算で重ねる設計で、enabled が
 > true でも検索の並べ替えが変わるだけ（再インデックス不要）。本番ONは `scripts/eval_recency.py` で
 > 実データA/B（時系列で平均ageが下がる／話題でヒット率が落ちない）を確認してから。半減期は要チューニング。
+
+> `rag.hybrid`（#54）は dense ベクトル検索と BM25 sparse 検索を RRF（Reciprocal Rank Fusion）で
+> 融合し、固有名詞・専門用語の取りこぼしを減らす。日本語は SudachiPy で分割する（`src/sparse.py`）。
+> **ON にするには全チャンクの再インデックスが必要**（`scripts/migrate_hybrid_reindex.py`）。
+> recency（#55）は hybrid の融合スコアの上に乗算で重ねる設計。
+
+> **注意（config ドリフト・#44）:** `config.yml.example` は一部の既定値が実運用とずれている場合がある
+> （例: `answer_model` が旧 Kimi K2 のまま等）。本ドキュメントは OI-16 以降の現行値を正とする。
+> example の同期は #44 で別途対応する（コード扱いのため PR 経由）。
 
 ## .env
 
