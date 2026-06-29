@@ -72,3 +72,29 @@ class TestLoginFlow:
         resp = client.get("/logout")
         assert resp.status_code == 303
         assert resp.headers["location"] == "/login"
+
+
+# ── 記憶の承認画面（#56 案C）。認証ゲートを確認（DB happy path は test_db でカバー）─────
+
+class TestMemoriesRoutes:
+    def test_memories_redirects_when_unauthed(self, client):
+        resp = client.get("/memories")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/login"
+
+    def test_approve_requires_auth(self, client):
+        resp = client.post("/memories/approve", data={"candidate_id": 1})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/login"
+
+    def test_reject_requires_auth(self, client):
+        resp = client.post("/memories/reject", data={"candidate_id": 1})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/login"
+
+    def test_delete_requires_auth(self, client):
+        resp = client.post(
+            "/memories/delete", data={"guild_id": "g1", "memory_id": 1}
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/login"
