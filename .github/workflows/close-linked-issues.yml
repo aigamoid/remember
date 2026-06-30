@@ -1,0 +1,65 @@
+name: close-linked-issues
+
+# GitHub のクロージングキーワード（Closes/Fixes/Resolves #NN）は
+# デフォルトブランチ（main）へのマージ時しか発火しない。本リポジトリは
+# GitFlow で PR を develop にマージするため自動クローズされない（#73）。
+# この workflow が develop マージ済み PR の本文を解析し、該当 issue を閉じる。
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [develop]
+
+jobs:
+  close-linked-issues:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const prNumber = context.payload.pull_request.number;
+            // Closes/Closed/Close, Fix/Fixes/Fixed, Resolve/Resolves/Resolved + #NN
+            const re = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+#(\d+)/gi;
+            const nums = new Set();
+            let m;
+            while ((m = re.exec(body)) !== null) {
+              nums.add(parseInt(m[1], 10));
+            }
+            if (nums.size === 0) {
+              core.info('クロージングキーワード付き issue 参照なし。スキップ。');
+              return;
+            }
+            for (const n of nums) {
+              try {
+                const { data: issue } = await github.rest.issues.get({
+                  ...context.repo,
+                  issue_number: n,
+                });
+                // PR 番号を誤って拾った場合はスキップ（PR は pull_request フィールドを持つ）
+                if (issue.pull_request) {
+                  core.info(`#${n} は PR のためスキップ。`);
+                  continue;
+                }
+                if (issue.state === 'closed') {
+                  core.info(`#${n} は既に closed。スキップ。`);
+                  continue;
+                }
+                await github.rest.issues.createComment({
+                  ...context.repo,
+                  issue_number: n,
+                  body: `実装PR #${prNumber} が develop にマージされたため自動クローズ（close-linked-issues workflow）。`,
+                });
+                await github.rest.issues.update({
+                  ...context.repo,
+                  issue_number: n,
+                  state: 'closed',
+                });
+                core.info(`#${n} を closed。`);
+              } catch (e) {
+                core.warning(`issue #${n} の処理に失敗: ${e.message}`);
+              }
+            }

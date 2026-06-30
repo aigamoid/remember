@@ -136,8 +136,13 @@ sh scripts/install_hooks.sh
     `OI-44 (#7)` のように `OI-XX (#NN)` を併記してよい。対応は `docs/OPEN_ISSUES.md` のインデックス表で辿る。
 - **PR は対応する GitHub Issue と必ず紐づける**（2026-06-22 追加）。
   - PR 本文に **クロージングキーワード**を入れる: `Closes #NN`（または `Fixes #NN` / `Resolves #NN`）。
-    これで**人間が PR をマージした瞬間に対象 Issue が自動クローズ**される（マージは人間・下記参照）。
     例: `gh pr create --title "fix: purge範囲を拡張 (#31)" --body "Closes #31\n\n..."`。
+  - **重要（#73・2026-06-29）: GitHub標準のクロージングキーワードは「デフォルトブランチ（`main`）への
+    マージ時のみ」自動クローズが発火する。** 本リポジトリは GitFlow で PR を `develop` にマージするため、
+    `Closes #NN` を正しく書いても**標準機能では自動クローズされない**（実際に5件取り残された）。
+    そのため `develop` への PR マージ時は **[.github/workflows/close-linked-issues.yml](.github/workflows/close-linked-issues.yml)**
+    が PR 本文の `Closes/Fixes/Resolves #NN` を解析して対象 Issue を自動クローズする（この workflow が代替）。
+    キーワードの記法（カンマ列挙だけでは2件目が閉じない等）は標準と同じく**各番号にキーワードを付ける**こと。
   - クローズせず**関連だけ**示したい場合は本文に `#NN` と書く（参照リンクのみ。epic への言及など）。
   - 旧 `OI-XX` で切ったブランチ（`feature/oiXX-*`）はそのままでよい。コードの `OI-XX` ↔ Issue `#NN` は
     `docs/OPEN_ISSUES.md` のインデックス表で対応する。1つの PR が複数 Issue を閉じるなら

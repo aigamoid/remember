@@ -4,6 +4,30 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-29 — rewriter応答文混入の修正(#64)：プロンプト強化＋出力長ガード
+
+Query Rewriter が検索語でなく**れみちゃんのペルソナ口調の応答文**を出力する滑り（本番 chat_trace 約90件中4件＝約4-5%）を修正。MAGI 3者レビュー(Codex/Aider)2ラウンドで PASS → PR #72（人間マージ済）。
+
+### 変更（予防＋保険の2本立て）
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/rag/prompts.py` | REWRITER_SYSTEM_PROMPT に「応答せず検索語のみ出力」制約＋断定/訂正/会話発話の書き換え例3件（#64実例ベース） |
+| 2 | `src/rag/engine.py` | `rewrite()` に出力長ガード：`[NO_SEARCH]`でなく `rewriter_max_query_chars`(既定60)超なら応答文混入とみなし**元クエリで検索継続**（非破壊フォールバック）。固定タグ `[WARN][rewriter_fallback_too_long]` |
+| 3 | `config.yml.example` / `docs/CONFIG.md` | `rewriter_max_query_chars: 60` を追記（config.yml は gitignore のため example/docs を更新） |
+| 4 | `tests/test_rag.py` | 長文ペルソナ→フォールバック / `[NO_SEARCH]`長文素通り / 通常素通り / answer()経由で検索継続、の4テスト |
+
+### 決定事項
+- 閾値60＝正常検索語の実測最長49字＋余裕。**フォールバック先は元のユーザー入力**なので誤検知してもデグレは小（指示語解決が効かなくなるだけ）＝非破壊。閾値は config 可変。
+- フォールバック時 trace の `rewritten_query` は元クエリに戻り SQL長さ監視 `length>60` で拾えなくなるため、**監視は固定タグ付き WARN ログの grep へ移行**。chat_trace スキーマ拡張は軽微課題に対し過剰として見送り（YAGNI）。
+
+### 実行結果
+- `pytest tests/`：303 passed / 182 skipped（DB系はpostgres未起動でskip・api イメージ内で確認）。
+
+### 次のステップ
+- 会話自然化 #67（rewriter応答文バグ #64 と同じレビューで挙がった姉妹issue）の実装が次の候補。
+
+---
+
 ## 2026-06-29 — auto memory(#56)実機検証・自家中毒対策(#68)実装/デプロイ・自動承認Issue化(#71)
 
 自動記憶(#56・案C)を検証機で有効化して実データ検証 → **Bot発言が記憶対象に混入する自家中毒(self-poisoning)を発見** → #68 で除去、までを1セッションで実施。
