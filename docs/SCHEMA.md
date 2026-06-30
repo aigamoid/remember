@@ -346,6 +346,27 @@ CREATE INDEX idx_mimic_state_guild ON mimic_state (guild_id);
 > **既定オフ**（`config.yml` の `rag.mimic_enabled: true` のときだけ機能する）。
 > あわせて `messages (guild_id, author_id, timestamp DESC)` のインデックスを追加（カード生成の高速化）。
 
+### consent_log（公開/課金前の明示同意ログ・#41 / OI-48）
+
+```sql
+CREATE TABLE consent_log (
+    id            BIGSERIAL PRIMARY KEY,
+    guild_id      TEXT NOT NULL,
+    admin_id      TEXT NOT NULL,    -- 同意した管理者のDiscord ID
+    terms_version TEXT NOT NULL,    -- 同意した規約バージョン（bot.py の CONSENT_TERMS_VERSION）
+    scope         TEXT NOT NULL,    -- 'allow' | 'allowall'
+    channels      JSONB,            -- 対象ch [{"id","name"}, ...]（監査用の控え）
+    consented_at  TEXT NOT NULL     -- ISO8601 (UTC)
+);
+CREATE INDEX idx_consent_guild ON consent_log (guild_id, terms_version);
+```
+
+> 初回の許可操作（`/oracle allow`・`allowall`）時に「過去ログ本文の保存」「外部LLM APIへの送信」
+> 「料金・quota・削除ポリシー」への同意をボタンUI（`bot.py` の `ConsentView`）で取り、ここへ記録する。
+> 判定は **サーバー × 規約版**（`db.has_consented`）。一度同意すれば以降は同意文を出さず即実行し、
+> `CONSENT_TERMS_VERSION` を上げたときだけ次回の許可操作で再同意を求める。**全件を監査証跡として保持**
+> （purge では消さない）。`allowall` は全ch対象のため、より強い確認文面（`_CONSENT_TEXT_ALL`）を出す。
+
 ## Qdrant ペイロード仕様
 
 コレクション: `waiwai_chunks`（config.yml の `qdrant.collection`・全guild共有）
