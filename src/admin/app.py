@@ -111,6 +111,7 @@ def create_app() -> FastAPI:
         channel_limit: str = Form(""),   # 空文字 = 無制限(NULL)
         daily_question_limit: int = Form(...),
         price_jpy: int = Form(...),
+        stripe_price_id: str = Form(""),  # OI-14 D。空 = 未設定(NULL)
     ):
         if not _is_authed(request):
             return RedirectResponse("/login", status_code=303)
@@ -118,7 +119,13 @@ def create_app() -> FastAPI:
         conn = db.get_connection(init=True)
         try:
             db.update_plan_def(
-                conn, plan_key, display_name, ch, daily_question_limit, price_jpy
+                conn, plan_key, display_name, ch, daily_question_limit, price_jpy,
+                stripe_price_id=stripe_price_id,
+            )
+        except db.DuplicatePriceIdError as e:
+            # price_id が他プランと重複＝price→plan 逆引きが曖昧になるので拒否（OI-14 D）。
+            return _TEMPLATES.TemplateResponse(
+                request, "error.html", {"message": str(e)}, status_code=400
             )
         finally:
             conn.close()
