@@ -13,12 +13,13 @@ import os
 from typing import Callable, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 load_dotenv()  # uvicorn 直接起動でも .env を読み込む
 
-from src import db, quota
+from src import billing, db, quota
 from src.config import load_config
 from src.embedder import Embedder
 from src.memory import MemoryProvider
@@ -181,6 +182,19 @@ class MimicStartResponse(BaseModel):
     declaration: Optional[str] = None  # 開始時の宣言文（成功時）
     reason: Optional[str] = None       # 失敗理由（optout/素材不足/無効 等）
     sample_count: int = 0
+
+
+class CheckoutRequest(BaseModel):
+    guild_id: str
+    plan_key: str
+
+
+class PortalRequest(BaseModel):
+    guild_id: str
+
+
+class BillingUrlResponse(BaseModel):
+    url: str
 
 
 class MimicStopRequest(BaseModel):
@@ -422,6 +436,104 @@ def create_app(
             declaration=build_mimic_declaration(card, display_name),
             sample_count=len(samples),
         )
+
+    @app.post("/billing/checkout", response_model=BillingUrlResponse)
+    async def billing_checkout(
+        req: CheckoutRequest,
+        x_oracle_token: Optional[str] = Header(default=None),
+    ) -> BillingUrlResponse:
+        """サブスク申込の Stripe Checkout URL を返す（/oracle upgrade から）。"""
+        _verify_api_token(app.state.api_token, x_oracle_token)
+        if not billing.enabled():
+            raise HTTPException(status_code=503, detail="billing is not configured")
+
+        def run() -> str:
+            conn = db.get_connection(init=False)
+            try:
+                return billing.create_checkout_session(
+                    conn, req.guild_id, req.plan_key,
+                    success_url=os.environ.get(
+                        "BILLING_SUCCESS_URL", "https://stripe.com"),
+                    cancel_url=os.environ.get(
+                        "BILLING_CANCEL_URL", "https://stripe.com"),
+                )
+            finally:
+                conn.close()
+
+        try:
+            url = await asyncio.to_thread(run)
+        except billing.AlreadySubscribedError:
+            raise HTTPException(status_code=409, detail="already_subscribed")
+        except billing.UnknownPlanError:
+            raise HTTPException(status_code=400, detail="invalid_plan")
+        except billing.BillingError:
+            raise HTTPException(status_code=502, detail="stripe_error")
+        return BillingUrlResponse(url=url)
+
+    @app.post("/billing/portal", response_model=BillingUrlResponse)
+    async def billing_portal(
+        req: PortalRequest,
+        x_oracle_token: Optional[str] = Header(default=None),
+    ) -> BillingUrlResponse:
+        """解約・カード変更用の Customer Portal URL を返す（/oracle billing から）。"""
+        _verify_api_token(app.state.api_token, x_oracle_token)
+        if not billing.enabled():
+            raise HTTPException(status_code=503, detail="billing is not configured")
+
+        def run() -> Optional[str]:
+            conn = db.get_connection(init=False)
+            try:
+                info = db.get_guild_billing(conn, req.guild_id)
+                customer_id = info.get("stripe_customer_id") if info else None
+                if not customer_id:
+                    return None
+                return billing.create_portal_session(
+                    customer_id,
+                    return_url=os.environ.get(
+                        "BILLING_RETURN_URL", "https://stripe.com"),
+                )
+            finally:
+                conn.close()
+
+        try:
+            url = await asyncio.to_thread(run)
+        except billing.BillingError:
+            raise HTTPException(status_code=502, detail="stripe_error")
+        if url is None:
+            raise HTTPException(status_code=404, detail="no_subscription")
+        return BillingUrlResponse(url=url)
+
+    @app.post("/billing/webhook")
+    async def billing_webhook(request: Request) -> JSONResponse:
+        """Stripe Webhook。署名検証して guild_plans を自動更新する。
+
+        ACK 方針（Stripe の再送制御）:
+          署名不正=400 / 一時障害(DB・Stripe取得・guild未着地)=5xx(再送) / 正常・設定ミス=200。
+        ※ここは Stripe からの呼び出しなので ORACLE_API_TOKEN は要求しない（署名で認証）。
+        """
+        if not billing.enabled():
+            raise HTTPException(status_code=503, detail="billing is not configured")
+        payload = await request.body()
+        sig = request.headers.get("Stripe-Signature", "")
+
+        def run() -> dict:
+            conn = db.get_connection(init=False)
+            try:
+                return billing.handle_event(conn, payload, sig)
+            finally:
+                conn.close()
+
+        try:
+            result = await asyncio.to_thread(run)
+        except billing.WebhookSignatureError:
+            raise HTTPException(status_code=400, detail="invalid_signature")
+        except billing.WebhookRetryableError:
+            # 5xx を返すと Stripe が自動で再送してくれる。
+            raise HTTPException(status_code=503, detail="retry_later")
+        except Exception as e:  # DB 障害など想定外も再送に倒す（握り潰さない）
+            print(f"[WARN] webhook 処理失敗（再送させる）: {e}")
+            raise HTTPException(status_code=500, detail="webhook_error")
+        return JSONResponse({"received": True, **result})
 
     @app.post("/mimic/stop", response_model=MimicStopResponse)
     async def mimic_stop(

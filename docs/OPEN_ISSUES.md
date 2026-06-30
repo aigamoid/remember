@@ -97,3 +97,4 @@
 | OI-25 | 全チャンネル一括許可コマンド `/oracle allowall` | 2026-06-20 |
 | OI-27 | オンボーディング `/oracle help` | 2026-06-21 |
 | OI-45 | /chat・/remember の Bot→API 共有シークレット認証（#38 / PR #50） | ✅ 完了 (2026-06-24) |
+| OI-14 D | 課金システム（Stripe）MVP: `/oracle upgrade`・`billing`＋Webhook自動プラン更新（epic #32・テストモード） | 2026-06-30 |

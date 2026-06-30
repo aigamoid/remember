@@ -43,7 +43,8 @@ ON CONFLICT (plan_key) DO UPDATE SET
     channel_limit        = EXCLUDED.channel_limit,
     daily_question_limit = EXCLUDED.daily_question_limit,
     price_jpy            = EXCLUDED.price_jpy,
-    sort_order           = EXCLUDED.sort_order
+    sort_order           = EXCLUDED.sort_order,
+    stripe_price_id      = NULL
 """
 
 

@@ -146,10 +146,21 @@ DATABASE_URL=postgresql://oracle:oracle@localhost:5432/oracle  # ホストから
 # TEST_DATABASE_URL=...                 # pytest用DB接続先（デフォルト: localhost:5432/oracle_test）
 ADMIN_PASSWORD=change-me              # 管理ポータル（src/admin）のログインパスワード（未設定だとログイン不可）
 # ADMIN_SESSION_SECRET=...             # セッション署名鍵（任意・未設定なら ADMIN_PASSWORD から導出）
+# ---- Stripe 課金（OI-14 D）。未設定なら課金機能は無効（billing.enabled()=False）----
+# STRIPE_SECRET_KEY=sk_test_xxx        # Stripe シークレットキー（テストは sk_test_・本番は sk_live_）
+# STRIPE_WEBHOOK_SECRET=whsec_xxx      # Webhook 署名シークレット（`stripe listen` 起動時に表示／本番はDashboard）
+# BILLING_SUCCESS_URL=...              # Checkout 完了後の遷移先（任意）
+# BILLING_CANCEL_URL=...               # Checkout 中断時の遷移先（任意）
+# BILLING_RETURN_URL=...               # Customer Portal の戻り先（任意）
 ```
 
 > コンテナ内の `DATABASE_URL` は docker-compose.yml の `environment` で
 > `postgres` サービス向きに上書きされるため、.env の値はホスト実行時のみ使われる。
+>
+> **Stripe（OI-14 D）**: `api` サービスでのみ使用。`STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` が
+> 揃うと `/oracle upgrade`・`/oracle billing`・`POST /billing/webhook` が有効化される。未設定時は
+> Bot に「準備中」と案内し API は 503（既存機能は無影響）。Webhook は外部到達が必要なので、開発は
+> `stripe listen --forward-to localhost:8000/billing/webhook` で転送する（公開HTTPS露出は別フェーズ）。
 
 ## 分離ルール
 

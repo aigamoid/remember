@@ -57,6 +57,10 @@ class Store:
     async def register_guild(self, guild_id: str, guild_name: str) -> None:
         await self._call(db.upsert_guild, guild_id, guild_name)
 
+    async def fetch_plans(self) -> list[dict]:
+        """全プラン定義を sort_order 順で返す（/oracle upgrade の一覧表示・OI-14 D）。"""
+        return await self._call(db.fetch_plan_defs)
+
     async def guild_left(self, guild_id: str) -> None:
         """退出時: left_at を記録し、データ削除ジョブを投入する。"""
         def run(conn):

@@ -184,14 +184,21 @@ CREATE TABLE plan_defs (
     daily_question_limit INTEGER NOT NULL,        -- 1日あたりの質問上限
     price_jpy            INTEGER NOT NULL DEFAULT 0,
     sort_order           INTEGER NOT NULL DEFAULT 0,
-    updated_at           TEXT
+    updated_at           TEXT,
+    stripe_price_id      TEXT                     -- OI-14 D: Stripe Price ID（NULL=課金対象外）
 );
+-- price_id は plan を一意に決められないと誤プラン反映になるため、非NULL値の重複をDBで禁止。
+CREATE UNIQUE INDEX uq_plan_defs_stripe_price
+    ON plan_defs (stripe_price_id) WHERE stripe_price_id IS NOT NULL;
 ```
 
 > 上限・価格の**マスタ**。`init_schema` が初期3プラン（free:1ch/20問, pro:10ch/80問/¥700,
 > max:無制限/200問/¥1500）を seed する（`seed_plans`・`ON CONFLICT DO NOTHING` ＝既存値は壊さない）。
 > 値は**管理ポータル `/billing` から編集可能**（コード/再デプロイ不要）。`src/db.py` の
 > `fetch_plan_defs` / `get_plan_def` / `update_plan_def` が読み書きする。
+> `stripe_price_id`（OI-14 D）は Checkout に渡す Price ID 兼、Webhook の **price→plan 逆引き**
+> （`get_plan_by_price_id`）に使う。`update_plan_def` は他プランとの重複を `DuplicatePriceIdError`
+> で拒否（DB一意制約と二重防御）。
 
 ### guild_plans（サーバーごとのプラン割当・OI-14 C-2）
 
@@ -209,8 +216,11 @@ CREATE TABLE guild_plans (
 ```
 
 > 行が無いサーバーは **free 扱い**（`get_guild_plan` が plan_defs と結合して実効上限を返す）。
-> プランは現状**手動切替**（ポータル `/billing` の `set_guild_plan`）。OI-14 D で Stripe Webhook が
-> `stripe_*` / `status` を自動更新する想定。
+> プランは**手動切替**（ポータル `/billing` の `set_guild_plan`）に加え、**OI-14 D で Stripe Webhook が
+> 自動更新**する（`src/billing.py handle_event` → `update_guild_subscription`）。`stripe_subscription_id`
+> から guild を逆引きするため部分INDEX `idx_guild_plans_subscription` を張る。webhook 更新は
+> 再送・順不同に耐えるガード（period_end 新旧判定／canceled 後の復活防止）を持つ。手動の
+> `set_guild_plan` と自動の `update_guild_subscription` は別関数（用途を分離）。
 > **上限の強制**: 質問の日次上限は `src/api.py` の `/chat` 入口で（`src/quota.py` 判定・超過時は
 > 回答せず案内＝コスト0）、チャンネル数上限は Bot の `/oracle allow` で（`store.py`）。
 > 日次集計は `count_questions_since`（JST 0時境界は `quota.jst_day_start_utc_iso`）。

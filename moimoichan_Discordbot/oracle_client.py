@@ -102,6 +102,40 @@ class OracleClient:
             payload["user"] = user
         return await self._post("/mimic/optout", payload)
 
+    async def _post_status(self, path: str, payload: dict) -> tuple[int, dict]:
+        """raise せず (status, body) を返す POST（課金系・ステータスで案内を出し分ける）。"""
+        async with aiohttp.ClientSession(timeout=self._timeout) as session:
+            async with session.post(
+                f"{self._base}{path}", json=payload, headers=self._headers
+            ) as resp:
+                try:
+                    body = await resp.json()
+                except Exception:
+                    body = {}
+                return resp.status, body
+
+    async def create_checkout(
+        self, guild_id: str, plan_key: str
+    ) -> tuple[int, dict]:
+        """サブスク申込の Checkout URL を要求する（OI-14 D）。戻り値: (status, body)。
+
+        status: 200=成功(body['url']) / 409=既に契約中 / 400=不正プラン /
+                503=課金未設定 / 502=Stripeエラー。
+        """
+        return await self._post_status(
+            "/billing/checkout",
+            {"guild_id": str(guild_id), "plan_key": plan_key},
+        )
+
+    async def billing_portal(self, guild_id: str) -> tuple[int, dict]:
+        """解約・カード変更用の Customer Portal URL を要求する（OI-14 D）。
+
+        status: 200=成功(body['url']) / 404=未契約 / 503=課金未設定 / 502=Stripeエラー。
+        """
+        return await self._post_status(
+            "/billing/portal", {"guild_id": str(guild_id)}
+        )
+
     async def remember(
         self,
         text: str,

@@ -252,6 +252,14 @@ ALTER TABLE memories ADD COLUMN IF NOT EXISTS evidence TEXT;                    
 -- delete 候補は content を持たないため NOT NULL を解除（active な記憶の content 必須はアプリ層で担保）。
 ALTER TABLE memories ALTER COLUMN content DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_guild_status ON memories (guild_id, status);
+-- OI-14 D(Stripe): プランに Stripe Price ID を持たせる（Checkout・price→plan 逆引きに使用）。
+ALTER TABLE plan_defs ADD COLUMN IF NOT EXISTS stripe_price_id TEXT;
+-- price_id は plan を一意に決められないと誤プラン反映になるため、非NULL値の重複をDB側で禁止する。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_defs_stripe_price
+    ON plan_defs (stripe_price_id) WHERE stripe_price_id IS NOT NULL;
+-- subscription_id から guild を逆引きする（Webhook 処理）。NULL は多数あり得るので部分INDEX。
+CREATE INDEX IF NOT EXISTS idx_guild_plans_subscription
+    ON guild_plans (stripe_subscription_id) WHERE stripe_subscription_id IS NOT NULL;
 """
 
 # ingest_jobs.kind の取りうる値
@@ -1570,33 +1578,56 @@ def fetch_usage_summary(conn: psycopg.Connection) -> dict:
 
 # ---- plan_defs / guild_plans（プラン管理・OI-14 C-2。内部で commit する）----
 
+def _plan_row_to_dict(row) -> dict:
+    return {
+        "plan_key": row[0], "display_name": row[1], "channel_limit": row[2],
+        "daily_question_limit": row[3], "price_jpy": row[4], "sort_order": row[5],
+        "stripe_price_id": row[6],
+    }
+
+
 def fetch_plan_defs(conn: psycopg.Connection) -> list[dict]:
     """全プラン定義を sort_order 順で返す（ポータルのプラン編集・quota判定が使用）。"""
     rows = conn.execute(
         "SELECT plan_key, display_name, channel_limit, daily_question_limit, "
-        "price_jpy, sort_order FROM plan_defs ORDER BY sort_order, plan_key"
+        "price_jpy, sort_order, stripe_price_id FROM plan_defs "
+        "ORDER BY sort_order, plan_key"
     ).fetchall()
-    return [
-        {
-            "plan_key": r[0], "display_name": r[1], "channel_limit": r[2],
-            "daily_question_limit": r[3], "price_jpy": r[4], "sort_order": r[5],
-        }
-        for r in rows
-    ]
+    return [_plan_row_to_dict(r) for r in rows]
 
 
 def get_plan_def(conn: psycopg.Connection, plan_key: str) -> dict | None:
     row = conn.execute(
         "SELECT plan_key, display_name, channel_limit, daily_question_limit, "
-        "price_jpy, sort_order FROM plan_defs WHERE plan_key = %s",
+        "price_jpy, sort_order, stripe_price_id FROM plan_defs WHERE plan_key = %s",
         (plan_key,),
     ).fetchone()
     if row is None:
         return None
-    return {
-        "plan_key": row[0], "display_name": row[1], "channel_limit": row[2],
-        "daily_question_limit": row[3], "price_jpy": row[4], "sort_order": row[5],
-    }
+    return _plan_row_to_dict(row)
+
+
+def get_plan_by_price_id(conn: psycopg.Connection, price_id: str) -> dict | None:
+    """Stripe Price ID から plan を逆引きする（Webhook の price→plan 確定に使用）。
+
+    DB側に部分一意INDEX（uq_plan_defs_stripe_price）があり重複は入らないが、
+    安全弁として ORDER BY sort_order LIMIT 1 で必ず決定的に1件返す。
+    """
+    if not price_id:
+        return None
+    row = conn.execute(
+        "SELECT plan_key, display_name, channel_limit, daily_question_limit, "
+        "price_jpy, sort_order, stripe_price_id FROM plan_defs "
+        "WHERE stripe_price_id = %s ORDER BY sort_order LIMIT 1",
+        (price_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _plan_row_to_dict(row)
+
+
+class DuplicatePriceIdError(ValueError):
+    """stripe_price_id が他プランで既に使われているときに送出（ポータルが案内に変換）。"""
 
 
 def update_plan_def(
@@ -1606,13 +1637,30 @@ def update_plan_def(
     channel_limit: int | None,
     daily_question_limit: int,
     price_jpy: int,
+    stripe_price_id: str | None = None,
 ) -> None:
-    """プラン定義の上限・価格を更新する（ポータルから・内部で commit）。"""
+    """プラン定義の上限・価格・Stripe Price ID を更新する（ポータルから・内部で commit）。
+
+    stripe_price_id が空文字なら NULL に正規化。**他プランで使用中の price_id は
+    DuplicatePriceIdError を送出**（price→plan 逆引きの曖昧化を防ぐ・DB一意制約と二重防御）。
+    """
+    price_id = (stripe_price_id or "").strip() or None
+    if price_id is not None:
+        dup = conn.execute(
+            "SELECT plan_key FROM plan_defs "
+            "WHERE stripe_price_id = %s AND plan_key <> %s",
+            (price_id, plan_key),
+        ).fetchone()
+        if dup is not None:
+            raise DuplicatePriceIdError(
+                f"price_id {price_id} は既にプラン {dup[0]} で使われています"
+            )
     conn.execute(
         "UPDATE plan_defs SET display_name=%s, channel_limit=%s, "
-        "daily_question_limit=%s, price_jpy=%s, updated_at=%s WHERE plan_key=%s",
+        "daily_question_limit=%s, price_jpy=%s, stripe_price_id=%s, updated_at=%s "
+        "WHERE plan_key=%s",
         (display_name, channel_limit, daily_question_limit, price_jpy,
-         _now(), plan_key),
+         price_id, _now(), plan_key),
     )
     conn.commit()
 
@@ -1670,6 +1718,104 @@ def set_guild_plan(
     conn.commit()
 
 
+# ---- Stripe 連携（OI-14 D。Webhook / checkout 前チェックが使用。内部で commit）----
+
+def get_guild_billing(conn: psycopg.Connection, guild_id: str) -> dict | None:
+    """guild の Stripe 紐付け（customer/subscription/status/period_end）を返す。
+
+    guild_plans 行が無ければ None（＝free・未契約）。checkout の重複防止と
+    Portal セッション生成（customer_id 取得）に使う。
+    """
+    row = conn.execute(
+        "SELECT guild_id, plan_key, status, stripe_customer_id, "
+        "stripe_subscription_id, current_period_end FROM guild_plans WHERE guild_id = %s",
+        (str(guild_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "guild_id": row[0], "plan_key": row[1], "status": row[2],
+        "stripe_customer_id": row[3], "stripe_subscription_id": row[4],
+        "current_period_end": row[5],
+    }
+
+
+def get_guild_by_subscription(
+    conn: psycopg.Connection, subscription_id: str
+) -> dict | None:
+    """Stripe subscription ID から guild の紐付けを逆引きする（Webhook 処理）。"""
+    if not subscription_id:
+        return None
+    row = conn.execute(
+        "SELECT guild_id, plan_key, status, stripe_customer_id, "
+        "stripe_subscription_id, current_period_end FROM guild_plans "
+        "WHERE stripe_subscription_id = %s LIMIT 1",
+        (subscription_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "guild_id": row[0], "plan_key": row[1], "status": row[2],
+        "stripe_customer_id": row[3], "stripe_subscription_id": row[4],
+        "current_period_end": row[5],
+    }
+
+
+def update_guild_subscription(
+    conn: psycopg.Connection,
+    guild_id: str,
+    *,
+    plan_key: str,
+    status: str,
+    stripe_customer_id: str | None = None,
+    stripe_subscription_id: str | None = None,
+    current_period_end: str | None = None,
+) -> bool:
+    """Stripe Webhook からの自動更新（手動の set_guild_plan とは分離）。内部で commit。
+
+    再送・順不同に耐えるためのガードを持つ:
+      - DB が既に status='canceled' なのに、後着の active 系イベントで復活させない
+        （subscription.deleted 後に古い subscription.updated が来るケース）。
+      - 受信イベントの current_period_end が DB 既存値より**古い**場合は無視する。
+    更新したら True、ガードでスキップしたら False を返す。冪等（同値再送は実害なし）。
+    """
+    existing = conn.execute(
+        "SELECT status, current_period_end FROM guild_plans WHERE guild_id = %s",
+        (str(guild_id),),
+    ).fetchone()
+    if existing is not None:
+        cur_status, cur_period_end = existing[0], existing[1]
+        # canceled 確定後に active 系で復活させない（deleted 後の遅延 updated 対策）。
+        if cur_status == "canceled" and status != "canceled":
+            return False
+        # 古い period_end のイベントは順不同とみなし無視（新しい状態を守る）。
+        if (
+            current_period_end is not None
+            and cur_period_end is not None
+            and current_period_end < cur_period_end
+        ):
+            return False
+    conn.execute(
+        """
+        INSERT INTO guild_plans
+            (guild_id, plan_key, status, updated_at,
+             stripe_customer_id, stripe_subscription_id, current_period_end)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET
+            plan_key               = EXCLUDED.plan_key,
+            status                 = EXCLUDED.status,
+            updated_at             = EXCLUDED.updated_at,
+            stripe_customer_id     = COALESCE(EXCLUDED.stripe_customer_id, guild_plans.stripe_customer_id),
+            stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, guild_plans.stripe_subscription_id),
+            current_period_end     = COALESCE(EXCLUDED.current_period_end, guild_plans.current_period_end)
+        """,
+        (str(guild_id), plan_key, status, _now(),
+         stripe_customer_id, stripe_subscription_id, current_period_end),
+    )
+    conn.commit()
+    return True
+
+
 def count_questions_since(
     conn: psycopg.Connection, guild_id: str, since_iso: str
 ) -> int:
@@ -1703,7 +1849,8 @@ def fetch_billing_overview(
                (SELECT count(*) FROM allowed_channels a WHERE a.guild_id = g.guild_id),
                (SELECT count(*) FROM usage_log u
                   WHERE u.guild_id = g.guild_id AND u.kind = 'answer'
-                    AND u.created_at >= %s)
+                    AND u.created_at >= %s),
+               gp.stripe_customer_id, gp.stripe_subscription_id
         FROM guilds g
         LEFT JOIN guild_plans gp ON gp.guild_id = g.guild_id
         JOIN plan_defs pd ON pd.plan_key = COALESCE(gp.plan_key, 'free')
@@ -1716,6 +1863,7 @@ def fetch_billing_overview(
             "guild_id": r[0], "guild_name": r[1], "plan_key": r[2], "status": r[3],
             "daily_question_limit": r[4], "channel_limit": r[5],
             "channel_count": r[6], "used_today": r[7],
+            "stripe_customer_id": r[8], "stripe_subscription_id": r[9],
         }
         for r in rows
     ]
