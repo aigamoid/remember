@@ -97,6 +97,99 @@ _HELP = (
     "**読むのは許可されたチャンネルだけ**だから、安心して使ってね〜 🌸"
 )
 
+# 公開/課金前の明示同意（#41 / OI-48・法務）。初回の許可操作（/oracle allow|allowall）時に
+# 下記文面を提示し、同意ボタン押下で consent_log に記録する。規約内容を変えたらこの版を上げる
+# （上げると全サーバーが次回の許可操作時に再同意を求められる）。
+CONSENT_TERMS_VERSION = "v1-2026-06-30"
+
+_CONSENT_TEXT = (
+    "**取り込みを始める前に、確認とお願い** 🌸\n"
+    "れみちゃんを使うと、許可したチャンネルについて次のことが起きるよ。管理者として同意してね。\n"
+    "\n"
+    "1️⃣ 許可チャンネルの**過去ログ本文を保存**して、質問に答えるために使うよ（RAG）。\n"
+    "2️⃣ 回答や前処理のために、メッセージ内容を**外部のLLM API（OpenAI・OpenRouter）へ送信**するよ。\n"
+    "3️⃣ **料金・1日の質問上限（quota）・削除ポリシー**があるよ。"
+    "取り込んだデータは `/oracle deny #チャンネル` で削除でき、れみがサーバーを抜けると全部消えるよ。\n"
+    "\n"
+    "内容に同意できたら下のボタンを押してね。**同意した管理者・日時・対象チャンネルを記録**するよ。"
+)
+
+_CONSENT_TEXT_ALL = (
+    "**⚠️ 全チャンネル一括許可の確認** 🌸\n"
+    "`/oracle allowall` は、れみが読める**サーバーの全テキストチャンネル**を一気に取り込み対象にするよ。"
+    "対象が広いから、特にしっかり確認してね。\n"
+    "\n"
+    "1️⃣ 全許可チャンネルの**過去ログ本文を保存**して、質問に答えるために使うよ（RAG）。\n"
+    "2️⃣ 回答や前処理のために、メッセージ内容を**外部のLLM API（OpenAI・OpenRouter）へ送信**するよ。\n"
+    "3️⃣ **料金・1日の質問上限（quota）・削除ポリシー**があるよ。"
+    "取り込んだデータは `/oracle deny #チャンネル` で個別に、れみがサーバーを抜けると全部削除されるよ。\n"
+    "\n"
+    "**全チャンネルが対象になること**に同意できたら、下のボタンを押してね。"
+    "**同意した管理者・日時・対象チャンネル一覧を記録**するよ。"
+)
+
+
+class ConsentView(discord.ui.View):
+    """初回の許可操作時に同意を取るボタンUI（#41 / OI-48）。
+
+    同意ボタン押下で consent_log に記録してから、本来の許可処理（on_agree）を実行する。
+    押せるのは操作を始めた管理者本人だけ（interaction_check）。
+    """
+
+    def __init__(
+        self,
+        *,
+        store: "Store",
+        guild_id: str,
+        admin_id: str,
+        scope: str,
+        channels: list[dict],
+        on_agree,
+    ) -> None:
+        super().__init__(timeout=180)  # 3分で無効化
+        self.store = store
+        self.guild_id = guild_id
+        self.admin_id = admin_id
+        self.scope = scope            # 'allow' | 'allowall'
+        self.channels = channels      # 監査用の対象ch控え [{"id","name"}, ...]
+        self.on_agree = on_agree      # async (interaction) -> None : 実際の許可処理
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if str(interaction.user.id) != self.admin_id:
+            await interaction.response.send_message(
+                "この同意ボタンは、操作を始めた本人だけが押せるよ〜", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_all(self) -> None:
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="✅ 同意して許可する", style=discord.ButtonStyle.success)
+    async def agree(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self._disable_all()
+        await self.store.record_consent(
+            self.guild_id, self.admin_id, CONSENT_TERMS_VERSION, self.scope, self.channels
+        )
+        await interaction.response.edit_message(
+            content="🌸 同意ありがとう！手続きを進めるね〜", view=self
+        )
+        await self.on_agree(interaction)
+        self.stop()
+
+    @discord.ui.button(label="やめる", style=discord.ButtonStyle.secondary)
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self._disable_all()
+        await interaction.response.edit_message(
+            content="またいつでもどうぞ〜。今回は許可してないよ。", view=self
+        )
+        self.stop()
+
 
 def _load_config() -> dict:
     path = Path(__file__).parent / "config.yml"
@@ -129,6 +222,26 @@ class OracleGroup(app_commands.Group):
         await interaction.response.defer(ephemeral=True)
         guild_id = str(interaction.guild_id)
         await self.store.register_guild(guild_id, interaction.guild.name)
+        # 初回は同意を取る（#41 / OI-48）。同意済みサーバーはそのまま許可処理へ。
+        if not await self.store.has_consented(guild_id, CONSENT_TERMS_VERSION):
+            view = ConsentView(
+                store=self.store,
+                guild_id=guild_id,
+                admin_id=str(interaction.user.id),
+                scope="allow",
+                channels=[{"id": str(channel.id), "name": channel.name}],
+                on_agree=lambda i: self._do_allow(i, channel),
+            )
+            await interaction.followup.send(_CONSENT_TEXT, view=view, ephemeral=True)
+            return
+        await self._do_allow(interaction, channel)
+
+    async def _do_allow(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ) -> None:
+        """チャンネル許可の本処理（同意済み前提）。コマンド本体 or 同意ボタンから呼ばれる。
+        どちらの経路でも interaction の応答は済んでいるので followup.send を使う。"""
+        guild_id = str(interaction.guild_id)
         result = await self.store.allow_channel(
             guild_id, str(channel.id), channel.name, str(interaction.user.id)
         )
@@ -174,6 +287,26 @@ class OracleGroup(app_commands.Group):
             )
             return
 
+        # 初回は同意を取る（#41 / OI-48）。allowall は全ch対象なので強い文面で確認する。
+        if not await self.store.has_consented(guild_id, CONSENT_TERMS_VERSION):
+            view = ConsentView(
+                store=self.store,
+                guild_id=guild_id,
+                admin_id=str(interaction.user.id),
+                scope="allowall",
+                channels=[{"id": cid, "name": name} for cid, name in channels],
+                on_agree=lambda i: self._do_allowall(i, channels),
+            )
+            await interaction.followup.send(_CONSENT_TEXT_ALL, view=view, ephemeral=True)
+            return
+        await self._do_allowall(interaction, channels)
+
+    async def _do_allowall(
+        self, interaction: discord.Interaction, channels: list[tuple[str, str]]
+    ) -> None:
+        """全チャンネル一括許可の本処理（同意済み前提）。コマンド本体 or 同意ボタンから呼ばれる。
+        channels は権限フィルタ済みの [(channel_id, channel_name), ...]。"""
+        guild_id = str(interaction.guild_id)
         result = await self.store.allow_all_channels(
             guild_id, channels, str(interaction.user.id)
         )
