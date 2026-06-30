@@ -427,7 +427,11 @@ class MoimoichanBot(discord.Client):
                     channel_id=str(message.channel.id),
                 )
                 # 成功時のみ会話を記憶（このチャンネルの次ターンへ引き継ぐ）。
-                self._remember_turn(message.channel.id, query, answer)
+                # 発話者名も一緒に残し、次ターンで「誰の発言か」を区別できるようにする（#63）。
+                self._remember_turn(
+                    message.channel.id, query, answer,
+                    speaker=message.author.display_name,
+                )
                 reply = answer[:_MAX_REPLY_LEN]
                 await message.reply(reply or "……（うーん、何も思いつかなかったかも〜 😅）")
             except asyncio.TimeoutError:
@@ -481,16 +485,25 @@ class MoimoichanBot(discord.Client):
         buf = self._history.get(channel_id)
         return list(buf) if buf else []
 
-    def _remember_turn(self, channel_id: int, query: str, answer: str) -> None:
+    def _remember_turn(
+        self, channel_id: int, query: str, answer: str, speaker: str | None = None
+    ) -> None:
         """1ターン（ユーザー質問＋Bot回答）を履歴に追記する。
-        maxlen で直近 history_max_turns ペアだけ保持する。"""
+        maxlen で直近 history_max_turns ペアだけ保持する。
+
+        speaker は質問した人の表示名（#63）。履歴はチャンネル単位で共有されるため、
+        user 発言に発話者名を添えておき、次ターンで別の人の発言と区別できるようにする
+        （API→engine._label_history が "名前: 本文" のラベルに描画する）。"""
         if self._history_max_turns <= 0:
             return
         buf = self._history.get(channel_id)
         if buf is None:
             buf = deque(maxlen=self._history_max_turns * 2)
             self._history[channel_id] = buf
-        buf.append({"role": "user", "content": query})
+        user_turn = {"role": "user", "content": query}
+        if speaker:
+            user_turn["speaker"] = speaker
+        buf.append(user_turn)
         buf.append({"role": "assistant", "content": answer})
 
     def _should_respond(self, message: discord.Message) -> bool:

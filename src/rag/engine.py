@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -48,6 +49,11 @@ _DEFAULT_RECENT_KEYWORDS = [
     "最近", "さっき", "この前", "この間", "近頃", "近況", "最新",
     "今週", "昨日", "今日", "直近", "いまどうなって", "今どうなって",
 ]
+
+# 履歴ラベル/SPEAKER_SECTION に埋め込む発話者名の上限（#63）。長い表示名で
+# プロンプトが膨らむのを防ぐ。display_name は最長32字だが、ここでは控えめに丸める
+# （重名で同一 prefix に潰れる可能性は display_name ベース運用の許容済み制約）。
+_SPEAKER_NAME_MAX_CHARS = 24
 
 
 class RagEngine:
@@ -184,17 +190,31 @@ class RagEngine:
         max_turns ペア（= max_turns*2 メッセージ）に丸めたうえで、(2) 合計
         content が max_chars 文字以内に収まるよう古いメッセージから落とす
         （max_chars<=0 で文字数制限なし）。長い回答の積み重ねによる token 膨張を
-        防ぐ（OI-10）。戻り値は古い順の [{"role", "content"}, ...]。
+        防ぐ（OI-10）。戻り値は古い順の [{"role", "content", "speaker"?}, ...]。
+
+        user 発言に "speaker"（発話者の表示名）があれば保持する（#63）。
+        ラベル描画は LLM 送信直前の _label_history() が行うため、ここでは
+        content は生のまま（max_chars 判定もラベルを含まない素の長さで行う）。
         """
         if not history or max_turns <= 0:
             return []
-        cleaned = [
-            {"role": h["role"], "content": str(h["content"])}
-            for h in history
-            if isinstance(h, dict)
-            and h.get("role") in ("user", "assistant")
-            and str(h.get("content") or "").strip()
-        ]
+        cleaned = []
+        for h in history:
+            if not isinstance(h, dict):
+                continue
+            role = h.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = str(h.get("content") or "")
+            if not content.strip():
+                continue
+            item = {"role": role, "content": content}
+            # 発話者名は user 発言にのみ意味がある（assistant は れみ・#63）。
+            if role == "user":
+                speaker = str(h.get("speaker") or "").strip()
+                if speaker:
+                    item["speaker"] = speaker
+            cleaned.append(item)
         cleaned = cleaned[-(max_turns * 2):]
         if max_chars and max_chars > 0:
             # 新しい方から積み、バジェットを超えたら打ち切る（最低1件は残す）。
@@ -208,6 +228,45 @@ class RagEngine:
                 total += c
             cleaned = list(reversed(kept))
         return cleaned
+
+    @staticmethod
+    def _sanitize_speaker(name: str | None) -> str:
+        """発話者名をプロンプト埋め込み用に正規化する（#63）。
+
+        改行・制御文字を空白に潰し、連続空白を1つにまとめ、前後を strip し、
+        長すぎる名前は丸める。これで名前に "改行＋別人:" 等を仕込んで
+        履歴/指示テキストを偽装する注入を防ぐ（codex-fugu Major④）。
+        履歴ラベル（_label_history）と SPEAKER_SECTION の双方で使い一貫させる。
+        """
+        if not name:
+            return ""
+        # 制御文字（改行・タブ含む）を空白へ。連続空白は1つに。
+        cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", str(name))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned[:_SPEAKER_NAME_MAX_CHARS]
+
+    @classmethod
+    def _label_history(cls, history: list[dict]) -> list[dict]:
+        """LLM 送信直前に user 発言へ "名前: 本文" のラベルを付ける（#63）。
+
+        **非破壊**: 入力 dict を改変せず新しいリスト/新しい dict を返す
+        （呼び出し元の hist_ans は mimic ガードでも生のまま使われるため・
+        codex-fugu Major②）。本文中の改行・制御文字は空白に潰して 1 ターン
+        =1 行に固定し、本文に "別人:" を仕込んで偽の発話者ターンを混ぜる注入を
+        防ぐ（codex-fugu Major①）。speaker が無い user／assistant は素通し。
+        戻り値は {"role", "content"} のみ（speaker キーは畳み込む）。
+        """
+        labeled: list[dict] = []
+        for h in history:
+            role = h.get("role")
+            content = str(h.get("content") or "")
+            speaker = cls._sanitize_speaker(h.get("speaker")) if role == "user" else ""
+            if speaker:
+                # 本文を 1 行へ畳んでから "名前: " を前置（行頭偽装の封じ込め）。
+                flat = re.sub(r"\s+", " ", content).strip()
+                content = f"{speaker}: {flat}"
+            labeled.append({"role": role, "content": content})
+        return labeled
 
     def _record(
         self,
@@ -271,7 +330,7 @@ class RagEngine:
             comp = await self.llm.complete(
                 self.rewriter_model, system, query,
                 temperature=0.2, max_tokens=self.rewriter_max_tokens,
-                history=history,
+                history=self._label_history(history or []),
             )
         except Exception as e:
             print(f"[WARN] Query Rewriter 失敗（元クエリで検索続行）: {e}")
@@ -655,9 +714,12 @@ class RagEngine:
             context = build_context(hits)
 
         # 発言者名（OI-22）。あればブロックを差し込み、無ければ空文字で消す。
+        # 履歴ラベルと同じ _sanitize_speaker で正規化し、名前経由の注入を塞ぎ
+        # 履歴側と表記を一貫させる（#63・codex-fugu Major④）。
+        speaker_clean = self._sanitize_speaker(speaker_name)
         speaker_section = (
-            SPEAKER_SECTION.replace("{speaker}", speaker_name)
-            if speaker_name and speaker_name.strip()
+            SPEAKER_SECTION.replace("{speaker}", speaker_clean)
+            if speaker_clean
             else ""
         )
         # 明示メモリ（OI-24）。有効時のみ guild の「教わった事実」を全件取得して注入する。
@@ -773,7 +835,7 @@ class RagEngine:
         comp = await self.llm.complete(
             self.answer_model, system, query,
             temperature=0.7, max_tokens=self.answer_max_tokens,
-            history=hist_ans,
+            history=self._label_history(hist_ans),
         )
         self._record(events, "answer", comp.model, comp.usage)
 
