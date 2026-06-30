@@ -260,6 +260,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_defs_stripe_price
 -- subscription_id から guild を逆引きする（Webhook 処理）。NULL は多数あり得るので部分INDEX。
 CREATE INDEX IF NOT EXISTS idx_guild_plans_subscription
     ON guild_plans (stripe_subscription_id) WHERE stripe_subscription_id IS NOT NULL;
+-- #41(OI-48 法務): 公開/課金前の明示同意ログ。初回の許可操作（/oracle allow|allowall）時に
+-- 「本文保存・外部LLM送信・料金/削除ポリシー」への同意を取り、誰がいつ何に同意したかを残す。
+-- サーバー×規約版で一度同意すれば再同意は不要（terms_version を上げたときだけ再取得）。監査証跡として全件保持。
+CREATE TABLE IF NOT EXISTS consent_log (
+    id            BIGSERIAL PRIMARY KEY,
+    guild_id      TEXT NOT NULL,
+    admin_id      TEXT NOT NULL,        -- 同意した管理者のDiscord ID
+    terms_version TEXT NOT NULL,        -- 同意した規約バージョン
+    scope         TEXT NOT NULL,        -- 'allow' | 'allowall'
+    channels      JSONB,                -- 対象ch [{"id","name"}, ...]
+    consented_at  TEXT NOT NULL         -- ISO8601 (UTC)
+);
+CREATE INDEX IF NOT EXISTS idx_consent_guild ON consent_log (guild_id, terms_version);
 """
 
 # ingest_jobs.kind の取りうる値
@@ -372,6 +385,41 @@ def fetch_allowed_channels(
         "WHERE guild_id = %s ORDER BY channel_name",
         (guild_id,),
     ).fetchall()
+
+
+# ---- 同意ログ（公開/課金前の法務要件・#41 / OI-48。Bot が内部 commit）----
+
+def record_consent(
+    conn: psycopg.Connection,
+    guild_id: str,
+    admin_id: str,
+    terms_version: str,
+    scope: str,
+    channels: list[dict] | None = None,
+) -> None:
+    """同意1件を記録する。scope は 'allow' | 'allowall'。
+    channels は [{"id":..,"name":..}, ...]（対象チャンネルの控え・監査用）。"""
+    conn.execute(
+        """
+        INSERT INTO consent_log
+            (guild_id, admin_id, terms_version, scope, channels, consented_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (guild_id, admin_id, terms_version, scope, Json(channels or []), _now()),
+    )
+    conn.commit()
+
+
+def has_consented(
+    conn: psycopg.Connection, guild_id: str, terms_version: str
+) -> bool:
+    """そのサーバーが現行の規約バージョンに既に同意済みかを返す。"""
+    row = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM consent_log "
+        "WHERE guild_id = %s AND terms_version = %s)",
+        (guild_id, terms_version),
+    ).fetchone()
+    return bool(row[0])
 
 
 def fetch_mention_map(
