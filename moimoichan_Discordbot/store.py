@@ -139,6 +139,25 @@ class Store:
 
         return await self._call(run)
 
+    # ---- 同意ログ（公開/課金前の法務要件・#41 / OI-48）----
+
+    async def has_consented(self, guild_id: str, terms_version: str) -> bool:
+        """そのサーバーが現行の規約バージョンに同意済みかを返す。"""
+        return await self._call(db.has_consented, guild_id, terms_version)
+
+    async def record_consent(
+        self,
+        guild_id: str,
+        admin_id: str,
+        terms_version: str,
+        scope: str,
+        channels: list[dict] | None = None,
+    ) -> None:
+        """同意1件を記録する（scope='allow'|'allowall'）。"""
+        await self._call(
+            db.record_consent, guild_id, admin_id, terms_version, scope, channels
+        )
+
     async def deny_channel(
         self, guild_id: str, channel_id: str, requested_by: str
     ) -> bool:
