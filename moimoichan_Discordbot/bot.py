@@ -16,6 +16,8 @@ APIはステートレスだが、Bot がチャンネルごとに直近の会話�
     /oracle deny <channel>   許可を取り消し、取り込み済みデータを削除
     /oracle sync             許可チャンネルの差分取り込みを今すぐ実行
     /oracle status           取り込み状況を表示
+    /oracle upgrade [plan]   有料プランに申し込む（Stripe Checkout・OI-14 D）
+    /oracle billing          プラン変更・解約（Stripe Customer Portal・OI-14 D）
     /oracle help             使い方とコマンド一覧を表示（オンボーディング・OI-27）
 
 実際の取り込み処理は worker.py（ジョブキュー経由）が行う。
@@ -77,6 +79,8 @@ _HELP = (
     "・`/oracle deny #チャンネル` … 許可を取り消して取り込み済みデータを削除\n"
     "・`/oracle sync` … 許可チャンネルの新着を今すぐ取り込む\n"
     "・`/oracle status` … 取り込み状況（許可数・件数・最新ジョブ）を表示\n"
+    "・`/oracle upgrade` … 有料プランに申し込む（決済ページを開くよ）\n"
+    "・`/oracle billing` … プラン変更・解約・カード変更（管理ページを開くよ）\n"
     "・`/oracle help` … この使い方を表示\n"
     "\n"
     "**🪄 真似っこモード**\n"
@@ -254,6 +258,136 @@ class OracleGroup(app_commands.Group):
     async def help(self, interaction: discord.Interaction) -> None:
         # 静的なヘルプを返すだけなので DB アクセスも defer も不要（OI-27）。
         await interaction.response.send_message(_HELP, ephemeral=True)
+
+    @app_commands.command(
+        name="upgrade",
+        description="有料プランに申し込む（Stripeの決済ページを開くよ・OI-14 D）",
+    )
+    @app_commands.describe(plan="申し込むプラン（省略すると一覧を出すよ）")
+    async def upgrade(
+        self, interaction: discord.Interaction, plan: str | None = None
+    ) -> None:
+        # 課金導線は本人にだけ見せる（ephemeral）。OracleGroup の manage_guild を継承。
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild_id is None:  # guild_only だが念のため明示拒否
+            await interaction.followup.send(
+                "このコマンドはサーバー内で使ってね〜", ephemeral=True
+            )
+            return
+        if self.oracle is None:
+            await interaction.followup.send(
+                "いま課金機能は使えないみたい〜", ephemeral=True
+            )
+            return
+        guild_id = str(interaction.guild_id)
+
+        # プラン未指定 → 有料プランの一覧を案内して終わり。
+        if not plan:
+            try:
+                plans = await self.store.fetch_plans()
+            except Exception:
+                plans = []
+            paid = [p for p in plans if (p.get("price_jpy") or 0) > 0]
+            if not paid:
+                await interaction.followup.send(
+                    "いま申し込める有料プランが見つからないみたい〜", ephemeral=True
+                )
+                return
+            lines = ["**申し込めるプラン** 🌸", ""]
+            for p in paid:
+                cl = p["channel_limit"]
+                ch = "全チャンネル" if cl is None else f"{cl}チャンネル"
+                lines.append(
+                    f"・`{p['plan_key']}` … **{p['display_name']}**"
+                    f"（¥{p['price_jpy']}/月・{ch}・{p['daily_question_limit']}問/日）"
+                )
+            lines.append("")
+            lines.append("`/oracle upgrade plan:プラン名` で申し込めるよ〜")
+            await interaction.followup.send("\n".join(lines), ephemeral=True)
+            return
+
+        # プラン指定あり → Checkout URL を発行。
+        try:
+            status, body = await self.oracle.create_checkout(guild_id, plan)
+        except Exception:
+            await interaction.followup.send(
+                "決済ページの準備に失敗しちゃった…少し待ってからまた試してね〜",
+                ephemeral=True,
+            )
+            return
+        if status == 200 and body.get("url"):
+            await interaction.followup.send(
+                f"こちらから申し込めるよ〜 🌸\n{body['url']}\n"
+                "（決済が終わると自動でプランが切り替わるよ）",
+                ephemeral=True,
+            )
+        elif status == 409:
+            await interaction.followup.send(
+                "このサーバーはもう契約中みたい。プラン変更や解約は "
+                "`/oracle billing` からできるよ〜",
+                ephemeral=True,
+            )
+        elif status == 400:
+            await interaction.followup.send(
+                f"`{plan}` ってプランは見つからなかったよ。"
+                "`/oracle upgrade`（プラン名なし）で一覧を見てね〜",
+                ephemeral=True,
+            )
+        elif status == 503:
+            await interaction.followup.send(
+                "いま課金の準備中みたい。もう少し待ってね〜", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "決済ページの準備に失敗しちゃった…少し待ってからまた試してね〜",
+                ephemeral=True,
+            )
+
+    @app_commands.command(
+        name="billing",
+        description="プラン変更・解約・カード変更（Stripeの管理ページを開くよ・OI-14 D）",
+    )
+    async def billing(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild_id is None:
+            await interaction.followup.send(
+                "このコマンドはサーバー内で使ってね〜", ephemeral=True
+            )
+            return
+        if self.oracle is None:
+            await interaction.followup.send(
+                "いま課金機能は使えないみたい〜", ephemeral=True
+            )
+            return
+        guild_id = str(interaction.guild_id)
+        try:
+            status, body = await self.oracle.billing_portal(guild_id)
+        except Exception:
+            await interaction.followup.send(
+                "管理ページの準備に失敗しちゃった…少し待ってからまた試してね〜",
+                ephemeral=True,
+            )
+            return
+        if status == 200 and body.get("url"):
+            await interaction.followup.send(
+                f"プラン変更・解約はこちらからどうぞ〜 🌸\n{body['url']}",
+                ephemeral=True,
+            )
+        elif status == 404:
+            await interaction.followup.send(
+                "まだ有料プランの契約がないみたい。"
+                "`/oracle upgrade` から申し込めるよ〜",
+                ephemeral=True,
+            )
+        elif status == 503:
+            await interaction.followup.send(
+                "いま課金の準備中みたい。もう少し待ってね〜", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "管理ページの準備に失敗しちゃった…少し待ってからまた試してね〜",
+                ephemeral=True,
+            )
 
     @app_commands.command(
         name="mimic",
