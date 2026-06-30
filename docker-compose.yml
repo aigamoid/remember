@@ -42,6 +42,14 @@ services:
       DATABASE_URL: postgresql://oracle:${POSTGRES_PASSWORD:-oracle}@postgres:5432/oracle
       # Bot→API 共有シークレット（OI-45）。.env で設定すると /chat・/remember を認証必須化。
       ORACLE_API_TOKEN: ${ORACLE_API_TOKEN:-}
+      # Stripe 課金（OI-14 D）。未設定なら課金機能は無効（billing.enabled()=False）。
+      # webhook は外部(Stripe)到達が必要だが、現状 API は localhost のみ公開なので
+      # 開発は `stripe listen --forward-to localhost:8000/billing/webhook` で転送する。
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      BILLING_SUCCESS_URL: ${BILLING_SUCCESS_URL:-}
+      BILLING_CANCEL_URL: ${BILLING_CANCEL_URL:-}
+      BILLING_RETURN_URL: ${BILLING_RETURN_URL:-}
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
