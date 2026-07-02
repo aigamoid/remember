@@ -15,12 +15,13 @@ def _insert_msg(
     author: str = "user",
     timestamp: str = "2024-01-01T00:00:00+00:00",
     guild_id: str = "g1",
+    is_bot: int = 0,
 ) -> None:
     conn.execute(
         "INSERT INTO messages "
-        "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (msg_id, guild_id, channel_id, "ch", "u1", author, content, timestamp, has_attachment),
+        "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment, is_bot) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (msg_id, guild_id, channel_id, "ch", "u1", author, content, timestamp, has_attachment, is_bot),
     )
 
 
@@ -135,6 +136,28 @@ class TestRunChunker:
         assert total == 1
         assert count_chunks(conn) == 1
 
+    def test_bot_messages_excluded_from_chunks(self, conn):  # #68
+        """is_bot=1 の発言はチャンク化対象から除外される（self-poisoning 防止）。"""
+        _insert_msg(conn, "m1", "ch1", "人間の十分な長さの発言です",
+                    timestamp="2024-01-01T00:00:00+00:00")
+        _insert_msg(conn, "m2", "ch1", "ボットの自動投稿メッセージです",
+                    timestamp="2024-01-01T00:01:00+00:00", is_bot=1)
+        conn.commit()
+
+        run_chunker(conn, _make_cfg(), "run-1")
+        texts = [r[0] for r in
+                 conn.execute("SELECT chunk_text FROM chunk_index").fetchall()]
+        joined = "\n".join(texts)
+        assert "人間の十分な長さの発言です" in joined
+        assert "ボットの自動投稿メッセージ" not in joined
+
+    def test_bot_only_channel_yields_no_chunks(self, conn):  # #68
+        """Bot発言だけのチャンネルはチャンクが生成されない。"""
+        _insert_msg(conn, "m1", "ch1", "ボットだけの長い自動投稿です",
+                    timestamp="2024-01-01T00:00:00+00:00", is_bot=1)
+        conn.commit()
+        assert run_chunker(conn, _make_cfg(), "run-1") == 0
+
     def test_messages_exceeding_gap_split_into_chunks(self, conn):
         """61分間隔（>= 60分）のメッセージは別チャンクになる。"""
         _insert_msg(conn, "m1", "ch1", "最初のメッセージ内容です", timestamp="2024-01-01T00:00:00+00:00")
@@ -240,6 +263,27 @@ class TestRunChunker:
         assert "最初のテストメッセージです" in row[0]
         assert "次のテストメッセージです" in row[0]
         assert "[2024-01-01 21:00]" in row[0]  # UTC→JST(+9)
+
+    def test_resolves_mentions_in_chunk_text(self, conn):
+        """本文中の <@author_id> が @表示名 に解決される（OI-18）"""
+        # author_id=111 が「アリス」として発言 → 別メッセージの <@111> を解決できる
+        _insert_msg(conn, "m1", "ch1", "おはようみんな今日もよろしく", author="アリス",
+                    timestamp="2024-01-01T12:00:00+00:00")
+        conn.execute(
+            "INSERT INTO messages "
+            "(id, guild_id, channel_id, channel_name, author_id, author_name, content, timestamp, has_attachment) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("m0", "g1", "ch1", "ch", "111", "アリス", "やっほー元気にしてた？",
+             "2023-12-31T12:00:00+00:00", 0),
+        )
+        _insert_msg(conn, "m2", "ch1", "ねえ <@111> ちょっと聞きたい", author="ボブ",
+                    timestamp="2024-01-01T12:01:00+00:00")
+        conn.commit()
+
+        run_chunker(conn, _make_cfg(), "run-1")
+        texts = " ".join(r[0] for r in conn.execute("SELECT chunk_text FROM chunk_index").fetchall())
+        assert "@アリス" in texts
+        assert "<@111>" not in texts
 
 
 # ── _is_noise ───────────────────────────────────────────────────────────────

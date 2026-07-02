@@ -6,6 +6,9 @@
 waiwai-oracle/
 ├── README.md
 ├── CLAUDE.md
+├── .github/
+│   └── workflows/
+│       └── tests.yml     # CI: PR/push時にpytestを自動実行（Postgresサービスコンテナ）
 ├── docs/
 │   ├── ARCHITECTURE.md   (このファイル)
 │   ├── DIAGRAMS.md
@@ -26,19 +29,26 @@ waiwai-oracle/
 │   ├── contextualizer.py  # LLMによる context_text 付与ロジック（Phase 2.5）
 │   ├── exporter.py        # chunk_index → output/*.txt 出力（旧Dify用・任意）
 │   ├── embedder.py        # OpenAI Embedding APIラッパー
-│   ├── vectorstore.py     # Qdrant操作（guild_idマルチテナント前提・purge対応）
+│   ├── sparse.py          # BM25 sparse 変換（SudachiPy分割・ハイブリッド検索用 #54）
+│   ├── vectorstore.py     # Qdrant操作（guild_idマルチテナント前提・purge対応・dense+sparse）
 │   ├── indexer.py         # チャンク → embedding → Qdrant 登録（Phase 4）
 │   ├── worker.py          # 取り込みワーカー（ingest_jobsキュー処理・定期sync）
 │   ├── rag/
-│   │   ├── prompts.py     # Query Rewriter・わいわいちゃんプロンプト（Difyから移植）
+│   │   ├── prompts.py     # Query Rewriter・れみちゃん回答プロンプト（Difyから移植・OI-15でリブランド）
 │   │   ├── llm.py         # OpenRouterチャットLLMラッパー（Completion=本文+usage を返す）
-│   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成・usage計測）
+│   │   ├── reranker.py    # Jina Reranker クライアント（OI-9・任意・既定OFF）
+│   │   └── engine.py      # RAG回答エンジン（書き換え→検索→生成・usage計測・traceデバッグ記録）
+│   ├── memory.py          # 明示メモリ MemoryProvider（「覚えておいて」教わった事実の読み取り・OI-24）
+│   ├── mimic.py           # 真似っこモード MimicProvider（対象者の人格カード読み取り・#49・channel単位）
 │   ├── usage.py           # 利用量コスト算出 + UsageRecorder（usage_log書き込み）
+│   ├── trace.py           # 回答デバッグトレース TraceRecorder（chat_trace書き込み・既定OFF・OI-21）
+│   ├── quota.py           # プラン上限の判定・JST日次境界・案内文（純ロジック・OI-14 C-2）
+│   ├── billing.py         # Stripe課金連携（Checkout/Portal/Webhook・既定OFF・OI-14 D）
 │   ├── admin/             # 管理者向けポータル（FastAPI + Jinja2・パスワード認証）
-│   │   ├── app.py         # ダッシュボード（サーバー/ジョブ/利用量の閲覧）
+│   │   ├── app.py         # ダッシュボード + /billing（プラン管理）+ /memories（自動記憶の承認・#56）
 │   │   ├── auth.py        # 簡易パスワード認証（HMAC署名トークン）
-│   │   └── templates/     # base/login/dashboard/error.html
-│   ├── api.py             # FastAPI APIサーバ（POST /chat, GET /health）
+│   │   └── templates/     # base/login/dashboard/error/billing/memories.html
+│   ├── api.py             # FastAPI APIサーバ（POST /chat[quota判定], GET /health）
 │   └── cli.py             # CLIチャットロジック（/chat クライアント）
 ├── moimoichan_Discordbot/
 │   ├── bot.py             # Discord Bot エントリポイント（/oracleコマンド・guildイベント）
@@ -49,7 +59,14 @@ waiwai-oracle/
 │   ├── check_docs.py      # ドキュメント内 .py 参照の検証（pre-commit hook）
 │   ├── install_hooks.sh
 │   ├── vm_setup.sh        # GCP VM初期セットアップ（Docker+compose+swap・Phase3）
-│   └── migrate_sqlite_to_pg.py # 旧SQLiteデータのPostgres移行（1回だけ実行）
+│   ├── load_secrets_from_gcp.sh # GCP Secret Manager から .env を取得（VM運用）
+│   ├── eval_retrieval.py  # 検索ヒット率のオフライン評価（golden セット・カテゴリ別集計・#54）
+│   ├── eval_recency.py    # hybrid vs hybrid+recency のA/B評価（#55）
+│   ├── ab_*.py            # 各種A/B評価（prompt/cost/rerank/search_skip/memory・実データ検証用）
+│   ├── migrate_hybrid_reindex.py # ハイブリッド検索ON化のための全チャンク再インデックス（#54）
+│   ├── migrate_sqlite_to_pg.py # 旧SQLiteデータのPostgres移行（1回だけ実行）
+│   ├── migrate_oi_to_issues.py # 旧OI→GitHub Issues移行（1回だけ実行・冪等）
+│   └── migrate_exclude_bots_68.py # 既存データからBot/Webhook発言を除外し再ビルド（自家中毒対策・#68）
 ├── dry_run.py             # メッセージ数カウントのみ（取得なし）
 ├── crawler.py             # Phase 1 エントリポイント（手動実行用）
 ├── chunker.py             # Phase 2 エントリポイント（手動実行用）
@@ -103,12 +120,21 @@ src/worker.py
 Discord ユーザー（@メンション） or CLI入力
     ↓ POST /chat {guild_id, query, guild_name}
 src/api.py（FastAPI）
+    0. プラン上限チェック（src/quota.py）: 本日(JST)の質問数 ≧ プラン日次上限なら
+       回答せず案内文を返す（コスト発生なし・OI-14 C-2）。上限内のみ↓へ
     ↓
 src/rag/engine.py
-    1. Query Rewriter（Gemini 2.5 Flash・現在日時注入）
-    2. embedding → Qdrant 検索（guild_id フィルタ必須・top_k=10）
-    3. 回答生成（Kimi K2・わいわいちゃんプロンプト・guild_name を埋め込み）
+    1. Query Rewriter（Gemini 2.5 Flash・現在日時注入・履歴で指示語解決）
+       └ 過去ログ参照が不要なら [NO_SEARCH] 判定で 2〜3 をスキップ（検索ゲート・OI-23）
+    2. embedding → Qdrant 検索（guild_id フィルタ必須・top_k=5）
+       ├ ハイブリッド検索: dense + BM25 sparse を RRF 融合（任意・#54）
+       ├ recency 時間減衰: anchor_timestamp で新しい話を優先（任意・#55）
+       └ リランカー: Jina で関連度再ランク（任意・既定OFF・OI-9）
+    3. 回答生成（DeepSeek V3.2・れみちゃんプロンプト・guild_name を埋め込み）
+       ├ 明示メモリ（memories）を全件注入（任意・OI-24）
+       └ 真似っこモード時は対象者の人格カードを注入（任意・#49）
     4. 各 LLM/embedding の usage を usage_log に記録（src/usage.py・コスト計測）
+       └ debug_trace ON 時は質問/ヒット/回答を chat_trace に保存（OI-21）
     ↓
 回答 JSON → Bot が Discord に返信
 ```
@@ -127,6 +153,10 @@ src/admin/app.py
     - fetch_recent_jobs:     取り込みジョブの状況（処理中/完了/エラー）
     - fetch_usage_summary:   今月の利用量（合計・種別別・サーバー別）
 ```
+
+`/billing`（OI-14 C-2）: プラン定義（上限・価格）の編集と、サーバーごとのプラン割当・
+本日の消化状況を表示・変更する（`fetch_plan_defs` / `update_plan_def` /
+`fetch_billing_overview` / `set_guild_plan`）。プラン切替は現状手動。
 
 ## 設計方針
 

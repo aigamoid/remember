@@ -24,9 +24,28 @@ TEST_DSN = os.environ.get(
 
 _TRUNCATE = (
     "TRUNCATE guilds, allowed_channels, messages, attachments, "
-    "crawl_state, chunk_index, ingest_jobs, run_log, usage_log "
+    "crawl_state, chunk_index, ingest_jobs, run_log, usage_log, "
+    "chat_trace, memories, personas, mimic_state, guild_plans, consent_log "
     "RESTART IDENTITY CASCADE"
 )
+
+# plan_defs はマスタ（seed）。truncate せず毎テスト既定値へ UPSERT リセットする
+# （TRUNCATE による relation ファイル生成を避け、colima 上での I/O 権限揺らぎを減らす）。
+_RESET_PLANS = """
+INSERT INTO plan_defs
+    (plan_key, display_name, channel_limit, daily_question_limit, price_jpy, sort_order)
+VALUES
+    ('free', 'Free', 1,    20,     0, 1),
+    ('pro',  'Pro',  10,   80,   700, 2),
+    ('max',  'MAX',  NULL, 200,  1500, 3)
+ON CONFLICT (plan_key) DO UPDATE SET
+    display_name         = EXCLUDED.display_name,
+    channel_limit        = EXCLUDED.channel_limit,
+    daily_question_limit = EXCLUDED.daily_question_limit,
+    price_jpy            = EXCLUDED.price_jpy,
+    sort_order           = EXCLUDED.sort_order,
+    stripe_price_id      = NULL
+"""
 
 
 def _ensure_test_db() -> None:
@@ -58,9 +77,13 @@ def pg_conn():
 
 @pytest.fixture
 def conn(pg_conn):
-    """各テスト用にテーブルを空にした接続を提供する。"""
+    """各テスト用にテーブルを空にした接続を提供する。
+
+    plan_defs はマスタ（seed）なので、truncate後に init_schema で初期プランを再投入する。
+    """
     pg_conn.rollback()
     pg_conn.execute(_TRUNCATE)
+    pg_conn.execute(_RESET_PLANS)  # plan_defs を既定値へ（truncateしない）
     pg_conn.commit()
     yield pg_conn
     pg_conn.rollback()

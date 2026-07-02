@@ -1,0 +1,116 @@
+name: tests
+
+# いつ走らせるか
+on:
+  pull_request:               # PR を作成・更新したとき
+  push:
+    branches: [main, develop] # main / develop に push したとき
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    # テスト用 Postgres を CI が自動で起動する
+    # （手元で `docker compose up -d postgres` している代わり）
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: oracle
+          POSTGRES_PASSWORD: oracle
+          POSTGRES_DB: oracle_test
+        ports:
+          - 5432:5432
+        # Postgres が応答可能になるまで待つヘルスチェック
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # conftest.py がこの環境変数を読んで接続先を切り替える
+    env:
+      TEST_DATABASE_URL: postgresql://oracle:oracle@localhost:5432/oracle_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python 3.11 を用意
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 依存パッケージをインストール
+        run: pip install -r requirements.txt
+
+      - name: pytest を実行
+        run: python -m pytest -q
+
+  # ── 変更がドキュメントだけかを判定 ───────────────────────────────
+  # docs（*.md / docs/ 配下）だけの push では deploy を走らせない（無駄な再ビルド/再デプロイを防ぐ）。
+  # コード（.py 等）が1つでも変わっていれば code_changed=true となり deploy が走る。
+  detect-changes:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.filter.outputs.code_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                            # 差分判定のため履歴を全部取る
+      - name: コード変更の有無を判定（.md / docs/ 以外が変わったか）
+        id: filter
+        run: |
+          set -euo pipefail
+          base="${{ github.event.before }}"
+          # before が無効（初回 push 等）なら安全側に倒して deploy する
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$base" "${{ github.sha }}" | grep -qvE '(\.md$|^docs/)'; then
+            echo "code_changed=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "code_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── CD（自動デプロイ）─────────────────────────────────────────
+  # develop に push（＝PR マージ）され、pytest が緑で、かつ docs 以外の変更があるときだけ走る。
+  # 実行場所は GCP 検証機 remember-vm 上の self-hosted runner（Tailnet 内側）。
+  # PR の更新や main への push では走らない（if 条件で develop の push に限定）。
+  deploy:
+    needs: [pytest, detect-changes]                 # pytest 成功＋docs以外の変更が前提
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop' && needs.detect-changes.outputs.code_changed == 'true'
+    runs-on: [self-hosted, remember-vm]             # VM 上の常駐 runner（remember-vm ラベル）
+
+    # 同時に複数のデプロイが走らないよう直列化（前のデプロイは中断しない）
+    concurrency:
+      group: deploy-remember-vm
+      cancel-in-progress: false
+
+    steps:
+      # self-hosted runner は VM 上で動くため、リポジトリの checkout は不要。
+      # 設定・データが常駐する ~/remember のクローンを直接 develop に合わせる。
+      # .env / config.yml / data/ は .gitignore 済みなので reset --hard でも消えない。
+      - name: develop を取り込んで再ビルド・再起動
+        run: |
+          set -euo pipefail
+          cd "$HOME/remember"
+          git fetch origin develop
+          git reset --hard origin/develop
+          docker compose up -d --build
+
+      - name: ヘルスチェック（API /health が 200 を返すまで最大60秒待つ）
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            if curl -fsS http://localhost:8000/health >/dev/null; then
+              echo "API /health OK"
+              exit 0
+            fi
+            echo "待機中... ($i/12)"; sleep 5
+          done
+          echo "ERROR: /health が 200 を返しませんでした" >&2
+          docker compose -f "$HOME/remember/docker-compose.yml" logs --tail=50 || true
+          exit 1

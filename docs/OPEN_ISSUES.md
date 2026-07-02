@@ -1,324 +1,100 @@
-# 未解決事項・TODO
+# 未解決事項・確定設計決定（インデックス）
 
-## OI-9: ハイブリッド検索・リランキング未実装（Dify比で検索構成が簡素化）
-
-旧Difyフローはキーワード0.6/ベクトル0.4のハイブリッド検索 + Jinaリランカーだったが、
-自前RAGエンジン（2026-06-11移行）はベクトル検索のみ（top_k=10）。
-日本語キーワード検索の品質はDify側も怪しかったため一旦純ベクトルで運用し、
-検索精度に不満が出たら Qdrant のスパースベクトル（BM25系）+ リランカー追加を検討する。
-
-## OI-10: 会話履歴（マルチターン）非対応
-
-自前API化に伴い conversation_id を廃止（DEVLOG 2026-03-25 の「無効化プラン」を実施）。
-現状は1問1答。マルチターンが必要になったら Bot 側で直近の会話を API に渡す設計を検討。
-
-## ~~OI-11: SaaS化ステップ2（マルチテナント自動取り込み）~~ ✅ 実装完了 (2026-06-11)
-
-feature/multitenant-ingest で実装。
-- SQLite → Postgres 移行（psycopg / 全テーブル guild_id 対応 / `scripts/migrate_sqlite_to_pg.py` で既存データ移行済み）
-- ingest_jobs ジョブキュー + 常駐ワーカー（worker.py）: allow/sync/定期24h で
-  クロール→チャンク→文脈付与→インデックスを自動実行
-- 管理者向けスラッシュコマンド `/oracle allow|deny|sync|status`（opt-in方式）
-- deny / Bot退出時のデータ削除（Qdrant + Postgres の purge）
-- 残り: 実機E2E（→OI-12）、Discord Bot検証・Message Content Intent 審査（100サーバー以上で必要。99までは不要）
-
-## OI-12: マルチテナント取り込みの実機E2E ✅ 完了（2026-06-15）
-
-実装・ユニットテスト（211件）に加え、テスト用Discordサーバー（もいもいAI砂場）で
-実機E2Eを完走。全シナリオが想定通り動作した。
-- allow→自動取り込み: #一般 511msg→30チャンク→30ベクトル（guild_id分離を確認）
-- @メンション回答: 実ログ準拠の回答を確認（Rewriter→Qdrant検索→Kimi K2生成）
-- deny: チャンネル単位削除（−513msg/−30chunk、他チャンネルは無傷）
-- Bot退出: guild単位の全削除（実データ0化、guilds行は left_at 付きで墓標として残存＝設計通り）
-
-副産物の修正:
-- Query Rewriter が OpenRouter で max_tokens 既定値（65535）を要求し残高不足（402）で
-  毎回失敗していた → `rag.rewriter_max_tokens`（既定256）を新設して解消。
-- 起動時、前回の不完全停止で Qdrant の旧 waiwai_chunks コレクションが破損し起動不能だった →
-  `data/qdrant_quarantine/` に退避して復旧（削除せず・waiwaiはアクセス禁止方針のため実害なし）。
-
-## OI-13: 取り込み完了のDiscord通知が無い
-
-ワーカーはジョブ完了を ingest_jobs.result に記録するだけで、Discordへ通知しない
-（ワーカーはgateway接続を持たない設計のため）。現状は `/oracle status` で確認する運用。
-必要になったら: Bot側でジョブ完了をポーリングして通知する or ワーカーにwebhook URLを渡す。
-
-## OI-14: 収益化・パブリック化ロードマップ（目標）
-
-このBotを一般公開（パブリックBot化）し、サブスクで収益化することを目標とする。
-技術基盤（マルチテナント分離・opt-in取り込み・退出時データ削除）は OI-11 で完成済み。
-残るのは **法務・Discord審査・コスト管理・課金・インフラ**。以下は領域ごとの課題と改善アイデア
-（アイデアベース。着手＝ソース変更・不可逆な操作・方針決定の前には必ず人間に確認する）。
-
-### 進める順番（推奨）
-1. OI-12（実機E2E）を完了 ← 公開の大前提
-2. 法務(A) + Discord審査(B) ← コード不要、並行で着手可
-3. コスト計測(C) ← 課金の前提
-4. 課金(D) ← Cの後
-5. インフラ(E) ← 顧客が付き始めてから本格化
-
-### A. 法務（最優先・任意ではない）
-メッセージ本文を保存し第三者LLM（OpenAI/OpenRouter）へ送信するため、公開・有料化には規約明示が事実上必須。
-Discordのbot審査でも提出を求められる。
-
-**進捗（2026-06-17・ブランチ `feature/legal-docs`・develop基点）:**
-- ✅ ドラフト作成済み: `docs/legal/privacy_policy.md` / `docs/legal/terms_of_service.md`
-  （取得情報・外部送信先[OpenAI/OpenRouter/GCP東京/Discord]・退出=全削除・無償ベータ無保証・準拠法=日本）。
-  サービス名は `remember`（仮）で記載。法律家レビュー前の雛形。
-- ⬜ **未確定プレースホルダ（保留中・公開前に要記入）**:
-  `{{運営者ハンドル名}}` / 連絡先（サポートDiscord招待URL ＋ 連絡用メール）/ `{{管轄裁判所}}`（住所開示/有料化時に確定）。
-- ⬜ 公開先（ホスティング）未定（GitHub Pages公開repo or Cloudflare Pages）。Markdown→静的HTML化はその時に。
-- ⬜ PR は未作成（プレースホルダ確定後に develop へPR予定）。worktree: `~/Desktop/remember-legal`。
-
-- **アイデア**: プライバシーポリシー / 利用規約 を作成し、GitHub Pages 等の静的ページで公開。
-- **アイデア**: `/oracle allow` 実行時に「このチャンネルの過去ログを外部LLMに送信して学習・回答に利用する」旨の
-  同意文を Bot が表示し、管理者の明示同意を取る（同意ログを Postgres に残すと監査に強い）。
-- **アイデア**: データ削除請求（GDPR/個人情報保護法の「削除権」）への対応導線。技術的には purge_guild が既にあるので、
-  「Botをサーバーから退出させれば全削除される」ことを規約に明記すればまず足りる。
-- **要確認(人間)**: 規約の最終文面、適用法域（日本のみ想定か）、運営主体の表記（個人名 or 屋号）。
-
-### B. Discord公式審査
-- 100サーバー超で **Message Content Intent の審査**が必要（99までは不要 / OI-11参照）。
-- bot verification（認証）と、上記Aの規約URL提出が必要。
-- **アイデア**: 公開前に「サポートサーバー」を1つ立て、問い合わせ・障害告知の窓口にする（審査でも好印象）。
-- **要確認(人間)**: 公開申請のタイミング（E2E完了後）、運営者情報の開示範囲。
-
-### C. コスト管理（収益化の肝・最も見落とされやすい）
-現状 embedding(OpenAI) と 回答LLM(OpenRouter) のコストが **使われるほど青天井**。
-guild_id単位の利用量計測・上限が無く、人気が出た瞬間に赤字化するリスク。
-
-**進捗（feature/usage-metering-portal・2026-06-15）:**
-- ✅ C-1（計測）実装済み: `usage_log` テーブル新設、`src/rag/llm.py` が usage を返し、
-  `src/rag/engine.py` が rewrite/embedding/answer の使用量を `src/usage.py` の
-  `UsageRecorder` 経由で記録。コストは config.yml の `pricing` から算出。user_id も記録。
-  回答挙動は不変（記録失敗は回答を止めない）。テスト240件PASS。
-- ✅ 管理ポータル（`src/admin/`）も同ブランチで実装（下記の追加要望）。
-- ⬜ C-2（quota/上限）は未実装。C-1 のデータを見て料金プランを決めてから着手する。
-- ⚠️ pricing 単価は概算値。最新の OpenRouter/OpenAI 価格に各自で更新すること。
-
-**当初アイデア（記録用）:**
-- **アイデア（計測）**: `usage_log` テーブルを新設し、guild_id・日時・種別(embedding/chat)・トークン数・
-  推定コストを記録。既存スキーマが全テーブル guild_id を持つので集計は乗せやすい。
-- **アイデア（上限/quota）**: プランごとに「月間質問回数」or「月間トークン上限」を設定し、
-  超過時は回答停止 or 課金案内。`src/rag/engine.py` の入口でチェックする想定。
-- **アイデア（取り込みコスト）**: 取り込み時の contextualizer(LLM) / embedding もコスト源。
-  初回取り込みのチャンク数に応じた従量 or 上限を検討（大規模サーバーが無料枠で大量取り込みすると赤字）。
-- **アイデア（モデル選択）**: プランで使用モデルを出し分け（無料=安価モデル / 有料=高品質）してコスト最適化。
-- **要確認(人間)**: 料金プラン設計（無料枠の有無・価格・課金単位＝サーバー単位かユーザー単位か）。
-
-### D. 課金システム
-- **アイデア**: Stripe でサブスク（Stripe Customer Portal を使えば解約・カード変更を自前実装せず済む）。
-- **アイデア**: `guild_plans` テーブルで guild_id ↔ プラン状態(active/past_due/canceled) を管理。
-  Stripe Webhook で状態を更新し、未払いは回答停止 or 機能制限。
-- **アイデア**: 申込導線は Bot のスラッシュコマンド `/oracle upgrade` → Stripe Checkout のURLを返す。
-- **要確認(人間)**: 決済事業者（Stripe想定でよいか）、特定商取引法の表記（日本で課金する場合に必要）。
-
-### E. インフラ・運用
-現状はベータ：オンプレ（Mac上の `docker compose` 単一ホスト）。顧客が付くと可用性・バックアップ・監視が課題。
-
-**方針（2026-06-15 決定）: 収益化の必須条件として GCP へ移行する。ベータ期間中に実施。**
-→ 実作業手順は **`docs/GCP_MIGRATION.md`**（初心者向けrunbook）。
-構成確定: 単一GCE VM(e2-small/東京) + Tailscale経由・公開インバウンド0・月$20以下。
-
-**✅ lift-and-shift 完了（2026-06-15・現状ステージング/検証機）:** Phase 0〜3 完走。
-VM `remember-vm`(100.98.83.15) で6サービス本番稼働、取り込み→@メンション回答までGCP上で実機確認。
-公開インバウンド0（SSHはIAP範囲のみ）・予算アラート¥3,000設定済み・自動停止 JST 2/9/17時。
-詳細は DEVLOG 2026-06-15「GCP移行」。**後に本番機へ移行予定**。
-残: バックアップ/監視/Secret Manager化（下記）、Phase6マネージド化。
-
-- **GCP移行アイデア（構成案）**:
-  - lift-and-shift（最小手数）: GCE VM 1台で今の `docker compose` をほぼそのまま動かす。
-    まずこれでベータ移行 → 後で段階的にマネージド化、が現実的。
-  - マネージド化（段階的）: api/admin は **Cloud Run**（ステートレスHTTP）、
-    Postgres は **Cloud SQL for PostgreSQL**、Qdrant は永続ディスク付き **GCE/GKE 自前ホスト**
-    （or Qdrant Cloud）。Discord Bot と worker は**常駐**なので Cloud Run 不向き → GCE VM か GKE。
-  - 機密情報: `.env` → **Secret Manager** へ。
-  - データ移行: Postgres は pg_dump/restore → Cloud SQL。Qdrant はスナップショット復元。
-  - 公開面: admin/API に独自ドメイン＋HTTPS（マネージドTLS）。Bが進めば公開審査と整合。
-- **アイデア（バックアップ）**: Postgres の定期ダンプ + Qdrant スナップショットを自動化。
-  移行前のオンプレでもまず実施（Cloud SQL なら自動バックアップが付く）。
-- **アイデア（監視）**: `GET /health` を Cloud Monitoring/Uptime checks で外形監視 + ワーカー死活監視。
-- **アイデア（スケール）**: 当面は単一構成で十分。テナント増で API/worker を水平分割
-  （ジョブキューが FOR UPDATE SKIP LOCKED なのでワーカー複数化は構造的に可能）。
-- **アイデア（コスト把握）**: GCP費（Cloud SQL/VM/egress） + API費 を月次集計し、Cの収益と突き合わせ損益分岐を可視化。
-- **要確認(人間)**: GCP構成の選択（lift-and-shift で素早く移行 or 最初からマネージド）、
-  予算感（Cloud SQL/VMの月額）、移行タイミング、可用性目標、リージョン（東京 asia-northeast1 想定？）。
-
-### F. 管理ポータル（運用ダッシュボード）✅ 初版実装済み
-管理者だけがブラウザから全体状況（処理中・料金・在籍サーバー等）を確認できるサイト。
-- ✅ `src/admin/`（FastAPI + Jinja2・別 compose サービス `admin`・ポート8001・簡素デザイン）。
-  認証は `ADMIN_PASSWORD` の簡易パスワード（HMAC署名Cookie）。
-  画面: サーバー一覧（許可ch/msg/chunk/今月コスト）・取り込みジョブ状況・利用量サマリ。
-- ⬜ 今後アイデア: 操作系（allow/deny/手動syncをポータルから実行）、期間指定の推移グラフ、
-  プラン管理（D課金と連動）、アラート（赤字しきい値超過の通知）。
-- **要確認(人間)**: ポータルを公開（外部からアクセス）するか、ローカル/VPN内限定にするか
-  （公開する場合は HTTPS 必須・認証強化を検討）。
-
-### 横断的アイデア（収益価値を上げる＝OI-9/OI-10と連動）
-- 検索精度向上（OI-9: ハイブリッド検索+リランカー）は有料プランの差別化要素になり得る。
-- マルチターン会話（OI-10）も有料機能の候補。
-
-## OI-15: 回答LLMのシステムプロンプト（キャラ/口調）を見直したい
-
-やがて回答プロンプトを変えたい（2026-06-15・未着手）。コードネーム `remember` への
-リブランド（脱waiwai）と連動する。
-
-- 対象: `src/rag/prompts.py` の `ANSWER_SYSTEM_PROMPT`（Kimi K2用・35行目「わいわいちゃん」、
-  語尾「！っ」、感情モデル等）。`REWRITER_SYSTEM_PROMPT` は検索用なので原則そのまま。
-- 動機: キャラ名「わいわいちゃん」がwaiwai由来でリブランド対象。パブリック化（OI-14）に向け、
-  特定サーバー色の薄い汎用的な人格／口調も検討余地あり。
-- 反映: プロンプト変更後は **api コンテナを再ビルド**（`docker compose up -d --build api`）。
-  プロンプトは `prompts/` でのバージョン管理運用（DEVLOG 2026-03-23）に倣うと履歴が追える。
-- **要確認(人間)**: 新キャラ名・口調の方向性（現状の天真爛漫キャラを継続か刷新か）、
-  guild_name デフォルト `"わいわい"`（config）の扱い。正式名称（[[project-rename-initiative]]）確定後に着手が無難。
-- 関連: OI-14（パブリック化）/ 名称検討（codename remember）
-
-## OI-16: 回答1メッセージのコスト最適化（実測が高い）
-
-GCP移行後の実測（2026-06-15・テストサーバー）で **1問あたり ≈ $0.016（≈¥2.5）** と判明。
-事前概算「0.5〜1円」の3〜16倍。OI-14 C-2（quota）・料金設計の前にコスト自体を下げたい。
-
-**内訳（実測・1問）:**
-- answer (Kimi K2): **約26,000トークン → $0.016**（ほぼ全部ここ）
-- rewrite (Gemini Flash) ≈ $0.00015 / embedding ≈ $0（誤差）
-
-**高い原因:** 回答時の context が巨大。`top_k=10` × 大きめチャンク（`max_chunk_messages=30`）＋
-各チャンクに `context_text`（contextualizer出力）も連結しているため、prompt が膨らむ。
-
-**削減アイデア（効果が大きい順・要計測）:**
-- **top_k を下げる**（10→5 or 4）: context をほぼ半減できる最大のレバー。`config.yml rag.top_k`。
-  トレードオフは再現率（拾い漏れ）。→ OI-9 リランカーと併用すれば少数精鋭で品質維持しやすい。
-- **回答に渡す context を絞る**: `src/rag/prompts.py build_context` で context_text を外す or 短縮、
-  チャンク本文を上限文字数でトリム。context_text は主に検索用なので回答prompt から省く余地あり。
-- **回答の出力上限**: answer 呼び出しに `max_tokens` を設定し completion を上限化（engine.answer）。
-- **モデル出し分け**（OI-14 C-2）: 無料プランは安価モデル、有料は Kimi K2。`rag.answer_model` をプラン別に。
-- **システムプロンプト圧縮**（OI-15）: わいわいちゃんプロンプトの冗長部を削るとprompt tokenも減る。
-- **チャンク設計の見直し**: `max_chunk_messages` を小さくして1チャンクを軽量化（再取り込みが必要）。
-
-**進め方:** `usage_log` で before/after を計測しながら top_k から試すのが安全（回答品質と
-コストのトレードオフを実データで見る）。反映後は api 再ビルド（`docker compose up -d --build api`）。
-**要確認(人間):** 品質とコストのどちらをどこまで優先するか（無料/有料で別設定にするか）。
-関連: OI-14 C（コスト/quota）/ OI-9（リランカー）/ OI-15（プロンプト）
-
-**対応済み（2026-06-16・バランス案）:**
-- `top_k` 10→5（context ほぼ半減）。`answer_max_tokens: 1500` を新設（completionの暴走防止・安全弁）。
-- `answer_model` を Kimi K2 → **DeepSeek V3.2** に変更。`pricing` も OpenRouter実価格に更新。
-- A/B計測（`scripts/ab_cost_test.py`・同一context・top_k=5・2問）:
-  - Kimi K2: $0.0058 / $0.0094（平均 ≈ $0.0076/問）
-  - DeepSeek V3.2: $0.0017 / $0.0029（平均 ≈ $0.0023/問・約1/3）→ 品質（キャラ語尾/絵文字/Markdown）も同等
-- 総合: 元 **$0.016**（top_k=10・Kimi）→ **≈ $0.002〜0.003/問**（約1/6〜1/7）。
-- 残レバー（未着手）: context_text を回答promptから省く（OI-9リランカー併用時）・モデル出し分け（OI-14 C-2）・
-  プロンプト圧縮（OI-15）。品質劣化が見えたら top_k を 6〜7 に戻す。
-
-## OI-17: 回答LLMにDiscordツール（function calling）を持たせるか → 当面見送り
-
-検討メモ（2026-06-16）。結論は **当面見送り**。
-
-**前提:** Kimi K2 は OpenRouter 経由で function calling 対応＝技術的には可能。
-ただし API（`src/rag/engine.py`）は現状 Discord 非接続のため、エージェントのループ
-（LLMがツール要求→裏でDiscord実行→結果を戻す→続き）と Discord 権限の追加が必要で作りが変わる。
-
-**ツールで嬉しい候補:** ①読み取り/鮮度（未取り込みの直近メッセージ取得）②読み取り/解決
-（`<@ID>`→表示名、チャンネル解決）③アクション（投稿・スレッド・イベント・リマインド）。
-
-**見送りの理由:**
-- コスト増: LLM往復が複数回×巨大context で1問のコストが数倍。OI-16（コスト削減）と逆行。
-- レイテンシ増（現状20〜40秒がさらに伸びる）。
-- プロンプトインジェクション: LLMはユーザーのチャット本文を読むため、悪意ある投稿が命令に化ける。
-  アクション系（投稿/キック/ロール）は公開マルチテナントbotで特に危険 → 当面持たせない。
-- スコープ拡大: 「過去ログを思い出すbot」から汎用Discordアシスタントへ別物化。
-
-**方針:** いま欲しい効果の大半はツールなしで実現できる。
-- 「`<@ID>`が誰か」は LLMツール不要・決定論的に解決できる → **OI-18 で先に対応**。
-- 「鮮度」はツールより sync 間隔短縮（OI-13/24h設定）で足りる場合が多い。
-- エージェント的ツールは OI-14（公開/収益化）・OI-16（コスト）が片付いた後、まず**読み取り限定**で再検討。
-- 関連: OI-18 / OI-16 / OI-14 / OI-13
-
-## OI-18: 回答中の `<@ID>` メンションを表示名に解決したい（優先・軽量）
-
-チャットログは `<@123...>` 形式のメンションだらけで、回答に出ると「誰の発言か」が伝わらない。
-LLMツール使用（OI-17）に頼らず、**決定論的に表示名へ置換**すれば低コスト・低リスクで品質が上がる。
-OI-17の検討で「軽くて効果が高い」と判明したため別OIとして優先対応する。
-
-**実装アイデア（軽い順）:**
-- 取り込み時に解決済みにする: クロール段階で `<@ID>` を表示名へ正規化して保存（messages/chunk_text）。
-  既存データは再取り込みが必要だが、回答時の追加処理ゼロで一番きれい。
-- 回答コンテキスト構築時に解決: `src/rag/prompts.py build_context` で `<@ID>`→名前に置換。
-  ID→名前の対応は Postgres（既存の発言者名）や Discord REST から引く。LLM往復は不要。
-- 表示は「@名前」やキャラ口調に合わせた呼び方に。解決できないIDはそのまま残す。
-
-**論点:** 名前解決のソース（DBに発言者名がある範囲で足りるか／離脱ユーザー・改名の扱い）、
-取り込み時に正規化するか回答時に置換するか（前者は再取り込みコスト、後者は毎回の軽い処理）。
-**要確認(人間):** どちらの方式で行くか。関連: OI-17（ツール使用の代替）/ OI-16（低コスト維持）
-
-## ~~OI-1: dry_run.py 未実行~~ ✅ 完了 (2026-03-15)
-総メッセージ数: 36,128件 / 推定チャンク数: 35,994件（除外前）。
-ノイズチャンネル7本を config.yml の exclude_channel_ids に追加済み。
-除外後の推定: 約27,769件 / 32チャンネル。
-
-```bash
-docker compose run oracle python dry_run.py
-```
-
-## ~~OI-2: Dify未インストール~~ ✅ 完了 (2026-03-15)
-Windows 5090機（100.88.176.117）にDifyをインストール・起動済み。
-- ナレッジベース `waiwai-discord` 作成済み
-- dataset_id: `58358a2f-d3b9-4d0e-ae70-bf4812a1ba95` → config.yml反映済み
-- DIFY_API_KEY → .env反映済み
-- curl接続テスト成功
-
-## ~~OI-7: チャンク品質問題~~ ✅ 完了 (2026-03-21)
-
-時間ギャップ方式（`time_gap_minutes: 60`）に移行し解消。
-- `src/chunker.py` を全面書き換え（スライディングウィンドウ廃止）
-- 1チャンネル 11,305 チャンク → 会話単位の大幅削減見込み
-- `python chunker.py --clean` で旧データ削除後に再生成する
-
-## ~~OI-8: 👋_ようこそ の 409 CONFLICT~~ ✅ 解消 (2026-03-21)
-
-Dify アップロード廃止（`exporter.py` によるファイル出力方式に移行）により、
-API 経由のアップロード自体がなくなったため問題消滅。
+> **運用方針（2026-06-22 移行）:**
+> **アクティブな課題（未解決事項・TODO）は GitHub Issues で管理する**（採番は `#NN`）。
+> `gh issue list` / `gh issue view <#NN>` で参照、起票・進捗・クローズも GitHub Issues 上で行う。
+> 独自の `OI-XX` 採番は **OI-54 で凍結**（手動採番の番号衝突を避けるため）。
+> このファイルは以下の3つのみを保持する:
+> 1. **OI-XX → #NN インデックス表**（コードに残る旧 `OI-XX` 参照の道標）
+> 2. **確定設計決定・見送り判断**（CLAUDE.md が参照する決定事項）
+> 3. **完了アーカイブ**（完了済みOIの1行記録。詳細は `docs/DEVLOG.md` と git 履歴）
+>
+> 移行の経緯: 旧ファイルは 1024行・OI 54件まで肥大化し、手動採番 `OI-44` が
+> 2系統で衝突していた（codex-fugu 安全性レビューとコードレビュー指摘の重複起票）。
+> GitHub Issues 中心のハイブリッド管理へ移行（CLAUDE.md「Git運用ルール」参照）。
 
 ---
 
-## OI-19: worker の `Event loop is closed` 警告（無害・既知事項）
+## 1. アクティブIssue インデックス表（OI-XX → #NN）
 
-GCP検証機の取り込み中、worker ログに `RuntimeError: Event loop is closed`
-（`Task exception was never retrieved` / httpx `AsyncClient.aclose()` 由来）が散発する
-（2026-06-17・重いサーバー取り込み時に確認・60分で3回）。
+コード内・コミット・DEVLOG に残る旧 `OI-XX` 参照は、下表の GitHub Issue を指す。
 
-- **影響なし**: 取り込みは全ジョブ done・`error_message` 空、chunk_index 件数と Qdrant
-  ベクトル数も一致（543=543）。終了時の後始末ログのノイズで、データ・機能に害はない。
-- **原因（推定）**: worker がジョブごとに asyncio ループを回す際、非同期HTTPクライアント
-  （embedder/contextualizer 等）を明示クローズせず、GC時にループ閉鎖後の `aclose()` が走るため。
-- **対応方針**: 急がない。検証が一段落したら根本対応を1コミットで
-  （非同期クライアントを明示 `aclose()` する / ループを跨がない作りにする）。
-  放置するとログに常駐し本物のエラーを埋もれさせるので、いずれ潰す。
+| 旧OI | GitHub Issue | 内容 | 優先度 |
+|---|---|---|---|
+| OI-3 | [#34](https://github.com/aigamoid/waiwai-oracle/issues/34) | ThreadCollector 未実装（スレッド取得） | P3 |
+| OI-13 | [#35](https://github.com/aigamoid/waiwai-oracle/issues/35) | 取り込み完了のDiscord通知が無い | P2 |
+| OI-14 | [#32](https://github.com/aigamoid/waiwai-oracle/issues/32) | 収益化・パブリック化ロードマップ（**epic**） | P1 |
+| OI-19 | [#36](https://github.com/aigamoid/waiwai-oracle/issues/36) | worker の `Event loop is closed` 警告（無害・既知） | P3 |
+| OI-26 | [#37](https://github.com/aigamoid/waiwai-oracle/issues/37) | CDデプロイ完了をDiscordに通知する | P2 |
+| OI-28〜43 | [#33](https://github.com/aigamoid/waiwai-oracle/issues/33) | 魅力強化（リテンション）アイデア群（**epic**） | — |
+| OI-44 | [#31](https://github.com/aigamoid/waiwai-oracle/issues/31) | Bot退出/purge時の削除範囲が不完全 | P0 |
+| OI-46 | [#39](https://github.com/aigamoid/waiwai-oracle/issues/39) | /remember が quota 管理外でコスト発生・記憶汚染 | P1 |
+| OI-47 | [#40](https://github.com/aigamoid/waiwai-oracle/issues/40) | 明示メモリの安全弁が薄い | P1 |
+| OI-48 | [#41](https://github.com/aigamoid/waiwai-oracle/issues/41) | 公開/課金前の同意ログが未実装 | P1 |
+| OI-49 | [#42](https://github.com/aigamoid/waiwai-oracle/issues/42) | CD後のヘルスチェックがAPIのみ | P2 |
+| OI-50 | [#43](https://github.com/aigamoid/waiwai-oracle/issues/43) | 正式な schema migration が無い | P2 |
+| OI-51 | [#44](https://github.com/aigamoid/waiwai-oracle/issues/44) | config.yml と example の運用ドリフト | P2 |
+| OI-52 | [#45](https://github.com/aigamoid/waiwai-oracle/issues/45) | GitFlow の main 不整合・リリースフロー未整備 | P2 |
+| OI-53 | [#46](https://github.com/aigamoid/waiwai-oracle/issues/46) | テストの非決定的な揺らぎ | P2 |
+| OI-54 | [#47](https://github.com/aigamoid/waiwai-oracle/issues/47) | 既知の軽微なランタイム/依存ドリフト | P3 |
 
-## OI-3: ThreadCollector 未実装
-現在はTextChannelのみ取得。スレッド対応は将来実装。
-`collectors/base.py` のABCは拡張を前提に設計済み。
+**重複統合の記録:** 旧 OI-45〜49 は「codex-fugu 安全性レビュー版」と「コードレビュー指摘版」に
+同一内容が2件ずつ存在していた（OI-44 も同様）。同一指摘のため上表の各 Issue に**統合**した
+（統合理由は各 Issue 本文に明記）。移行の冪等記録は [`oi_migration.tsv`](oi_migration.tsv)。
 
-## ~~OI-4: Discord Message Content Intent 確認~~ ✅ 完了 (2026-03-15)
-MESSAGE CONTENT INTENT がONになっていることを確認済み。
+---
 
-## ~~OI-5: Dify Knowledge APIのチャンク数上限確認~~ ✅ 解消 (2026-03-16)
-チャンネルごとに1ナレッジベース・1ドキュメントに変更したため、上限問題は解消。
-（調査結果: セルフホスト版に上限なし。ただし100件超でリトリーバル不具合の報告あり — GitHub #29750）
+## 2. 確定設計決定・見送り判断
 
-## ~~OI-6: Dify メタデータフィルタの扱い~~ ✅ 決定済み (2026-03-15)
+過去フェーズで確定し、**今後のプラン立案で「抜け」と誤指摘しないために残す**決定事項。
 
-### 結論: Dify の自動メタデータフィルタは使用しない
+### Dify メタデータフィルタは使用しない（OI-6・2026-03-15 決定）
+- **理由:** Dify セルフホスト版の自動メタデータフィルタにバグ多数（GitHub #16564, #29556 等）で実用に耐えない。
+- **代替策:** タイムスタンプ・投稿者名を `chunk_text` 本文に直接埋め込む
+  （`[YYYY-MM-DD HH:MM] 投稿者名: メッセージ内容`・JST変換済み）。これで時系列クエリに LLM が回答できる。
+- ※Dify 自体は廃止済み（自前 RAG へ移行）だが、メタデータを本文に埋める設計はそのまま継承している。
 
-**調査結果:**
-- Dify セルフホスト版の自動メタデータフィルタにバグ多数（GitHub Issue #16564, #29556 など）
-- 実用に耐えないと判断
+### リランカー本番有効化は見送り（OI-9 Phase 1・2026-06-19）
+- リランカーは実装済みだが、実データ A/B で改善が確認できず **既定 OFF を維持**。
 
-**採用した代替策:**
-- タイムスタンプ・投稿者名などのメタデータを `chunk_text` 本文に直接埋め込む
-- フォーマット: `[YYYY-MM-DD HH:MM] 投稿者名: メッセージ内容`
-- タイムスタンプは JST 変換済み（`config.yml` の `timezone_offset: 9` で制御）
+### スパース(BM25)ハイブリッド検索は採用・本番ON（#54・2026-06-28）
+- OI-9 Phase 2 として見送られていたが、案A（#54）として実装し dense + BM25 sparse を RRF 融合。
+  実データ A/B で固有名詞・専門語の取りこぼしが改善し、**本番 ON**（2026-06-28）。
+  ON 化には全チャンク再インデックスが必要（`scripts/migrate_hybrid_reindex.py`）。
+- 続く時間減衰 recency（案B・#55）も**本番 ON**（2026-06-29）。hybrid の融合スコアに乗算で重ねる。
 
-**理由:**
-- 「去年の5月何話してたっけ？」のような時系列クエリに対し、chunk_text にタイムスタンプが含まれるため LLM が回答できる
-- exporter.py 側でメタデータフィルタ設定が不要になり実装が簡素化される
+### 回答LLMに Discord ツール（function calling）は当面持たせない（OI-17・2026-06-16）
+- コスト増（LLM往復×巨大context）・レイテンシ増・プロンプトインジェクション（公開マルチテナントで特に危険）・
+  スコープ拡大（汎用アシスタント化）のため見送り。欲しい効果の大半はツール無しで実現済み（OI-18 等）。
+- エージェント的ツールは OI-14（公開/収益化）・コスト最適化が片付いた後、まず**読み取り限定**で再検討。
+
+---
+
+## 3. 完了アーカイブ
+
+完了済みOI（詳細は `docs/DEVLOG.md` と各 feature ブランチの git 履歴）。
+
+| OI | 内容 | 完了 |
+|---|---|---|
+| OI-1 | dry_run.py 実行 | 2026-03-15 |
+| OI-2 | Dify インストール | 2026-03-15 |
+| OI-4 | Discord Message Content Intent 確認 | 2026-03-15 |
+| OI-5 | Dify Knowledge API のチャンク数上限確認 | 2026-03-16 |
+| OI-7 | チャンク品質問題 | 2026-03-21 |
+| OI-8 | 👋_ようこそ の 409 CONFLICT | 2026-03-21 |
+| OI-9 | 検索品質リランカー（Phase 1 実装・本番はOFF維持＝上記2参照） | 2026-06-17 |
+| OI-10 | 会話履歴（マルチターン）対応 | 2026-06-17 |
+| OI-11 | SaaS化ステップ2（マルチテナント自動取り込み） | 2026-06-11 |
+| OI-12 | マルチテナント取り込みの実機E2E | 2026-06-15 |
+| OI-15 | 回答LLMシステムプロンプト見直し（れみちゃんリブランド） | 2026-06-17 |
+| OI-16 | 回答1メッセージのコスト最適化（top_k=5/DeepSeek V3.2・約1/6〜1/7に・残レバーは #32/#33 へ） | 2026-06-16 |
+| OI-18 | 回答中の `<@ID>` メンションを表示名に解決 | 2026-06-16 |
+| OI-20 | 回答LLMが現在日時を知らず過去ログを誤認する問題 | 2026-06-17 |
+| OI-21 | 回答のデバッグトレース | 2026-06-19 |
+| OI-22 | 回答LLMに「いま話しかけている人」の名前を渡す | 2026-06-19 |
+| OI-23 | 検索ゲート（不要ならベクトル検索スキップ） | 2026-06-19 |
+| OI-24 | 明示メモリ機能（「覚えておいて」） | PR #27 |
+| OI-25 | 全チャンネル一括許可コマンド `/oracle allowall` | 2026-06-20 |
+| OI-27 | オンボーディング `/oracle help` | 2026-06-21 |
+| OI-45 | /chat・/remember の Bot→API 共有シークレット認証（#38 / PR #50） | ✅ 完了 (2026-06-24) |
+| OI-14 D | 課金システム（Stripe）MVP: `/oracle upgrade`・`billing`＋Webhook自動プラン更新（epic #32・テストモード） | 2026-06-30 |

@@ -29,10 +29,43 @@ embedding:
 
 rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
-  answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
-  top_k: 10                                   # 検索で取得するチャンク数
+  answer_model: "deepseek/deepseek-v3.2"      # 回答生成LLM（OpenRouter経由・OI-16: Kimi K2から変更）
+  top_k: 10                                   # 回答に渡すチャンク数（リランク有効時はリランク後の件数）
   rewriter_max_tokens: 256                    # 書き換え出力の上限（過大なtoken要求で残高不足になるのを防ぐ）
-  guild_name: "わいわい"                       # プロンプト用サーバー名のデフォルト（Bot経由なら実サーバー名が優先）
+  rewriter_max_query_chars: 60                # #64: 書き換え結果がこの字数を超え [NO_SEARCH] でなければ
+                                              # 「応答文への滑り」とみなし元クエリで検索（非破壊フォールバック）
+  history_max_turns: 5                        # マルチターン会話で渡す直近やり取りの上限ペア数（0で無効・OI-10）
+  history_max_chars: 4000                      # 履歴の合計文字数バジェット（超過分は古い方から落とす・長い回答のtoken膨張対策）
+  rewriter_history_max_turns: 2               # Query Rewriterに渡す履歴ペア数（指示語解決用に少なめ・token二重計上を抑制）
+  rewriter_history_max_chars: 1000            # Query Rewriterに渡す履歴の文字数バジェット
+  guild_name: "みんなのサーバー"                  # プロンプト用サーバー名のデフォルト（Bot経由なら実サーバー名が優先）
+  debug_trace: false                          # OI-21: 質問/ヒットチャンク/回答を chat_trace に保存（デバッグ用・既定OFF）。本番はプライバシー上 false 推奨
+  memory_enabled: false                       # OI-24: 「覚えておいて」で教わった事実(memories)を回答プロンプトに注入（既定OFF）
+  search_gate: true                           # OI-23: 雑談/挨拶/一般質問など過去ログ参照が不要な入力は検索をスキップ（コスト/レイテンシ削減・既定ON）。Rewriterが[NO_SEARCH]判定したら検索しない
+  mimic_enabled: false                        # #49: 「真似っこ」モード（/oracle mimic）を有効化（既定OFF）。対象メンバーの口調・性格を真似て回答
+  mimic:                                      # #49: 真似っこの調整（mimic_enabled=true のときだけ効く）
+    sample_limit: 300                         # 人格カード生成時に対象者の発言を最大何件まで使うか
+    min_sample_count: 30                      # これ未満は confidence=low（特徴が薄ければ開始を断ることもある）
+    require_optin: false                      # MVPは false。公開/課金前は true（本人の事前同意を必須化）にする
+  hybrid:                                     # #54: ハイブリッド検索（dense + BM25 sparse を RRF融合）。日本語はSudachiPyで分割
+    enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから（要: 全チャンク再インデックス）
+    prefetch_k: 30                            # 各レーン(dense/sparse)で融合前に取る候補数
+  auto_memory:                                # #56 案C: 会話から記憶を自動抽出して育てる（mem0方式）
+    enabled: false                            # 既定OFF。ONでも抽出は全件pending（admin承認待ち）として着地し、承認するまで回答に出ない
+    max_chunks: 30                            # 1回の取り込み後抽出で見る最近チャンク数（許可ch限定）
+    max_tokens: 800                           # 突合LLMの出力上限（JSON配列が途中で切れると抽出0件になるため広めに取る）
+  recency:                                    # #55: 時間減衰で検索を時系列に強くする（過去ログのみ・memoriesは検索を通らないので対象外）
+    enabled: false                            # true で有効化。本番ONは実データA/Bで効果実証してから（半減期は実測でチューニング）
+    half_life_days: 30                        # 半減期(日)。この日数経過でスコア寄与が半減。小さいほど新しい話を優先
+    recent_half_life_days: 7                  # 「最近」系クエリ検出時の短い半減期（時系列依存質問で減衰を強める）
+    score_floor: 0.1                          # 減衰係数の下限（古くても高関連チャンクを完全には捨てない・0で床なし）
+    candidate_k: 30                           # 減衰で再ランクする前に取る候補数（→ top_k 件に精選）
+    recent_boost: true                        # 「最近」系キーワード検出で recent_half_life_days に切り替える
+  reranker:                                   # OI-9: 検索結果のリランキング（任意・既定オフ）
+    enabled: false                            # true で有効化（APIキー JINA_API_KEY が必要）
+    provider: "jina"                          # 現状 jina のみ対応
+    model: "jina-reranker-v2-base-multilingual"
+    top_n: 30                                 # リランク前に dense で取る候補数（→ top_k 件に精選）
 
 contextualizer:
   model: "gpt-4.1-nano"   # コンテキスト生成モデル
@@ -46,8 +79,10 @@ contextualizer:
 pricing:
   "google/gemini-2.5-flash": {input: 0.30, output: 2.50}
   "moonshotai/kimi-k2-0905": {input: 0.60, output: 2.50}
+  "deepseek/deepseek-v3.2":  {input: 0.23, output: 0.34}   # 回答生成LLM（OI-16）
   "gpt-4.1-nano":            {input: 0.10, output: 0.40}
   "text-embedding-3-small":  {input: 0.02, output: 0.0}
+  "jina-reranker-v2-base-multilingual": {input: 0.02, output: 0.0}  # ※概算・要更新
 
 worker:
   poll_interval_seconds: 10  # ジョブキューの確認間隔（秒）

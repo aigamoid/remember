@@ -148,4 +148,5 @@ def _to_raw_message(msg: discord.Message, guild_id: str) -> RawMessage:
         reaction_count=reaction_count,
         thread_id=thread_id,
         thread_name=thread_name,
+        is_bot=bool(msg.author.bot),  # #68: Bot/Webhook は author.bot=True。取り込みから除外する
     )

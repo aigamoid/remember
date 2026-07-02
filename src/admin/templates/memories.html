@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}記憶の承認 — remember 管理{% endblock %}
+{% block body %}
+<nav><a href="/">ダッシュボード</a> <a href="/billing">課金</a>
+     <a href="/memories">記憶</a> <a href="/logout">ログアウト</a></nav>
+<h1>記憶の承認（#56 案C・自動抽出）</h1>
+<p class="muted">
+  会話から自動抽出された記憶候補です。<strong>承認するまで回答には一切使われません</strong>。
+  削除は物理削除せず無効化（soft-delete）します。
+</p>
+
+<h2>承認待ち（{{ pending | length }} 件）</h2>
+<table>
+  <tr><th>サーバー</th><th>操作</th><th>主語</th><th>内容</th>
+      <th>対象（既存）</th><th>根拠</th><th>承認 / 却下</th></tr>
+  {% for p in pending %}
+  <tr>
+    <td class="muted">{{ p.guild_id }}</td>
+    <td><span class="pill s-{{ 'queued' if p.proposed_op == 'add' else ('running' if p.proposed_op == 'update' else 'error') }}">{{ p.proposed_op }}</span></td>
+    <td>{{ p.subject or "—" }}</td>
+    <td>{{ p.content or "—" }}</td>
+    <td class="muted">{% if p.target_memory_id %}#{{ p.target_memory_id }}: {{ p.target_content or "(消失)" }}{% else %}—{% endif %}</td>
+    <td class="muted">{{ p.evidence or "" }}</td>
+    <td>
+      <form method="post" action="/memories/approve" style="display:inline">
+        <input type="hidden" name="candidate_id" value="{{ p.id }}">
+        <button type="submit">承認</button>
+      </form>
+      <form method="post" action="/memories/reject" style="display:inline">
+        <input type="hidden" name="candidate_id" value="{{ p.id }}">
+        <button type="submit">却下</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7" class="muted">承認待ちの候補はありません</td></tr>
+  {% endfor %}
+</table>
+
+<h2>有効な記憶（{{ active | length }} 件）</h2>
+<table>
+  <tr><th>サーバー</th><th>出所</th><th>主語</th><th>内容</th><th>作成</th><th>無効化</th></tr>
+  {% for m in active %}
+  <tr>
+    <td class="muted">{{ m.guild_id }}</td>
+    <td>{% if m.origin == 'auto' %}<span class="pill s-running">自動</span>{% else %}<span class="pill s-done">明示</span>{% endif %}</td>
+    <td>{{ m.subject or "—" }}</td>
+    <td>{{ m.content or "—" }}</td>
+    <td class="muted">{{ (m.created_at or "")[:19] }}</td>
+    <td>
+      <form method="post" action="/memories/delete" style="display:inline"
+            onsubmit="return confirm('この記憶を無効化（soft-delete）しますか？')">
+        <input type="hidden" name="guild_id" value="{{ m.guild_id }}">
+        <input type="hidden" name="memory_id" value="{{ m.id }}">
+        <button type="submit">無効化</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">有効な記憶はありません</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

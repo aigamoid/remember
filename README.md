@@ -1,104 +1,173 @@
-# waiwai-oracle
+# remember（旧称: waiwai-oracle）
 
-Discordサーバーの過去ログをRAG化し、チャットボットで回答するPOCプロジェクト。
+Discordサーバーの過去ログをRAG化し、Botが質問に回答するマルチテナント対応プロジェクトです。
+管理者が許可したチャンネルだけを取り込み、`guild_id` でデータを分離します。
 
-## 概要
+> リブランド方針: プロダクト呼称は段階的に `remember` へ移行中です。  
+> 2026-06 時点では管理ポータル（`src/admin`）の表示名を `remember` に統一済みです。  
+> ※リポジトリ名・compose・Qdrantコレクション名（`waiwai_chunks`）など**実体名はまだ `waiwai-oracle` のまま**です
+> （データ移行が絡むため別途対応）。以下の `git clone` / `cd` のパスも旧名のままです。
 
-Botを導入したDiscordサーバーのチャットログを自動で取り込み・ベクトル化し、
-ユーザーの質問にRAG検索で回答するチャットボットです。
-管理者が許可（opt-in）したチャンネルだけを読み、サーバーごとにデータを完全分離します。
+## 何ができるか
 
-## アーキテクチャ
+- Discordの過去ログを自動取り込み（opt-in）
+- 質問時に RAG 検索して回答（Discord Bot / CLI 共通API）
+- チャンネル許可取り消し・Bot退出時のデータ削除
+- 利用量と推定コストの記録（`usage_log`）
+- 管理ポータルでサーバー/ジョブ/コストを可視化
 
+## 全体アーキテクチャ
+
+```text
+/oracle allow|sync（管理者）
+  -> ingest_jobs (Postgres)
+  -> worker がジョブ実行
+     1) crawl        Discord -> messages
+     2) chunk        messages -> chunk_index
+     3) contextualize chunk -> context_text
+     4) index        embedding -> Qdrant
+
+質問（Discord @mention / CLI）
+  -> FastAPI /chat
+  -> Query Rewriter -> embedding -> Qdrant検索 -> 回答LLM
+  -> answer + sources を返却
 ```
-/oracle allow（管理者） → ジョブキュー(Postgres) → worker.py が自動実行:
-    Discord API → crawl → chunk → contextualize → embedding → Qdrant
-                                                                  ↑
-Discord Bot（@メンション） → FastAPI（/chat） → RAGエンジン（書き換え→検索→回答生成）
-```
 
-### 取り込みパイプライン
+## 取り込みパイプライン
 
 | Phase | モジュール | 概要 |
 |---|---|---|
-| 1 | `crawler.py` | 許可チャンネルのメッセージ → Postgres（差分） |
-| 2 | `chunker.py` | 時間ギャップ方式でチャンク生成 |
-| 2.5 | `contextualizer.py` | LLMで各チャンクにコンテキスト付与 |
-| 3 | `exporter.py` | チャンク → テキストファイル出力（旧Dify用・任意） |
-| 4 | `indexer.py` | チャンク → embedding → Qdrant 登録 |
+| 0 | `dry_run.py` | メッセージ件数見積もり（取得なし） |
+| 1 | `crawler.py` | 許可チャンネルの差分取得 -> Postgres |
+| 2 | `chunker.py` | 時間ギャップ方式でチャンク化 |
+| 2.5 | `contextualizer.py` | 各チャンクに `context_text` を付与 |
+| 3 | `exporter.py` | `output/*.txt` 出力（旧Dify用・任意） |
+| 4 | `indexer.py` | embedding して Qdrant に登録 |
 
-通常運用では `worker.py`（常駐ワーカー）が Bot のスラッシュコマンドや定期syncを
-きっかけに Phase 1→2→2.5→4 を自動実行する。各 `*.py` はデバッグ・再構築用の手動実行にも使える。
+通常運用では `worker.py`（`src/worker.py`）が `ingest_jobs` を処理し、Phase 1 -> 2 -> 2.5 -> 4 を自動実行します。
 
-### 管理コマンド（Discord・サーバー管理権限が必要）
+## 回答フロー（RAG API）
+
+- API: `src/api.py` (`POST /chat`, `GET /health`)
+- エンジン: `src/rag/engine.py`
+- 主な流れ:
+  1. Query Rewriter（OpenRouter）
+  2. embedding + Qdrant検索（`guild_id` フィルタ）
+  3. 回答生成（OpenRouter）
+  4. usage/cost 記録（`src/usage.py` -> `usage_log`）
+
+補足:
+- 会話履歴（`history`）を受け取るマルチターン対応あり（呼び出し側で履歴保持）
+- 日次クォータ判定（超過時は案内文を返す fail-open 設計）
+- 検索は dense ベクトルが基本。任意で以下を `config.yml` の `rag.*` で有効化:
+  - ハイブリッド検索（dense + BM25 sparse の RRF 融合・#54）
+  - recency 時間減衰（新しい話を優先・#55）
+  - リランカー（Jina・OI-9）/ 検索ゲート（不要なら検索スキップ・OI-23）
+- 明示メモリ（「覚えておいて」で教わった事実を回答に注入・OI-24）/ 真似っこモード（#49）
+
+## フロントエンド（2モード）
+
+- Discord Bot: `moimoichan_Discordbot/`
+- CLI: `chat_cli.py`
+
+どちらも同じ `POST /chat` を呼ぶ薄いクライアントです。
+
+## Discord管理コマンド
 
 | コマンド | 動作 |
 |---|---|
-| `/oracle allow #channel` | チャンネルの読み取りを許可し、取り込みを開始 |
-| `/oracle deny #channel` | 許可を取り消し、取り込み済みデータを削除 |
-| `/oracle sync` | 新着メッセージを今すぐ差分取り込み |
-| `/oracle status` | 取り込み状況・最新ジョブを表示 |
+| `/oracle allow #channel` | チャンネル許可 + 取り込みジョブ投入 |
+| `/oracle allowall` | 全チャンネルを一括許可 + 取り込みジョブ投入（**MAXプラン限定**） |
+| `/oracle deny #channel` | 許可取り消し + 取り込み済みデータ削除ジョブ投入 |
+| `/oracle sync` | 差分取り込みジョブ投入 |
+| `/oracle status` | 許可チャンネル/件数/最新ジョブを確認 |
+| `/oracle help` | れみちゃんの使い方とコマンド一覧を表示 |
+| `/oracle mimic @user` | 真似っこモード開始（対象者の口調を真似て回答・#49・既定OFF） |
+| `/oracle mimic_off` | 真似っこモード解除 |
+| `/oracle mimic_optout` | 自分を真似っこ対象から除外（本人保護） |
 
-Botをサーバーから外すと、そのサーバーのデータは自動で全削除されます。
-
-### フロントエンド（2モード）
-
-- **Discord Bot（わいわいちゃん）**: @メンションで過去ログに基づいた回答を返します
-- **CLI（動作確認用）**: `python chat_cli.py` でターミナルから対話できます
-
-どちらも同じRAG API（FastAPI `/chat`）を呼ぶ薄いクライアントです。
+Botをサーバーから外すと、その `guild_id` のデータは削除ジョブで全削除されます。
 
 ## セットアップ
 
-### 必要なもの
+### 1. 前提
 
 - Python 3.11+
 - Docker / Docker Compose
-- Discord Bot トークン
-- OpenAI API キー（embedding / contextualizer用）
-- OpenRouter API キー（Query Rewriter / 回答LLM用）
+- Discord Bot Token
+- OpenAI API Key（embedding/contextualizer）
+- OpenRouter API Key（rewriter/answer）
 
-### インストール
+### 2. 設定ファイル作成
 
 ```bash
 git clone https://github.com/aigamoid/waiwai-oracle.git
 cd waiwai-oracle
 
-# 環境変数を設定
 cp .env.example .env
 cp config.yml.example config.yml
 cp moimoichan_Discordbot/config.yml.example moimoichan_Discordbot/config.yml
-# .env と config.yml を編集
-
-# 全サービス起動（Postgres + Qdrant + RAG API + ワーカー + Discord Bot）
-docker compose up -d postgres qdrant api worker bot
 ```
 
-あとは Discord サーバーに Bot を招待し、管理者が `/oracle allow #チャンネル` を
-実行すれば取り込みが始まります。
+編集ポイント:
+- `.env`
+  - `DISCORD_TOKEN`
+  - `OPENAI_API_KEY`
+  - `OPENROUTER_API_KEY`
+  - `ADMIN_PASSWORD`（管理ポータルログイン用）
+- `config.yml`
+  - `rag.*`（モデル・`top_k`・履歴設定・リランカー）
+  - `worker.sync_interval_hours`
+- `moimoichan_Discordbot/config.yml`
+  - `oracle.api_url`
+  - `discord.mention_only`
 
-### テスト
+### 3. 起動
 
 ```bash
-docker compose up -d postgres   # DB系テストが実Postgres（oracle_test DB）を使う
+docker compose up -d postgres qdrant api admin worker bot
+```
+
+- API: `http://localhost:8000`
+- 管理ポータル: `http://localhost:8001`
+
+### 4. 動作確認
+
+1. BotをDiscordサーバーへ招待
+2. 管理者が `/oracle allow #channel` を実行
+3. `/oracle status` で取り込み進捗を確認
+4. Botにメンションして質問
+
+## テスト
+
+```bash
+docker compose up -d postgres
 .venv/bin/python -m pytest tests/
 ```
 
+DB系テストは実Postgres（`oracle_test`）を使います。DB未起動時は該当テストが skip されます。
+
+## 運用メモ
+
+- ワーカー進捗は `ingest_jobs` に記録されます
+- 利用量/コストは `usage_log` に記録されます（記録失敗でも回答は継続）
+- 単価は `config.yml` の `pricing`（USD/100万トークン）を更新して使ってください
+
 ## 技術スタック
 
-- **言語**: Python 3.11+
-- **Discord**: discord.py（Bot + スラッシュコマンド）
-- **DB**: Postgres（メタデータ・ジョブキュー） + Qdrant（ベクトルDB）
-- **RAG**: FastAPI + 自前エンジン（クエリ書き換え→ベクトル検索→回答生成）
-- **Embedding**: OpenAI text-embedding-3-small
-- **LLM**: OpenRouter経由（Query Rewriter: Gemini 2.5 Flash / 回答: Kimi K2）
+- Python 3.11+
+- discord.py
+- FastAPI / Uvicorn / Jinja2
+- Postgres（メタデータ・ジョブキュー）
+- Qdrant（ベクトルDB）
+- OpenAI（embedding / contextualizer）
+- OpenRouter（rewriter / answer）
 
-## ドキュメント
+## 主要ドキュメント
 
-| ドキュメント | 内容 |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | アーキテクチャ・ディレクトリ構成 |
-| [docs/DIAGRAMS.md](docs/DIAGRAMS.md) | 処理フロー・設計のMermaid図解 |
-| [docs/SCHEMA.md](docs/SCHEMA.md) | Postgresスキーマ・Qdrantペイロード仕様 |
-| [docs/CONFIG.md](docs/CONFIG.md) | 設定ファイル項目説明 |
-| [docs/DEVLOG.md](docs/DEVLOG.md) | 開発ログ |
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/DIAGRAMS.md](docs/DIAGRAMS.md)
+- [docs/SCHEMA.md](docs/SCHEMA.md)
+- [docs/CONFIG.md](docs/CONFIG.md)
+- [docs/OPEN_ISSUES.md](docs/OPEN_ISSUES.md)
+- [docs/DEVLOG.md](docs/DEVLOG.md)

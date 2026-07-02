@@ -1,7 +1,8 @@
 # 処理フロー・設計図（Mermaid）
 
-現在の waiwai-oracle の全体像を4つの視点で図解する。
-（2026-06-11 時点: SaaS化ステップ2「マルチテナント自動取り込み」反映後）
+現在の remember（旧称: waiwai-oracle）の全体像を4つの視点で図解する。
+（2026-06-29 更新: マルチテナント自動取り込み＋ハイブリッド検索(#54)/recency時間減衰(#55)/
+明示メモリ(OI-24)/真似っこ(#49) 反映後。回答LLMは DeepSeek V3.2）
 
 ## ① 全体像（コンテナ構成・運用視点）
 
@@ -23,7 +24,7 @@ flowchart LR
     subgraph EXT["外部API"]
         DISCORD["Discord API"]
         OAI["OpenAI<br>embedding"]
-        ORT["OpenRouter<br>Gemini / Kimi / DeepSeek"]
+        ORT["OpenRouter<br>Gemini 2.5 Flash / DeepSeek V3.2"]
     end
 
     CLI -- "POST /chat" --> API
@@ -87,8 +88,8 @@ flowchart TB
     MSG --> CHUNK["② chunk<br>時間ギャップ60分で会話単位に分割<br>ノイズ除去・短文吸収"]
     CHUNK --> CI[("chunk_index<br>本文が変わったチャンクだけ<br>context_text=NULL / status=pending に戻る")]
     CI --> CTX["③ contextualize<br>context_text が NULL のチャンクだけ<br>LLMで1〜2文の文脈説明を付与"]
-    CTX --> EMB["④ index<br>『context + chunk』を embedding<br>（8,000トークン超は切り詰め）"]
-    EMB --> QD[("Qdrant<br>uuid5(chunk_id)で上書きupsert")]
+    CTX --> EMB["④ index<br>『context + chunk』を embedding<br>（8,000トークン超は切り詰め）<br>hybrid時はBM25 sparseも生成(#54)"]
+    EMB --> QD[("Qdrant<br>uuid5(chunk_id)で上書きupsert<br>dense + 任意でsparseベクトル")]
     QD --> DONE["ジョブ完了<br>result: crawled=N chunks=N contexts=N indexed=N"]
 ```
 
@@ -104,21 +105,22 @@ sequenceDiagram
     participant E as RagEngine
     participant G as Gemini 2.5 Flash<br>(OpenRouter)
     participant O as OpenAI embedding
-    participant Q as Qdrant
-    participant K as Kimi K2<br>(OpenRouter)
+    participant Q as Qdrant<br>(dense + BM25 sparse)
+    participant D as DeepSeek V3.2<br>(OpenRouter)
 
     U->>A: guild_id + guild_name + 質問
     A->>E: answer()
-    E->>G: ① クエリ書き換え<br>（現在日時JSTを注入、temp 0.2）
-    G-->>E: 検索用クエリ<br>（失敗時は元の質問で続行）
+    E->>G: ① クエリ書き換え<br>（現在日時JST注入・履歴で指示語解決・temp 0.2）
+    G-->>E: 検索用クエリ または [NO_SEARCH]<br>（不要なら検索ゲートで②③スキップ・OI-23）
     E->>O: ② クエリをベクトル化
     O-->>E: 1536次元ベクトル
-    E->>Q: ③ 類似検索<br>guild_idフィルタ必須・top_k=10
-    Q-->>E: チャンク10件（記憶の断片）
-    E->>K: ④ わいわいちゃんプロンプト<br>＋記憶の断片＋元の質問（temp 0.7）
-    K-->>E: 回答（<think>タグは除去）
+    E->>Q: ③ 類似検索<br>guild_idフィルタ必須・top_k=5<br>hybrid(RRF融合#54)/recency減衰(#55)/rerank(任意)
+    Q-->>E: チャンク5件（記憶の断片）
+    Note over E: 明示メモリ(memories)・真似っこ人格カードを<br>あれば回答プロンプトに注入（OI-24 / #49）
+    E->>D: ④ れみちゃんプロンプト<br>＋記憶の断片＋元の質問（temp 0.7）
+    D-->>E: 回答（<think>タグは除去）
     E-->>A: answer + rewritten_query + sources
-    A-->>U: 回答表示（25〜37秒）
+    A-->>U: 回答表示
 ```
 
 **ポイント**:
@@ -126,4 +128,5 @@ sequenceDiagram
 - ③の **guild_idフィルタが必須**なのがマルチテナントの肝。別サーバーのデータは構造的に見えない
 - guild_name は Bot がリクエストに載せるので、どのサーバーでも「そのサーバーの名前」で答える
 - ①が失敗しても止まらず元の質問で検索続行（フォールバック設計）
-- 所要時間の大半は④のKimi K2の生成。高速化するならここのモデル変更が効く
+- ③の hybrid/recency/rerank はいずれも任意（config.yml の `rag.*` で切替）。失敗時は素の dense 検索にフォールバック
+- 所要時間の大半は④の回答LLM生成。OI-16で Kimi K2 → DeepSeek V3.2 に変更しコストを約1/3に削減

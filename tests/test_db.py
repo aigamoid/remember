@@ -1,5 +1,7 @@
 """src/db.py のテスト（実Postgresを使用・tests/conftest.py の conn フィクスチャ）"""
 
+import inspect
+
 from src.db import (
     JOB_INGEST,
     JOB_PURGE_CHANNEL,
@@ -11,7 +13,21 @@ from src.db import (
     enqueue_job,
     fetch_allowed_channels,
     fetch_guilds_overview,
+    count_memories,
+    approve_memory_candidate,
+    delete_chunks_for_guild,
+    distinct_message_authors,
+    guild_ids_with_bot_messages,
+    mark_authors_as_bot,
+    reject_auto_memories_by_subject,
+    fetch_active_memories,
     fetch_last_job,
+    fetch_memories,
+    fetch_pending_memories,
+    insert_memory_candidate,
+    reject_memory_candidate,
+    soft_delete_memory,
+    fetch_mention_map,
     fetch_recent_jobs,
     fetch_usage_summary,
     finish_job,
@@ -19,7 +35,9 @@ from src.db import (
     guilds_due_for_sync,
     insert_attachment,
     insert_chunk,
+    insert_memory,
     insert_message,
+    insert_trace,
     insert_usage,
     log_run,
     mark_guild_left,
@@ -119,6 +137,28 @@ class TestInsertMessage:
         insert_message(conn, _make_message(id="m2", guild_id="g-2"))
         assert count_messages(conn) == 2
         assert count_messages(conn, guild_id="g-1") == 1
+
+
+# ── fetch_mention_map（OI-18）─────────────────────────────────
+
+class TestFetchMentionMap:
+    def test_maps_author_id_to_name(self, conn):
+        insert_message(conn, _make_message(id="m1", author_id="111", author_name="アリス"))
+        insert_message(conn, _make_message(id="m2", author_id="222", author_name="ボブ"))
+        assert fetch_mention_map(conn) == {"111": "アリス", "222": "ボブ"}
+
+    def test_uses_latest_display_name(self, conn):
+        # 同一IDで表示名が変わった場合は timestamp 最大（最新）を採用
+        insert_message(conn, _make_message(
+            id="m1", author_id="111", author_name="旧名", timestamp="2024-01-01T00:00:00+00:00"))
+        insert_message(conn, _make_message(
+            id="m2", author_id="111", author_name="新名", timestamp="2024-06-01T00:00:00+00:00"))
+        assert fetch_mention_map(conn) == {"111": "新名"}
+
+    def test_scoped_by_guild(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g-1", author_id="111", author_name="アリス"))
+        insert_message(conn, _make_message(id="m2", guild_id="g-2", author_id="222", author_name="ボブ"))
+        assert fetch_mention_map(conn, guild_id="g-1") == {"111": "アリス"}
 
 
 # ── insert_attachment ─────────────────────────────────────────
@@ -369,6 +409,52 @@ class TestPurge:
         assert count_chunks(conn, guild_id="g-2") == 1
         assert fetch_allowed_channels(conn, "g-1") == []
 
+    def _count(self, conn, table, guild_id):
+        return conn.execute(
+            f"SELECT count(*) FROM {table} WHERE guild_id = %s", (guild_id,)
+        ).fetchone()[0]
+
+    def test_purge_guild_removes_privacy_and_ops_data(self, conn):
+        """#31 (OI-44): memories/chat_trace/usage_log/guild_plans/run_log/ingest_jobs も削除する。"""
+        for gid in ("g-1", "g-2"):
+            insert_memory(conn, gid, "秘密の記憶", created_by="user-1")
+            insert_trace(conn, gid, "質問", answer="回答", user_id="user-1")
+            insert_usage(conn, gid, "answer", model="m", total_tokens=10, user_id="user-1")
+            log_run(conn, f"run-{gid}", "ingest", "ok", guild_id=gid)
+            enqueue_job(conn, gid, JOB_INGEST, requested_by="test")
+            conn.execute(
+                "INSERT INTO guild_plans (guild_id, plan_key) VALUES (%s, 'free') "
+                "ON CONFLICT (guild_id) DO NOTHING",
+                (gid,),
+            )
+        conn.commit()
+
+        stats = purge_guild_data(conn, "g-1")
+        assert stats["memories"] == 1
+        assert stats["traces"] == 1
+        assert stats["usage"] == 1
+
+        # g-1 のプライバシー・運用系は全て消える
+        for table in ("memories", "chat_trace", "usage_log", "guild_plans", "run_log", "ingest_jobs"):
+            assert self._count(conn, table, "g-1") == 0, f"{table} should be empty"
+
+        # 他guildは無傷
+        for table in ("memories", "chat_trace", "usage_log", "guild_plans", "run_log", "ingest_jobs"):
+            assert self._count(conn, table, "g-2") == 1, f"{table} g-2 should remain"
+
+    def test_purge_guild_keeps_running_purge_job(self, conn):
+        """進行中の purge ジョブ自身は finish_job が完了記録できるよう残す。"""
+        job_id = enqueue_job(conn, "g-1", JOB_INGEST, requested_by="test")
+        conn.execute(
+            "UPDATE ingest_jobs SET status = 'running' WHERE id = %s", (job_id,)
+        )
+        conn.commit()
+        purge_guild_data(conn, "g-1")
+        remaining = conn.execute(
+            "SELECT status FROM ingest_jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+        assert remaining is not None and remaining[0] == "running"
+
 
 # ── log_run ───────────────────────────────────────────────────
 
@@ -439,3 +525,441 @@ class TestUsageLog:
         assert jobs[0]["guild_name"] == "サーバー1"
         assert jobs[0]["kind"] == JOB_INGEST
         assert jobs[0]["status"] == "queued"
+
+
+# ── chat_trace（デバッグトレース・OI-21）────────────────────────
+
+class TestChatTrace:
+    def test_insert_round_trip(self, conn):
+        sources = [
+            {"channel_name": "general", "score": 0.91, "chunk_text": "本文"},
+        ]
+        insert_trace(
+            conn, "g-1", "今日の予定は？",
+            rewritten_query="予定",
+            answer="たしか飲み会だよ",
+            sources=sources,
+            answer_model="deepseek/deepseek-v3.2",
+            rerank_enabled=True,
+            prompt_tokens=1200, completion_tokens=80,
+            total_tokens=1300, cost_usd=0.0023, latency_ms=2500,
+            user_id="u1",
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT guild_id, user_id, question, rewritten_query, answer, "
+            "sources, answer_model, rerank_enabled, prompt_tokens, "
+            "completion_tokens, total_tokens, cost_usd, latency_ms "
+            "FROM chat_trace"
+        ).fetchone()
+        assert row[0] == "g-1"
+        assert row[1] == "u1"
+        assert row[2] == "今日の予定は？"
+        assert row[3] == "予定"
+        assert row[4] == "たしか飲み会だよ"
+        # JSONB は Python の list/dict として返る
+        assert row[5][0]["channel_name"] == "general"
+        assert row[5][0]["chunk_text"] == "本文"
+        assert row[6] == "deepseek/deepseek-v3.2"
+        assert row[7] is True
+        assert row[8] == 1200
+        assert row[10] == 1300
+        assert abs(float(row[11]) - 0.0023) < 1e-9
+        assert row[12] == 2500
+
+    def test_minimal_fields(self, conn):
+        # 任意フィールドは省略でき、sources は NULL でもよい
+        insert_trace(conn, "g-1", "質問だけ")
+        conn.commit()
+        row = conn.execute(
+            "SELECT question, sources, user_id, rerank_enabled FROM chat_trace"
+        ).fetchone()
+        assert row[0] == "質問だけ"
+        assert row[1] is None
+        assert row[2] is None
+        assert row[3] is False
+
+    def test_hybrid_enabled_round_trip(self, conn):
+        # #54/#58: hybrid_enabled を渡すと保存・読み戻しできる。既定は False。
+        insert_trace(conn, "g-1", "固有名詞の質問", hybrid_enabled=True)
+        insert_trace(conn, "g-2", "既定の質問")
+        conn.commit()
+        rows = dict(
+            conn.execute(
+                "SELECT guild_id, hybrid_enabled FROM chat_trace"
+            ).fetchall()
+        )
+        assert rows["g-1"] is True
+        assert rows["g-2"] is False
+
+    def test_recency_enabled_round_trip(self, conn):
+        # #55: recency_enabled を渡すと保存・読み戻しできる。既定は False。
+        insert_trace(conn, "g-1", "最近の質問", recency_enabled=True)
+        insert_trace(conn, "g-2", "既定の質問")
+        conn.commit()
+        rows = dict(
+            conn.execute(
+                "SELECT guild_id, recency_enabled FROM chat_trace"
+            ).fetchall()
+        )
+        assert rows["g-1"] is True
+        assert rows["g-2"] is False
+
+    def test_engine_trace_row_keys_accepted(self, conn):
+        """engine が出すトレース行のキーをすべて insert_trace が受け付ける（#58 回帰）。
+
+        src/trace.py は `db.insert_trace(conn, **row)` で engine の dict をそのまま
+        kwargs 展開する。engine 側にキーを足して insert_trace の対応を忘れると
+        TypeError で全件記録失敗する（#54 マージで実際に起きた semantic conflict）。
+        この経路をテストで固定し、再発を防ぐ。
+        """
+        # src/rag/engine.py の trace 行が出すキー（増減したらここも更新する契約）
+        row = {
+            "guild_id": "g-1",
+            "user_id": "u1",
+            "question": "質問",
+            "rewritten_query": "書き換え",
+            "answer": "回答",
+            "sources": [{"channel_name": "general", "score": 0.5}],
+            "answer_model": "deepseek/deepseek-v3.2",
+            "rerank_enabled": False,
+            "hybrid_enabled": True,
+            "recency_enabled": True,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost_usd": 0.001,
+            "latency_ms": 1234,
+        }
+        # 署名レベルの契約チェック（不一致キーを名指しで失敗させる）
+        accepted = set(inspect.signature(insert_trace).parameters) - {"conn"}
+        unexpected = set(row) - accepted
+        assert not unexpected, f"insert_trace が受け付けないキー: {unexpected}"
+        # 実際の **row 展開経路（trace.py と同一）も通す
+        insert_trace(conn, **row)
+        conn.commit()
+        saved = conn.execute(
+            "SELECT hybrid_enabled FROM chat_trace WHERE guild_id = 'g-1'"
+        ).fetchone()
+        assert saved[0] is True
+
+
+# ── memories（明示メモリ「覚えておいて」・OI-24）────────────────────
+
+class TestMemories:
+    def test_insert_and_fetch(self, conn):
+        mid = insert_memory(
+            conn, "g-1", "ケーキが好き",
+            subject="かにじる", created_by="u1", source_channel_id="ch1",
+        )
+        assert isinstance(mid, int)
+        rows = fetch_memories(conn, "g-1")
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["id"] == mid
+        assert r["guild_id"] == "g-1"
+        assert r["subject"] == "かにじる"
+        assert r["content"] == "ケーキが好き"
+        assert r["created_by"] == "u1"
+        assert r["source_channel_id"] == "ch1"
+        assert r["created_at"]  # ISO8601 が入っている
+
+    def test_minimal_fields(self, conn):
+        insert_memory(conn, "g-1", "3/25は誕生日")
+        r = fetch_memories(conn, "g-1")[0]
+        assert r["content"] == "3/25は誕生日"
+        assert r["subject"] is None
+        assert r["created_by"] is None
+        assert r["source_channel_id"] is None
+
+    def test_fetch_newest_first(self, conn):
+        insert_memory(conn, "g-1", "古い")
+        insert_memory(conn, "g-1", "新しい")
+        rows = fetch_memories(conn, "g-1")
+        # created_at DESC, id DESC: 後から入れた方が先頭
+        assert rows[0]["content"] == "新しい"
+        assert rows[1]["content"] == "古い"
+
+    def test_guild_isolation(self, conn):
+        insert_memory(conn, "g-1", "g1の事実")
+        insert_memory(conn, "g-2", "g2の事実")
+        assert [r["content"] for r in fetch_memories(conn, "g-1")] == ["g1の事実"]
+        assert [r["content"] for r in fetch_memories(conn, "g-2")] == ["g2の事実"]
+
+    def test_count(self, conn):
+        assert count_memories(conn, "g-1") == 0
+        insert_memory(conn, "g-1", "A")
+        insert_memory(conn, "g-1", "B")
+        insert_memory(conn, "g-2", "C")
+        assert count_memories(conn, "g-1") == 2
+        assert count_memories(conn, "g-2") == 1
+
+    # 記憶削除は #56 で soft-delete に一本化（TestAutoMemory.test_soft_delete_active で検証）。
+
+
+# ── 自動記憶 案C（#56）: 候補→承認/却下/soft-delete ───────────────
+
+
+class TestAutoMemory:
+    def test_candidate_is_pending_and_hidden(self, conn):
+        # pending 候補は fetch_memories（active限定）に出ない＝回答に使われない
+        insert_memory_candidate(conn, "g-1", "add", content="ケーキが好き", subject="かに")
+        assert fetch_memories(conn, "g-1") == []
+        assert count_memories(conn, "g-1") == 0
+        pend = fetch_pending_memories(conn, "g-1")
+        assert len(pend) == 1
+        assert pend[0]["proposed_op"] == "add"
+        assert pend[0]["content"] == "ケーキが好き"
+
+    def test_approve_add_activates(self, conn):
+        cid = insert_memory_candidate(conn, "g-1", "add", content="プリンが好き")
+        assert approve_memory_candidate(conn, cid) is True
+        rows = fetch_memories(conn, "g-1")
+        assert [r["content"] for r in rows] == ["プリンが好き"]
+        assert fetch_pending_memories(conn, "g-1") == []
+
+    def test_approve_update_archives_target(self, conn):
+        target = insert_memory(conn, "g-1", "ケーキが好き", subject="かに")
+        cid = insert_memory_candidate(
+            conn, "g-1", "update", content="プリンが好き",
+            subject="かに", target_memory_id=target,
+        )
+        assert approve_memory_candidate(conn, cid) is True
+        rows = fetch_memories(conn, "g-1")  # active のみ
+        assert [r["content"] for r in rows] == ["プリンが好き"]
+        # 旧メモリは archived（物理削除されない）
+        active = fetch_active_memories(conn, "g-1")
+        assert target not in [r["id"] for r in active]
+
+    def test_approve_delete_soft_deletes_target(self, conn):
+        target = insert_memory(conn, "g-1", "もう違う事実")
+        cid = insert_memory_candidate(
+            conn, "g-1", "delete", target_memory_id=target,
+        )
+        assert approve_memory_candidate(conn, cid) is True
+        assert fetch_memories(conn, "g-1") == []  # 回答に出ない
+        # 物理削除されず行は残っている（soft-delete）
+        row = conn.execute(
+            "SELECT status, deleted_at FROM memories WHERE id = %s", (target,)
+        ).fetchone()
+        assert row[0] == "archived"
+        assert row[1] is not None
+
+    def test_update_with_missing_target_is_rejected(self, conn):
+        # target が active に無い update は適用しない（ID幻覚ガード）
+        cid = insert_memory_candidate(
+            conn, "g-1", "update", content="x", target_memory_id=999999,
+        )
+        assert approve_memory_candidate(conn, cid) is False
+        assert fetch_memories(conn, "g-1") == []
+
+    def test_approve_guild_isolation_for_target(self, conn):
+        # 別 guild の memory を target にした update は適用しない
+        other = insert_memory(conn, "g-2", "別guildの事実")
+        cid = insert_memory_candidate(
+            conn, "g-1", "update", content="侵入", target_memory_id=other,
+        )
+        assert approve_memory_candidate(conn, cid) is False
+
+    def test_reject(self, conn):
+        cid = insert_memory_candidate(conn, "g-1", "add", content="却下される")
+        assert reject_memory_candidate(conn, cid) is True
+        assert fetch_pending_memories(conn, "g-1") == []
+        assert fetch_memories(conn, "g-1") == []
+        # 二重却下は False
+        assert reject_memory_candidate(conn, cid) is False
+
+    def test_soft_delete_active(self, conn):
+        mid = insert_memory(conn, "g-1", "無効化する")
+        assert soft_delete_memory(conn, "g-1", mid) is True
+        assert fetch_memories(conn, "g-1") == []
+        # 物理削除しない
+        row = conn.execute(
+            "SELECT status FROM memories WHERE id = %s", (mid,)
+        ).fetchone()
+        assert row[0] == "archived"
+        # 別 guild からは消せない・二重実行も False
+        assert soft_delete_memory(conn, "g-2", mid) is False
+
+    def test_explicit_memory_still_active_by_default(self, conn):
+        # 既存の明示メモリ（insert_memory）は status=active で従来どおり出る
+        insert_memory(conn, "g-1", "明示の事実")
+        assert [r["content"] for r in fetch_memories(conn, "g-1")] == ["明示の事実"]
+
+
+# ── 真似っこモード personas / mimic_state（#49）─────────────────
+
+from src import db as _db  # noqa: E402
+
+
+class TestPersonas:
+    def test_upsert_and_fetch(self, conn):
+        card = {"personality": "明るい", "speech_style": "〜っす"}
+        _db.upsert_persona_card(conn, "g1", "u1", "うさぎ", card, 42, created_by="adm")
+        got = _db.fetch_persona_card(conn, "g1", "u1")
+        assert got["display_name"] == "うさぎ"
+        assert got["card"]["personality"] == "明るい"
+        assert got["sample_count"] == 42
+        assert got["consent"] == "unknown"
+
+    def test_fetch_missing_returns_none(self, conn):
+        assert _db.fetch_persona_card(conn, "g1", "nope") is None
+
+    def test_upsert_overwrites_card_keeps_consent(self, conn):
+        _db.set_persona_consent(conn, "g1", "u1", "optout")
+        _db.upsert_persona_card(conn, "g1", "u1", "うさぎ", {"personality": "X"}, 1)
+        got = _db.fetch_persona_card(conn, "g1", "u1")
+        assert got["card"]["personality"] == "X"
+        assert got["consent"] == "optout"  # consent は upsert で壊さない
+
+    def test_consent_row_created_when_absent(self, conn):
+        # カード未生成でも opt-out できる（consent だけの行が先に作られる）
+        _db.set_persona_consent(conn, "g1", "u9", "optout")
+        assert _db.get_persona_consent(conn, "g1", "u9") == "optout"
+
+    def test_get_consent_default_unknown(self, conn):
+        assert _db.get_persona_consent(conn, "g1", "none") == "unknown"
+
+    def test_delete_persona(self, conn):
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        assert _db.delete_persona_card(conn, "g1", "u1") is True
+        assert _db.fetch_persona_card(conn, "g1", "u1") is None
+
+
+class TestFetchMemberMessages:
+    def test_filters_guild_author_and_empty(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g1", author_id="u1",
+                                           content="あ", timestamp="2024-01-01T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m2", guild_id="g1", author_id="u1",
+                                           content="", has_attachment=True,
+                                           timestamp="2024-01-02T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m3", guild_id="g1", author_id="u2",
+                                           content="別人", timestamp="2024-01-03T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m4", guild_id="g2", author_id="u1",
+                                           content="別guild", timestamp="2024-01-04T00:00:00+00:00"))
+        rows = _db.fetch_member_messages(conn, "g1", "u1")
+        contents = [r["content"] for r in rows]
+        assert contents == ["あ"]  # 空content・別author・別guildは除外
+
+    def test_limit(self, conn):
+        for i in range(5):
+            insert_message(conn, _make_message(
+                id=f"m{i}", guild_id="g1", author_id="u1", content=f"c{i}",
+                timestamp=f"2024-01-0{i+1}T00:00:00+00:00"))
+        rows = _db.fetch_member_messages(conn, "g1", "u1", limit=3)
+        assert len(rows) == 3
+
+    def test_resolve_member_name_latest(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="g1", author_id="u1",
+                                           author_name="旧名", timestamp="2024-01-01T00:00:00+00:00"))
+        insert_message(conn, _make_message(id="m2", guild_id="g1", author_id="u1",
+                                           author_name="新名", timestamp="2024-02-01T00:00:00+00:00"))
+        assert _db.resolve_member_name(conn, "g1", "u1") == "新名"
+
+
+class TestMimicState:
+    def test_set_get_clear(self, conn):
+        _db.set_mimic_state(conn, "g1", "c1", "u1", started_by="adm")
+        st = _db.get_active_mimic(conn, "g1", "c1")
+        assert st["author_id"] == "u1" and st["started_by"] == "adm"
+        assert _db.clear_mimic_state(conn, "g1", "c1") is True
+        assert _db.get_active_mimic(conn, "g1", "c1") is None
+
+    def test_no_guild_fallback(self, conn):
+        # channel 行のみ解決。別 channel には漏れない（guild fallback しない）
+        _db.set_mimic_state(conn, "g1", "c1", "u1")
+        assert _db.get_active_mimic(conn, "g1", "c2") is None
+
+    def test_one_target_per_channel(self, conn):
+        _db.set_mimic_state(conn, "g1", "c1", "u1")
+        _db.set_mimic_state(conn, "g1", "c1", "u2")  # 上書き
+        assert _db.get_active_mimic(conn, "g1", "c1")["author_id"] == "u2"
+
+
+class TestMimicPurgeIntegrity:
+    def test_purge_channel_keeps_personas_clears_state(self, conn):
+        # personas は guild 資産＝ch削除で残る。mimic_state は該当chだけ消える。
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        _db.set_mimic_state(conn, "g1", "ch-1", "u1")
+        _db.set_mimic_state(conn, "g1", "ch-2", "u1")
+        from src.db import purge_channel_data
+        purge_channel_data(conn, "g1", "ch-1")
+        assert _db.fetch_persona_card(conn, "g1", "u1") is not None   # 残る
+        assert _db.get_active_mimic(conn, "g1", "ch-1") is None       # 該当ch消える
+        assert _db.get_active_mimic(conn, "g1", "ch-2") is not None   # 他chは無傷
+
+    def test_purge_guild_clears_both(self, conn):
+        _db.upsert_persona_card(conn, "g1", "u1", "X", {"personality": "p"}, 1)
+        _db.set_mimic_state(conn, "g1", "ch-1", "u1")
+        from src.db import purge_guild_data
+        purge_guild_data(conn, "g1")
+        assert _db.fetch_persona_card(conn, "g1", "u1") is None
+
+
+# ── #68: Bot/Webhook 除外（後始末ヘルパー）──────────────────────────────────
+
+class TestBotExclusion:
+    def test_insert_message_persists_is_bot(self, conn):
+        insert_message(conn, _make_message(id="b1", author_id="bot-1", is_bot=True))
+        insert_message(conn, _make_message(id="h1", author_id="hum-1", is_bot=False))
+        conn.commit()
+        rows = dict(conn.execute(
+            "SELECT id, is_bot FROM messages WHERE id IN ('b1','h1')"
+        ).fetchall())
+        assert rows["b1"] == 1
+        assert rows["h1"] == 0
+
+    def test_distinct_message_authors(self, conn):
+        insert_message(conn, _make_message(id="m1", author_id="a1", author_name="Alice"))
+        insert_message(conn, _make_message(id="m2", author_id="a1", author_name="Alice"))
+        insert_message(conn, _make_message(id="m3", author_id="a2", author_name="Bot"))
+        conn.commit()
+        authors = set(distinct_message_authors(conn, "g-1"))
+        assert ("a1", "Alice") in authors
+        assert ("a2", "Bot") in authors
+
+    def test_mark_authors_as_bot(self, conn):
+        insert_message(conn, _make_message(id="m1", author_id="botA"))
+        insert_message(conn, _make_message(id="m2", author_id="botA"))
+        insert_message(conn, _make_message(id="m3", author_id="human"))
+        conn.commit()
+        marked = mark_authors_as_bot(conn, ["botA"])
+        assert marked == 2
+        flags = dict(conn.execute(
+            "SELECT id, is_bot FROM messages WHERE id IN ('m1','m2','m3')"
+        ).fetchall())
+        assert flags["m1"] == 1 and flags["m2"] == 1 and flags["m3"] == 0
+        # 冪等: 再実行は0件（既に is_bot=1）
+        assert mark_authors_as_bot(conn, ["botA"]) == 0
+
+    def test_mark_authors_as_bot_empty_is_noop(self, conn):
+        assert mark_authors_as_bot(conn, []) == 0
+
+    def test_guild_ids_with_bot_messages(self, conn):
+        insert_message(conn, _make_message(id="m1", guild_id="gA", author_id="b", is_bot=True))
+        insert_message(conn, _make_message(id="m2", guild_id="gB", author_id="h", is_bot=False))
+        conn.commit()
+        guilds = guild_ids_with_bot_messages(conn)
+        assert "gA" in guilds
+        assert "gB" not in guilds
+
+    def test_delete_chunks_for_guild(self, conn):
+        insert_chunk(conn, "c1", "gA", "anc1", "ch1", "本文A")
+        insert_chunk(conn, "c2", "gB", "anc2", "ch2", "本文B")
+        conn.commit()
+        removed = delete_chunks_for_guild(conn, "gA")
+        assert removed == 1
+        assert count_chunks(conn) == 1  # gB のみ残る
+
+    def test_reject_auto_memories_by_subject(self, conn):
+        # subject=moi-rag(Bot由来) と human の pending 候補を作る
+        insert_memory_candidate(conn, "g-1", "add", content="AI機能", subject="moi-rag")
+        insert_memory_candidate(conn, "g-1", "add", content="誕生日3/25", subject="かにじる")
+        conn.commit()
+        rejected = reject_auto_memories_by_subject(conn, ["moi-rag"])
+        assert rejected == 1
+        # moi-rag は pending から消え、人間subjectの候補は残る
+        pending = {m["subject"] for m in fetch_pending_memories(conn)}
+        assert "moi-rag" not in pending
+        assert "かにじる" in pending
+        assert _db.get_active_mimic(conn, "g1", "ch-1") is None

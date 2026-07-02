@@ -40,6 +40,7 @@ def main() -> None:
     api_url = (
         args.api_url or os.getenv("ORACLE_API_URL") or "http://localhost:8000"
     )
+    api_token = os.getenv("ORACLE_API_TOKEN")
     guild_id = args.guild_id or str(load_config().get("guild_id", ""))
     if not guild_id:
         print("エラー: guild_id が特定できません（--guild-id か config.yml で指定）")
@@ -51,7 +52,11 @@ def main() -> None:
         sys.exit(1)
 
     print(f"waiwai-oracle CLI（API: {api_url} / guild: {guild_id}）")
-    print("質問を入力してください（exit / quit / Ctrl-D で終了）")
+    print("質問を入力してください（exit / quit / Ctrl-D で終了, reset で会話履歴クリア）")
+
+    # 直近の会話履歴（マルチターン・OI-10）。古い順 {"role","content"} のリスト。
+    history: list[dict] = []
+    history_max_turns = 5  # 直近5ペアまで送る（engine 側でも丸められる）
 
     while True:
         try:
@@ -64,11 +69,21 @@ def main() -> None:
         if query.lower() in ("exit", "quit"):
             print("バイバイ！っ 👋")
             break
+        if query.lower() == "reset":
+            history.clear()
+            print("（会話履歴をクリアしたよ！っ）")
+            continue
 
         print("（考え中…）")
         try:
-            result = chat_once(api_url, guild_id, query)
+            result = chat_once(
+                api_url, guild_id, query, history=history, api_token=api_token
+            )
             print(format_result(result))
+            # 今回のやり取りを履歴に追加し、直近 N ペアに丸める。
+            history.append({"role": "user", "content": query})
+            history.append({"role": "assistant", "content": result.get("answer", "")})
+            del history[: -history_max_turns * 2]
         except requests.RequestException as e:
             print(f"⚠️ APIエラー: {e}")
 

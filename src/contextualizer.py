@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
-from src.db import fetch_chunks_for_context, update_chunk_context
+from src.db import fetch_chunks_for_context, fetch_mention_map, update_chunk_context
 from src.formatter import format_message_line
 
 _SYSTEM_PROMPT = """\
@@ -37,6 +37,7 @@ def _get_preceding_messages(
     channel_id: str,
     n: int = 10,
     tz_offset: int = 9,
+    mention_map: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """anchor_msg_id より前の同チャンネルメッセージ N 件をテキスト化して返す。
 
@@ -57,6 +58,7 @@ def _get_preceding_messages(
         SELECT author_name, content, timestamp, has_attachment
         FROM messages
         WHERE channel_id = %s
+          AND is_bot = 0  -- #68: Bot発言を文脈(context_text)から除外＝self-poisoning防止
           AND (timestamp < %s OR (timestamp = %s AND id < %s))
         ORDER BY timestamp DESC, id DESC
         LIMIT %s
@@ -72,7 +74,7 @@ def _get_preceding_messages(
         return ("（直前の会話なし）", anchor_timestamp_jst)
 
     lines = [
-        format_message_line(author, content, ts, bool(has_att), tz_offset)
+        format_message_line(author, content, ts, bool(has_att), tz_offset, mention_map)
         for author, content, ts, has_att in reversed(rows)
     ]
     return ("\n".join(lines), anchor_timestamp_jst)
@@ -141,6 +143,9 @@ async def _run_async(
         ).fetchall()
     }
 
+    # <@ID> → 表示名 の対応表（preceding_messages の解決用・OI-18）
+    mention_map = fetch_mention_map(conn, guild_id)
+
     semaphore = asyncio.Semaphore(concurrency)
     abort_event = asyncio.Event()
     fatal_errors: list[RuntimeError] = []
@@ -164,7 +169,7 @@ async def _run_async(
 
             channel_name = channel_names.get(channel_id, channel_id)
             preceding_text, anchor_timestamp = _get_preceding_messages(
-                conn, anchor_msg_id, channel_id, preceding_n, tz_offset
+                conn, anchor_msg_id, channel_id, preceding_n, tz_offset, mention_map
             )
 
             for attempt in range(1, max_retries + 1):

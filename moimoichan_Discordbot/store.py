@@ -15,7 +15,27 @@ from pathlib import Path
 # コンテナでは /app/src に配置されるため、この insert は無害。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import db  # noqa: E402
+from src import db, quota  # noqa: E402
+
+
+def _next_channel_plan(conn, current: dict) -> dict | None:
+    """現プランより多く（または無制限に）チャンネルを取り込める最安プラン（案内用）。"""
+    cur_limit = current["channel_limit"]
+    if cur_limit is None:
+        return None  # 既に無制限
+    for d in db.fetch_plan_defs(conn):  # sort_order 昇順＝最安側から
+        cl = d["channel_limit"]
+        if cl is None or cl > cur_limit:
+            return d
+    return None
+
+
+def _unlimited_plan(conn) -> dict | None:
+    """チャンネル数が無制限（channel_limit=None ＝ MAX）の最安プラン（allowall 案内用）。"""
+    for d in db.fetch_plan_defs(conn):  # sort_order 昇順＝最安側から
+        if d["channel_limit"] is None:
+            return d
+    return None
 
 
 class Store:
@@ -37,6 +57,10 @@ class Store:
     async def register_guild(self, guild_id: str, guild_name: str) -> None:
         await self._call(db.upsert_guild, guild_id, guild_name)
 
+    async def fetch_plans(self) -> list[dict]:
+        """全プラン定義を sort_order 順で返す（/oracle upgrade の一覧表示・OI-14 D）。"""
+        return await self._call(db.fetch_plan_defs)
+
     async def guild_left(self, guild_id: str) -> None:
         """退出時: left_at を記録し、データ削除ジョブを投入する。"""
         def run(conn):
@@ -49,15 +73,90 @@ class Store:
 
     async def allow_channel(
         self, guild_id: str, channel_id: str, channel_name: str, allowed_by: str
-    ) -> int | None:
-        """チャンネルを許可し、取り込みジョブを投入する。戻り値はジョブID（重複時 None）。"""
+    ) -> dict:
+        """チャンネルを許可し取り込みジョブを投入する。
+
+        プランのチャンネル数上限を超える新規許可は拒否する（OI-14 C-2）。
+        戻り値:
+          {"ok": True, "job_id": int|None}       … 許可OK（job_id None=取り込み重複）
+          {"ok": False, "message": str}          … 上限超過で拒否（案内文つき）
+        """
         def run(conn):
+            existing = dict(db.fetch_allowed_channels(conn, guild_id))
+            if channel_id not in existing:  # 新規許可のみ上限を見る（再許可は更新）
+                plan = db.get_guild_plan(conn, guild_id)
+                count = db.count_allowed_channels(conn, guild_id)
+                if quota.channel_limit_exceeded(count, plan["channel_limit"]):
+                    return {
+                        "ok": False,
+                        "message": quota.channel_limit_message(
+                            plan["channel_limit"], _next_channel_plan(conn, plan)
+                        ),
+                    }
             db.allow_channel(conn, guild_id, channel_id, channel_name, allowed_by)
-            return db.enqueue_job(
+            job_id = db.enqueue_job(
                 conn, guild_id, db.JOB_INGEST, requested_by=allowed_by
             )
+            return {"ok": True, "job_id": job_id}
 
         return await self._call(run)
+
+    async def allow_all_channels(
+        self, guild_id: str, channels: list[tuple[str, str]], allowed_by: str
+    ) -> dict:
+        """全チャンネルを一括許可する（MAX＝チャンネル数無制限プラン限定）。
+
+        channels: Botが読める全テキストチャンネルの [(channel_id, channel_name), ...]。
+        MAX以外のプランは拒否する（有限上限と矛盾するため・OI-14 C-2 / OI-25）。
+        既に許可済みのチャンネルはスキップし、新規許可があれば取り込みジョブを1件投入する。
+        戻り値:
+          {"ok": True, "added": int, "total": int, "job_id": int|None}
+                                                  … job_id None=新規許可なし or 取り込み重複
+          {"ok": False, "message": str}          … 非対応プランで拒否（案内文つき）
+        """
+        def run(conn):
+            plan = db.get_guild_plan(conn, guild_id)
+            if not quota.allow_all_allowed(plan["channel_limit"]):
+                return {
+                    "ok": False,
+                    "message": quota.allow_all_denied_message(_unlimited_plan(conn)),
+                }
+            existing = dict(db.fetch_allowed_channels(conn, guild_id))
+            added = 0
+            for channel_id, channel_name in channels:
+                if channel_id in existing:
+                    continue  # 既に許可済みは更新不要
+                db.allow_channel(conn, guild_id, channel_id, channel_name, allowed_by)
+                added += 1
+            job_id = None
+            if added:  # 新規許可があるときだけ取り込みジョブを投入する
+                job_id = db.enqueue_job(
+                    conn, guild_id, db.JOB_INGEST, requested_by=allowed_by
+                )
+            return {
+                "ok": True, "added": added, "total": len(channels), "job_id": job_id,
+            }
+
+        return await self._call(run)
+
+    # ---- 同意ログ（公開/課金前の法務要件・#41 / OI-48）----
+
+    async def has_consented(self, guild_id: str, terms_version: str) -> bool:
+        """そのサーバーが現行の規約バージョンに同意済みかを返す。"""
+        return await self._call(db.has_consented, guild_id, terms_version)
+
+    async def record_consent(
+        self,
+        guild_id: str,
+        admin_id: str,
+        terms_version: str,
+        scope: str,
+        channels: list[dict] | None = None,
+    ) -> None:
+        """同意1件を記録する（scope='allow'|'allowall'）。"""
+        await self._call(
+            db.record_consent, guild_id, admin_id, terms_version, scope, channels
+        )
 
     async def deny_channel(
         self, guild_id: str, channel_id: str, requested_by: str

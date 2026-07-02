@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 import uuid
+from typing import TYPE_CHECKING
 
 import discord
 import psycopg
@@ -28,15 +29,22 @@ from src.db import (
     claim_next_job,
     enqueue_job,
     fetch_allowed_channels,
+    fetch_memories,
+    fetch_recent_chunk_texts,
     finish_job,
     guilds_due_for_sync,
+    insert_memory_candidate,
     purge_channel_data,
     purge_guild_data,
     upsert_guild,
 )
 from src.embedder import Embedder
 from src.indexer import run_indexer
+from src.sparse import SparseEncoder
 from src.vectorstore import VectorStore
+
+if TYPE_CHECKING:
+    from src.rag.engine import RagEngine
 
 
 class IngestWorker:
@@ -49,6 +57,8 @@ class IngestWorker:
         token: str,
         poll_interval: float = 10.0,
         sync_interval_hours: float = 24.0,
+        sparse_encoder: SparseEncoder | None = None,
+        engine: "RagEngine | None" = None,
     ) -> None:
         self._conn = conn
         self._cfg = cfg
@@ -57,6 +67,11 @@ class IngestWorker:
         self._token = token
         self._poll_interval = poll_interval
         self._sync_interval_hours = sync_interval_hours
+        # ハイブリッド検索（#54）。あれば取り込み時に BM25 sparse も生成・格納する。
+        self._sparse_encoder = sparse_encoder
+        # 自動記憶（#56 案C）。engine があり auto_memory_enabled の時だけ、取り込み後に
+        # 会話から記憶候補を抽出して pending 投入する（既定OFF・全件 admin 承認待ち）。
+        self._engine = engine
 
     async def run_forever(self) -> None:
         print(
@@ -128,14 +143,61 @@ class IngestWorker:
         )
         self._conn.commit()
         indexed = await asyncio.to_thread(
-            run_indexer, self._conn, self._cfg, self._store, self._embedder, guild_id
+            run_indexer,
+            self._conn,
+            self._cfg,
+            self._store,
+            self._embedder,
+            guild_id,
+            False,
+            self._sparse_encoder,
         )
         self._conn.commit()
 
+        auto_mem = await self._extract_auto_memories(guild_id)
+
         return (
             f"crawled={crawled} chunks={chunks} "
-            f"contexts={contexts} indexed={indexed}"
+            f"contexts={contexts} indexed={indexed} auto_mem={auto_mem}"
         )
+
+    async def _extract_auto_memories(self, guild_id: str) -> int:
+        """取り込み後、許可chの最近チャンクから記憶候補を抽出し pending 投入する（#56 案C）。
+
+        engine が無い／auto_memory_enabled が False のときは何もしない（既定OFF）。
+        抽出は全件 pending（origin='auto'）として着地し、admin で承認するまで回答に出ない。
+        失敗しても ingest 本体は止めない（機能失敗で例外を投げない流儀）。戻り値: 投入した候補数。
+        """
+        engine = self._engine
+        if engine is None or not getattr(engine, "auto_memory_enabled", False):
+            return 0
+        try:
+            chunks = await asyncio.to_thread(
+                fetch_recent_chunk_texts, self._conn, guild_id,
+                engine.auto_memory_max_chunks,
+            )
+            if not chunks:
+                return 0
+            # 古い→新しいの順に戻して会話の流れを保つ（fetch は新しい順）。
+            conversation = "\n".join(
+                ((c["context_text"] + "\n") if c.get("context_text") else "")
+                + (c.get("chunk_text") or "")
+                for c in reversed(chunks)
+            )
+            existing = await asyncio.to_thread(fetch_memories, self._conn, guild_id)
+            ops = await engine.reconcile_memories(guild_id, conversation, existing)
+            for op in ops:
+                await asyncio.to_thread(
+                    insert_memory_candidate, self._conn, guild_id, op["op"],
+                    op.get("content"), op.get("subject"),
+                    op.get("target_id"), op.get("reason"), "auto",
+                )
+            if ops:
+                print(f"[auto-memory] guild={guild_id}: 記憶候補 {len(ops)} 件を pending 投入")
+            return len(ops)
+        except Exception as e:
+            print(f"[WARN] auto-memory 抽出スキップ guild={guild_id}: {type(e).__name__}: {e}")
+            return 0
 
     async def _crawl(self, guild_id: str, run_id: str) -> int:
         """許可チャンネルだけを REST API で差分クロールする（gateway接続なし）。"""
@@ -170,4 +232,8 @@ class IngestWorker:
     def _purge_guild(self, guild_id: str) -> str:
         self._store.delete_by_guild(guild_id)
         stats = purge_guild_data(self._conn, guild_id)
-        return f"messages={stats['messages']} chunks={stats['chunks']} 削除"
+        return (
+            f"messages={stats['messages']} chunks={stats['chunks']} "
+            f"memories={stats['memories']} traces={stats['traces']} "
+            f"usage={stats['usage']} 削除"
+        )

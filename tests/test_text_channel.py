@@ -19,6 +19,7 @@ def _make_discord_message(
     pinned: bool = False,
     attachments: list | None = None,
     reactions: list | None = None,
+    is_bot: bool = False,
 ) -> MagicMock:
     """discord.Message のモックを作る"""
     msg = MagicMock()
@@ -28,6 +29,7 @@ def _make_discord_message(
     msg.channel.name = channel_name
     msg.author.id = author_id
     msg.author.display_name = author_name
+    msg.author.bot = is_bot  # #68: 既定 False（MagicMock のままだと truthy になり is_bot 誤検出）
     msg.pinned = pinned
     msg.attachments = attachments or []
     msg.reactions = reactions or []
@@ -83,6 +85,16 @@ class TestToRawMessage:
         raw = _to_raw_message(msg, "9999")
         assert "2024-01-15" in raw.timestamp
         assert "12:00:00" in raw.timestamp
+
+    def test_is_bot_false_for_human(self):  # #68
+        msg = _make_discord_message(is_bot=False)
+        raw = _to_raw_message(msg, "9999")
+        assert raw.is_bot is False
+
+    def test_is_bot_true_for_bot(self):  # #68: Bot/Webhook は author.bot=True
+        msg = _make_discord_message(is_bot=True)
+        raw = _to_raw_message(msg, "9999")
+        assert raw.is_bot is True
 
     def test_no_attachment(self):
         msg = _make_discord_message(attachments=[])

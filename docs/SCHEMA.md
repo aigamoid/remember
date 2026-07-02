@@ -71,7 +71,8 @@ CREATE TABLE messages (
     is_pinned      INTEGER DEFAULT 0,
     reaction_count INTEGER DEFAULT 0,
     thread_id     TEXT,                     -- スレッド起点でなければNULL
-    thread_name   TEXT
+    thread_name   TEXT,
+    is_bot        INTEGER NOT NULL DEFAULT 0 -- #68: Bot/Webhook発言。chunker/contextualizer が除外（self-poisoning防止）
 );
 
 -- chunkerが頻繁に発行するクエリ用インデックス
@@ -172,6 +173,199 @@ CREATE INDEX idx_usage_created       ON usage_log (created_at);
 > コストは `config.yml` の `pricing`（USD/100万トークン）から算出。
 > 記録失敗は回答処理を止めない（DB障害時でも `/chat` は動く設計）。
 > 管理ポータル（`src/admin/`）が `fetch_usage_summary` / `fetch_guilds_overview` で集計表示する。
+
+### plan_defs（プラン定義マスタ・OI-14 C-2）
+
+```sql
+CREATE TABLE plan_defs (
+    plan_key             TEXT PRIMARY KEY,        -- 'free'|'pro'|'max'（追加可）
+    display_name         TEXT NOT NULL,
+    channel_limit        INTEGER,                 -- NULL = 無制限
+    daily_question_limit INTEGER NOT NULL,        -- 1日あたりの質問上限
+    price_jpy            INTEGER NOT NULL DEFAULT 0,
+    sort_order           INTEGER NOT NULL DEFAULT 0,
+    updated_at           TEXT,
+    stripe_price_id      TEXT                     -- OI-14 D: Stripe Price ID（NULL=課金対象外）
+);
+-- price_id は plan を一意に決められないと誤プラン反映になるため、非NULL値の重複をDBで禁止。
+CREATE UNIQUE INDEX uq_plan_defs_stripe_price
+    ON plan_defs (stripe_price_id) WHERE stripe_price_id IS NOT NULL;
+```
+
+> 上限・価格の**マスタ**。`init_schema` が初期3プラン（free:1ch/20問, pro:10ch/80問/¥700,
+> max:無制限/200問/¥1500）を seed する（`seed_plans`・`ON CONFLICT DO NOTHING` ＝既存値は壊さない）。
+> 値は**管理ポータル `/billing` から編集可能**（コード/再デプロイ不要）。`src/db.py` の
+> `fetch_plan_defs` / `get_plan_def` / `update_plan_def` が読み書きする。
+> `stripe_price_id`（OI-14 D）は Checkout に渡す Price ID 兼、Webhook の **price→plan 逆引き**
+> （`get_plan_by_price_id`）に使う。`update_plan_def` は他プランとの重複を `DuplicatePriceIdError`
+> で拒否（DB一意制約と二重防御）。
+
+### guild_plans（サーバーごとのプラン割当・OI-14 C-2）
+
+```sql
+CREATE TABLE guild_plans (
+    guild_id               TEXT PRIMARY KEY,
+    plan_key               TEXT NOT NULL DEFAULT 'free',
+    status                 TEXT NOT NULL DEFAULT 'active',  -- active|past_due|canceled
+    note                   TEXT,                            -- 手動変更メモ
+    updated_at             TEXT,
+    stripe_customer_id     TEXT,   -- 以下 OI-14 D(Stripe)用に予約・現状NULL
+    stripe_subscription_id TEXT,
+    current_period_end     TEXT
+);
+```
+
+> 行が無いサーバーは **free 扱い**（`get_guild_plan` が plan_defs と結合して実効上限を返す）。
+> プランは**手動切替**（ポータル `/billing` の `set_guild_plan`）に加え、**OI-14 D で Stripe Webhook が
+> 自動更新**する（`src/billing.py handle_event` → `update_guild_subscription`）。`stripe_subscription_id`
+> から guild を逆引きするため部分INDEX `idx_guild_plans_subscription` を張る。webhook 更新は
+> 再送・順不同に耐えるガード（period_end 新旧判定／canceled 後の復活防止）を持つ。手動の
+> `set_guild_plan` と自動の `update_guild_subscription` は別関数（用途を分離）。
+> **上限の強制**: 質問の日次上限は `src/api.py` の `/chat` 入口で（`src/quota.py` 判定・超過時は
+> 回答せず案内＝コスト0）、チャンネル数上限は Bot の `/oracle allow` で（`store.py`）。
+> 日次集計は `count_questions_since`（JST 0時境界は `quota.jst_day_start_utc_iso`）。
+
+### chat_trace（回答デバッグトレース・OI-21）
+
+```sql
+CREATE TABLE chat_trace (
+    id                BIGSERIAL PRIMARY KEY,
+    guild_id          TEXT NOT NULL,
+    user_id           TEXT,                  -- 質問したユーザーID（任意）
+    created_at        TEXT NOT NULL,         -- ISO8601 (UTC)
+    question          TEXT NOT NULL,         -- ユーザーの元の質問
+    rewritten_query   TEXT,                  -- Query Rewriter の出力（検索に使った文）
+    answer            TEXT,                  -- 最終回答
+    sources           JSONB,                 -- ヒットしたチャンク（channel/anchor/score/chunk_text 等）
+    answer_model      TEXT,
+    rerank_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでリランクが効いたか
+    hybrid_enabled    BOOLEAN DEFAULT FALSE, -- このリクエストでハイブリッド検索が効いたか（#54/#58）
+    recency_enabled   BOOLEAN DEFAULT FALSE, -- このリクエストで recency 時間減衰が効いたか（#55）
+    prompt_tokens     INTEGER DEFAULT 0,     -- 回答LLMの入力トークン
+    completion_tokens INTEGER DEFAULT 0,     -- 回答LLMの出力トークン
+    total_tokens      INTEGER DEFAULT 0,     -- 全LLM/embeddingの合計トークン
+    cost_usd          NUMERIC DEFAULT 0,     -- 1リクエストの推定総コスト（全段の合計）
+    latency_ms        INTEGER                -- answer() 全体の所要時間（ミリ秒）
+);
+
+CREATE INDEX idx_trace_guild_created ON chat_trace (guild_id, created_at);
+CREATE INDEX idx_trace_created       ON chat_trace (created_at);
+```
+
+> **デバッグ/開発用**。1回の `/chat` の中身（質問・書き換え後クエリ・ヒットチャンク本文・回答・
+> トークン/コスト/レイテンシ）を1行で残す。検索品質やプロンプトの A/B、回答が外した原因の追跡に使う。
+> `src/rag/engine.py` の `answer()` が `src/trace.py` の `TraceRecorder` 経由で記録する
+> （`src/db.py` の `insert_trace`）。usage_log 同様、記録失敗は回答を止めない。
+> **既定オフ**。`config.yml` の `rag.debug_trace: true` のときだけ記録する（質問・回答本文を
+> 保存するため、本番ではプライバシー上 false 運用が前提）。
+
+### memories（明示メモリ「覚えておいて」・OI-24 ＋ 自動記憶 案C・#56）
+
+```sql
+CREATE TABLE memories (
+    id                BIGSERIAL PRIMARY KEY,
+    guild_id          TEXT NOT NULL,
+    subject           TEXT,              -- 誰/何についての事実か（例: かにじる／本人。任意）
+    content           TEXT,              -- 覚えておく事実本文（例: ケーキが好き。delete候補はNULL・#56でNOT NULL解除）
+    created_by        TEXT,              -- 教えたユーザーID（自動抽出は 'auto'。任意）
+    source_channel_id TEXT,              -- 教わったチャンネルID（任意）
+    created_at        TEXT NOT NULL,     -- ISO8601 (UTC)
+    -- 以下 #56 案C（自動記憶）で追加。ALTER ... ADD COLUMN IF NOT EXISTS で後付け migration。
+    status            TEXT NOT NULL DEFAULT 'active',   -- active|pending|archived|rejected
+    origin            TEXT NOT NULL DEFAULT 'explicit', -- explicit（明示）|auto（自動抽出）
+    proposed_op       TEXT,              -- pending時の提案操作 add|update|delete
+    target_memory_id  BIGINT,            -- update/delete の対象既存memory id
+    superseded_by     BIGINT,            -- update適用時、旧→新リンク
+    deleted_at        TEXT,              -- soft-delete時刻（archived化したISO8601）
+    evidence          TEXT               -- 自動抽出の根拠（理由）
+);
+
+CREATE INDEX idx_memories_guild ON memories (guild_id);
+CREATE INDEX idx_memories_guild_status ON memories (guild_id, status);
+```
+
+> ユーザーが「覚えておいて」と**明示的に教えた事実**（OI-24）に加え、**会話から自動抽出した事実**
+> （#56 案C・mem0方式）を保持する記憶領域。Discord過去ログ（`chunk_index`/Qdrant）とは別。
+> 回答時に guild 単位で **`status='active'` の全件**をプロンプトへ注入する（少数前提＝ベクトル検索なし）。
+>
+> **自動記憶のライフサイクル（#56・安全優先）**: worker が取り込み後に許可chの最近チャンクから
+> `src/rag/engine.py` の `reconcile_memories()` で ADD/UPDATE/DELETE 候補を抽出し、全件
+> `status='pending'`（`origin='auto'`）で着地させる。**承認するまで `active` にならず回答に出ない**。
+> 管理ポータル `/memories` で人が承認すると、add→`active`化 / update→旧を`archived`+`superseded_by`し
+> 新を`active`化 / delete→対象を`archived`+`deleted_at`（**物理削除しない soft-delete**）。
+> `src/db.py` の `insert_memory`(明示) / `insert_memory_candidate`(自動) / `approve_memory_candidate` /
+> `reject_memory_candidate` / `soft_delete_memory` / `fetch_memories`(active限定) / `fetch_pending_memories` /
+> `fetch_active_memories` が読み書きする。**既定オフ**（注入は `rag.memory_enabled`、自動抽出は
+> `rag.auto_memory.enabled` のときだけ。どちらも二重ガード）。
+
+### personas（真似っこモードの人格カード・#49）
+
+```sql
+CREATE TABLE personas (
+    guild_id     TEXT NOT NULL,
+    author_id    TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    card         JSONB NOT NULL DEFAULT '{}'::jsonb,  -- {nicknames,personality,likes,speech_style,catchphrases,confidence}
+    sample_count INTEGER NOT NULL DEFAULT 0,           -- カード生成に使った発言数
+    consent      TEXT NOT NULL DEFAULT 'unknown',      -- 'unknown'|'optin'|'optout'（本人 opt-out で除外）
+    created_by   TEXT,                                 -- 真似を開始した実行者
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT,
+    PRIMARY KEY (guild_id, author_id)
+);
+CREATE INDEX idx_personas_guild ON personas (guild_id);
+```
+
+> 対象メンバーの過去発言（`messages`）から生成した「口調・性格カード」を保持する（#49）。
+> **guild+author 単位＝サーバー全体でのその人の傾向**で、guild 資産として保持する。
+> `purge_channel`（`/oracle deny`）では**消さない**。`purge_guild`・Bot退出でのみ削除する。
+> `src/db.py` の `upsert_persona_card`/`fetch_persona_card`/`set_persona_consent`/
+> `get_persona_consent`/`delete_persona_card` が読み書きし、生成は `src/rag/engine.py` の
+> `build_persona_card()`（センシティブ属性は `prompts.sanitize_persona_card` で保存前に除去）。
+> `consent='optout'` の人は `/mimic/start` で開始を拒否する（本人保護）。
+
+### mimic_state（真似っこモードの現在状態・#49）
+
+```sql
+CREATE TABLE mimic_state (
+    guild_id   TEXT NOT NULL,
+    channel_id TEXT NOT NULL,    -- scope=channel 固定（宣言した ch だけ真似が効く）
+    author_id  TEXT NOT NULL,    -- いま真似中の対象
+    started_by TEXT,
+    started_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, channel_id)
+);
+CREATE INDEX idx_mimic_state_guild ON mimic_state (guild_id);
+```
+
+> 「いまどの channel で誰を真似中か」を保持する（#49）。**1 channel = 1 対象**（upsert で上書き）。
+> 回答時に `src/mimic.py` の `MimicProvider`（`get_active_mimic`→`fetch_persona_card`）が解決し、
+> `engine.answer()` が人格カードを `{mimic_section}` に注入する。**guild への fallback はしない**
+> （意図せぬサーバー全体適用を防ぐ）。`/oracle mimic_off` で解除（`clear_mimic_state`）。
+> `purge_channel` はその channel の行だけ削除、`purge_guild`・退出は guild 単位で全削除。
+> **既定オフ**（`config.yml` の `rag.mimic_enabled: true` のときだけ機能する）。
+> あわせて `messages (guild_id, author_id, timestamp DESC)` のインデックスを追加（カード生成の高速化）。
+
+### consent_log（公開/課金前の明示同意ログ・#41 / OI-48）
+
+```sql
+CREATE TABLE consent_log (
+    id            BIGSERIAL PRIMARY KEY,
+    guild_id      TEXT NOT NULL,
+    admin_id      TEXT NOT NULL,    -- 同意した管理者のDiscord ID
+    terms_version TEXT NOT NULL,    -- 同意した規約バージョン（bot.py の CONSENT_TERMS_VERSION）
+    scope         TEXT NOT NULL,    -- 'allow' | 'allowall'
+    channels      JSONB,            -- 対象ch [{"id","name"}, ...]（監査用の控え）
+    consented_at  TEXT NOT NULL     -- ISO8601 (UTC)
+);
+CREATE INDEX idx_consent_guild ON consent_log (guild_id, terms_version);
+```
+
+> 初回の許可操作（`/oracle allow`・`allowall`）時に「過去ログ本文の保存」「外部LLM APIへの送信」
+> 「料金・quota・削除ポリシー」への同意をボタンUI（`bot.py` の `ConsentView`）で取り、ここへ記録する。
+> 判定は **サーバー × 規約版**（`db.has_consented`）。一度同意すれば以降は同意文を出さず即実行し、
+> `CONSENT_TERMS_VERSION` を上げたときだけ次回の許可操作で再同意を求める。**全件を監査証跡として保持**
+> （purge では消さない）。`allowall` は全ch対象のため、より強い確認文面（`_CONSENT_TEXT_ALL`）を出す。
 
 ## Qdrant ペイロード仕様
 
