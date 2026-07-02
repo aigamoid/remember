@@ -29,7 +29,7 @@ embedding:
 
 rag:
   rewriter_model: "google/gemini-2.5-flash"   # Query Rewriter（OpenRouter経由）
-  answer_model: "moonshotai/kimi-k2-0905"     # 回答生成LLM（OpenRouter経由）
+  answer_model: "deepseek/deepseek-v3.2"      # 回答生成LLM（OpenRouter経由・OI-16: Kimi K2から変更）
   top_k: 10                                   # 回答に渡すチャンク数（リランク有効時はリランク後の件数）
   rewriter_max_tokens: 256                    # 書き換え出力の上限（過大なtoken要求で残高不足になるのを防ぐ）
   rewriter_max_query_chars: 60                # #64: 書き換え結果がこの字数を超え [NO_SEARCH] でなければ
@@ -79,6 +79,7 @@ contextualizer:
 pricing:
   "google/gemini-2.5-flash": {input: 0.30, output: 2.50}
   "moonshotai/kimi-k2-0905": {input: 0.60, output: 2.50}
+  "deepseek/deepseek-v3.2":  {input: 0.23, output: 0.34}   # 回答生成LLM（OI-16）
   "gpt-4.1-nano":            {input: 0.10, output: 0.40}
   "text-embedding-3-small":  {input: 0.02, output: 0.0}
   "jina-reranker-v2-base-multilingual": {input: 0.02, output: 0.0}  # ※概算・要更新
