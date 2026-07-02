@@ -4,6 +4,32 @@ Phase ごとの作業記録・設計判断ログ。
 
 ---
 
+## 2026-06-30 — 公開/課金前の明示同意ログ実装（#41 / OI-48・法務）
+
+`/oracle allow`・`allowall` は opt-in だが、「過去ログ本文の保存」「外部LLM APIへの送信」
+「料金・quota・削除ポリシー」への**明示同意ログ**を取っていなかった（公開・有料化に事実上必須・P1）。
+初回の許可操作時に同意文をボタンUIで提示し、同意した管理者ID・日時・対象ch・規約版を新テーブル
+`consent_log` に記録するようにした。
+
+### 変更
+| # | ファイル | 内容 |
+|---|---|---|
+| 1 | `src/db.py` | `consent_log` テーブル追加（後付けマイグレーション節）。`record_consent()` / `has_consented()`（サーバー×規約版でEXISTS判定） |
+| 2 | `moimoichan_Discordbot/store.py` | `Store.has_consented` / `Store.record_consent`（既存 `_call` ラッパー） |
+| 3 | `moimoichan_Discordbot/bot.py` | `CONSENT_TERMS_VERSION` 定数・`_CONSENT_TEXT`（allow）・`_CONSENT_TEXT_ALL`（allowall強調）・`ConsentView`（同意/やめるの2ボタン）。`allow`/`allowall` を本処理 `_do_allow`/`_do_allowall` に分離し、未同意時のみ同意UIを挟む |
+| 4 | `tests/conftest.py` | `_TRUNCATE` に `consent_log` を追加 |
+| 5 | `tests/test_consent.py`（新規） | record→has_consented／規約版違い→再同意／channels JSONB往復／Store経路 |
+| 6 | `tests/test_bot_help.py` | 定数存在・同意文の必須3項目・`ConsentView` 生成の軽い検証 |
+| 7 | `docs/SCHEMA.md` | `consent_log` を追記 |
+
+### 決定事項（ユーザー確認済み）
+- **同意UIはボタン式**（`discord.ui.View`・本リポジトリ初のView導入）。`interaction_check` で
+  操作を始めた管理者本人だけが押せる。同意ボタンで `record_consent`→本処理 `on_agree` を実行。
+- **記録単位はサーバー×規約版**。現行版に一度同意すれば以降は同意文を出さず即実行し、
+  `CONSENT_TERMS_VERSION` を上げたときだけ再同意を求める。consent_log は監査証跡として全件保持。
+- `allowall` は全ch対象のため**より強い確認文面**（全チャンネルが対象になることを明示）。
+- 規約版はコード定数で管理（`bot.py`）。文面・対象を変えたら版を上げる運用。
+
 ## 2026-06-30 — 会話履歴の話者取り違え修正(#63)：発話者ラベル＋SPEAKER_SECTION強化
 
 同一チャンネルで **ユーザーA→B** と続けて話すと、B への会話履歴に A との会話が残り、**B を A と取り違えて誤答**する事象（実例: aigamoid と6ターン会話後に さみさみ の「さみって誰」へ「さみさみって…aigamoidのことだよ」と誤答）。MAGI **4者レビュー**（Codex/Aider/**codex-fugu**）で PASS → PR #76。

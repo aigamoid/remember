@@ -54,3 +54,30 @@ def test_help_mentions_mimic():
     text = bot._HELP
     assert "/oracle mimic" in text
     assert "mimic_optout" in text
+
+
+def test_consent_terms_version_defined():
+    """#41 / OI-48: 規約バージョン定数が定義されていること。"""
+    assert isinstance(bot.CONSENT_TERMS_VERSION, str)
+    assert bot.CONSENT_TERMS_VERSION
+
+
+def test_consent_texts_cover_required_items():
+    """#41 / OI-48: 同意文に必須3項目（本文保存・外部LLM送信・削除/料金）が含まれること。"""
+    for text in (bot._CONSENT_TEXT, bot._CONSENT_TEXT_ALL):
+        assert "保存" in text           # ①過去ログ本文の保存
+        assert "外部" in text and "LLM" in text  # ②外部LLM APIへの送信
+        assert "削除" in text           # ③削除ポリシー
+    # allowall は全ch対象であることを強調する。
+    assert "全" in bot._CONSENT_TEXT_ALL
+
+
+def test_consent_view_instantiable():
+    """#41 / OI-48: ConsentView が生成でき、同意/やめるの2ボタンを持つこと。"""
+    view = bot.ConsentView(
+        store=None, guild_id="g1", admin_id="a1", scope="allow",
+        channels=[{"id": "c1", "name": "general"}], on_agree=lambda i: None,
+    )
+    labels = [getattr(c, "label", None) for c in view.children]
+    assert any("同意" in (lbl or "") for lbl in labels)
+    assert any("やめる" in (lbl or "") for lbl in labels)
