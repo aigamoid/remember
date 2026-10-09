@@ -610,7 +610,7 @@ RAGエンドツーエンド動作**を実機確認。このVMは現状ステー�
 
 | Phase | 内容 |
 |---|---|
-| 0 | gcloud CLI導入・認証 / プロジェクト `remember-beta-2606812` 作成・請求紐付け / **予算アラート¥3,000(≈$20)** |
+| 0 | gcloud CLI導入・認証 / プロジェクト作成・請求紐付け / **予算アラート¥3,000(≈$20)** |
 | 1 | VM `remember-vm`（e2-small/asia-northeast1-a/Debian12/30GB）作成 / 自動停止スケジュール JST 2,9,17時 |
 | 2 | Tailscale参加（VM=100.98.83.15）/ 公開SSH(22)を**IAP範囲限定**・RDP削除＝**公開インバウンド0** |
 | 3 | Docker+compose+swap2G（`scripts/vm_setup.sh`）/ コードをtarball転送(Private repoのため) / 設定3ファイル転送(.env 600) / **6サービス起動** |

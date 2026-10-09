@@ -33,7 +33,7 @@ from src.rag.engine import RagEngine
 from src.rag.llm import ChatLLM
 from src.vectorstore import VectorStore
 
-GUILD_ID = os.environ.get("AB_GUILD_ID", "1464840187061338317")  # 実データのある guild
+GUILD_ID = os.environ.get("AB_GUILD_ID", "")  # 実データのある guild（環境変数で指定）
 GUILD_NAME = os.environ.get("AB_GUILD_NAME", "わいわい")
 
 # れみに「覚えておいて」と教えた体の事実（本番では memories テーブルに入るデータ）。

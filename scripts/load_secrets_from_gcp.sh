@@ -7,7 +7,7 @@
 # 使い方: bash scripts/load_secrets_from_gcp.sh   （省略時 ~/remember/.env を生成）
 set -euo pipefail
 
-PROJECT="remember-beta-2606812"
+PROJECT="${GCP_PROJECT:?GCP_PROJECT を設定してください（例: export GCP_PROJECT=your-project-id）}"
 ENV_FILE="${1:-$HOME/remember/.env}"
 META="http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
 

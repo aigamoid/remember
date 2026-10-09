@@ -51,7 +51,7 @@ def main() -> None:
         print("docker compose up -d qdrant api で起動してください")
         sys.exit(1)
 
-    print(f"waiwai-oracle CLI（API: {api_url} / guild: {guild_id}）")
+    print(f"remember CLI（API: {api_url} / guild: {guild_id}）")
     print("質問を入力してください（exit / quit / Ctrl-D で終了, reset で会話履歴クリア）")
 
     # 直近の会話履歴（マルチターン・OI-10）。古い順 {"role","content"} のリスト。

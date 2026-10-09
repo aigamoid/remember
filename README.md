@@ -1,12 +1,10 @@
-# remember（旧称: waiwai-oracle）
+# remember
 
 Discordサーバーの過去ログをRAG化し、Botが質問に回答するマルチテナント対応プロジェクトです。
 管理者が許可したチャンネルだけを取り込み、`guild_id` でデータを分離します。
 
-> リブランド方針: プロダクト呼称は段階的に `remember` へ移行中です。  
-> 2026-06 時点では管理ポータル（`src/admin`）の表示名を `remember` に統一済みです。  
-> ※リポジトリ名・compose・Qdrantコレクション名（`waiwai_chunks`）など**実体名はまだ `waiwai-oracle` のまま**です
-> （データ移行が絡むため別途対応）。以下の `git clone` / `cd` のパスも旧名のままです。
+> 旧称は `waiwai-oracle`。リポジトリ名と管理ポータル（`src/admin`）の表示名は `remember` へ移行済みです。  
+> ※ compose や Qdrant コレクション名（`waiwai_chunks`）など一部の実体名は旧名のままです（データ移行が絡むため別途対応）。
 
 ## 何ができるか
 
@@ -101,8 +99,8 @@ Botをサーバーから外すと、その `guild_id` のデータは削除ジ�
 ### 2. 設定ファイル作成
 
 ```bash
-git clone https://github.com/aigamoid/waiwai-oracle.git
-cd waiwai-oracle
+git clone https://github.com/aigamoid/remember.git
+cd remember
 
 cp .env.example .env
 cp config.yml.example config.yml

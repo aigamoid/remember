@@ -27,7 +27,7 @@ from src.rag.prompts import (
 )
 from src.usage import compute_cost
 
-GUILD_ID = "1464840187061338317"
+GUILD_ID = os.environ.get("AB_GUILD_ID", "")  # 実データのある guild（環境変数で指定）
 GUILD_NAME = "わいわい"
 QUESTIONS = [
     "みんな最近どんな話してた？",

@@ -35,7 +35,7 @@ from src.rag.prompts import (
 from src.usage import compute_cost
 from src.vectorstore import VectorStore
 
-GUILD_ID = "1464840187061338317"  # 実データのある guild（31チャンク）
+GUILD_ID = os.environ.get("AB_GUILD_ID", "")  # 実データのある guild（環境変数で指定）
 GUILD_NAME = "わいわい"
 
 # ---- バリアント別プロンプト --------------------------------------------------
